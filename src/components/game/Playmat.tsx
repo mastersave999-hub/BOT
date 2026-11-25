@@ -18,7 +18,7 @@ import {
 import { calculateNetPower } from '../../engine/layers';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
-  CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info
+  CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info, List
 } from 'lucide-react';
 
 interface PlaymatProps {
@@ -69,6 +69,105 @@ interface PendingCostPayment {
   selectedDiscardIds: string[];
 }
 
+const PHASE_STEPS = [
+  { phase: 'DRAW', label: 'DRAW', description: 'จั่ว' },
+  { phase: 'MAIN', label: 'MAIN', description: 'หลัก' },
+  { phase: 'BATTLE', label: 'BATTLE', description: 'ต่อสู้' },
+  { phase: 'END', label: 'END', description: 'จบ' }
+] as const;
+
+interface PhaseTrackerProps {
+  currentPhase: GameState['currentPhase'];
+  turnNumber: number;
+  activePlayerName: string;
+  isMyTurn: boolean;
+}
+
+const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, activePlayerName, isMyTurn }) => {
+  const currentIndex = PHASE_STEPS.findIndex(step => step.phase === currentPhase);
+
+  return (
+    <section
+      aria-label="ลำดับ Phase ของเกม"
+      className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-xl border border-amber-500/30 bg-slate-950/95 px-2 py-1.5 shadow-lg backdrop-blur sm:px-4"
+    >
+      <div aria-live="polite" className="mb-1 flex items-center justify-center gap-2 text-[9px] sm:text-[10px]">
+        <span className={`rounded-full px-2 py-0.5 font-bold ${isMyTurn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-300'}`}>
+          {isMyTurn ? 'YOUR TURN' : 'OPPONENT TURN'}
+        </span>
+        <span className="truncate font-semibold text-slate-200">{activePlayerName || 'ผู้เล่น'} · TURN {turnNumber}</span>
+      </div>
+      <ol className="grid grid-cols-4 gap-1" aria-label="DRAW, MAIN, BATTLE, END">
+        {PHASE_STEPS.map((step, index) => {
+          const isCurrent = index === currentIndex;
+          const isCompleted = index < currentIndex;
+          return (
+            <li
+              key={step.phase}
+              aria-current={isCurrent ? 'step' : undefined}
+              className={`flex min-w-0 items-center justify-center gap-1 rounded-md border px-1 py-1 text-center transition-colors sm:gap-1.5 ${
+                isCurrent
+                  ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.25)]'
+                  : isCompleted
+                    ? 'border-emerald-700/60 bg-emerald-950/50 text-emerald-300'
+                    : 'border-slate-800 bg-slate-900/60 text-slate-500'
+              }`}
+            >
+              {isCompleted ? (
+                <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <span className={`h-2 w-2 shrink-0 rounded-full ${isCurrent ? 'bg-slate-950' : 'bg-slate-700'}`} aria-hidden="true" />
+              )}
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate text-[9px] font-extrabold tracking-wide sm:text-[10px]">{step.label}</span>
+                <span className={`block truncate text-[8px] ${isCurrent ? 'text-slate-800' : 'opacity-75'}`}>{step.description}</span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+};
+
+interface LifeCardTileProps {
+  card: CardInstance;
+  index: number;
+  compact?: boolean;
+  onInspect: () => void;
+}
+
+const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, compact = false, onInspect }) => (
+  <button
+    type="button"
+    disabled={!card.isFaceUp}
+    aria-label={card.isFaceUp ? `Revealed LIFE card: ${card.card.name}. Inspect card` : `Face-down LIFE card ${index + 1}`}
+    onClick={onInspect}
+    className={`relative shrink-0 [perspective:700px] transition-all duration-500 ${compact ? 'h-8 w-6' : card.isFaceUp ? 'h-16 w-12 border-emerald-400 shadow-lg shadow-emerald-900/40 sm:h-20 sm:w-14' : 'h-8 w-12 sm:h-9 sm:w-14'} rounded border border-slate-700 text-[8px] font-bold disabled:cursor-default`}
+  >
+    <span className={`absolute inset-0 overflow-hidden rounded ${card.isFaceUp ? 'life-card-flip' : ''}`}>
+      <span
+        aria-hidden="true"
+        className={`absolute inset-0 flex items-center justify-center rounded bg-slate-900 text-emerald-400 transition-opacity duration-150 ${card.isFaceUp ? 'opacity-0' : 'opacity-100'}`}
+      >
+        LIFE #{index + 1}
+      </span>
+      <span className={`absolute inset-0 overflow-hidden rounded transition-opacity duration-300 ${card.isFaceUp ? 'opacity-100' : 'opacity-0'}`}>
+        <img
+          src={card.card.imageUrl}
+          alt=""
+          crossOrigin="anonymous"
+          referrerPolicy="no-referrer"
+          loading="lazy"
+          className="h-full w-full rounded object-cover"
+          onError={event => { event.currentTarget.style.visibility = 'hidden'; }}
+        />
+        <span className="absolute inset-x-0 bottom-0 truncate bg-slate-950/90 px-0.5 py-0.5 text-center text-[7px] text-white">{card.card.name}</span>
+      </span>
+    </span>
+  </button>
+);
+
 const KEYWORD_LEGEND = [
   { kw: 'จุติ', color: 'bg-blue-600', desc: 'เมื่อ Avatar ตัวนี้ถูกอัญเชิญลงสนามแบบจ่าย Cost จะเกิดผลตามที่กำหนด' },
   { kw: 'คำสั่งเสีย', color: 'bg-indigo-700', desc: 'เมื่อ Avatar ตัวนี้ถูกทำลายลงนรก จะเกิดผลตามที่กำหนด' },
@@ -89,6 +188,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   const [pendingAbility, setPendingAbility] = useState<PendingAbilityAction | null>(null);
   const [pendingCost, setPendingCost] = useState<PendingCostPayment | null>(null);
   const [showKeywordsModal, setShowKeywordsModal] = useState<boolean>(false);
+  const [showEventLog, setShowEventLog] = useState<boolean>(false);
   const [showHellModal, setShowHellModal] = useState<'ME' | 'OPPONENT' | null>(null);
   const [winnerName, setWinnerName] = useState<string | null>(null);
   const [opponentLeft, setOpponentLeft] = useState<boolean>(false);
@@ -111,6 +211,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     gameState.mode === 'AD_MUA' && gameState.turnNumber < Object.keys(gameState.players).length;
   const leftPlayerIdsRef = useRef<Set<string>>(new Set());
   const [leftTick, setLeftTick] = useState<number>(0);
+
+  useEffect(() => {
+    if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
+  }, []);
 
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
@@ -727,7 +831,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   return (
     <div className="flex flex-col h-[100dvh] w-screen bg-slate-950 select-none overflow-hidden text-slate-200 font-kanit">
       {/* Top Header Bar */}
-      <header className="shrink-0 h-11 bg-slate-900 border-b border-slate-800 px-3 flex items-center justify-between z-30">
+      <header className="shrink-0 min-h-11 bg-slate-900 border-b border-slate-800 px-2 sm:px-3 py-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 z-30 sm:flex-nowrap">
         <div className="flex items-center space-x-2">
           <span className="font-extrabold text-amber-500 tracking-wider flex items-center gap-1 text-xs sm:text-sm">
             <Flame className="w-4 h-4 text-red-500 fill-red-500" />
@@ -738,24 +842,19 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
           </span>
         </div>
 
-        {/* Turn Order Indicator (Matches Playmat Bottom-Right Turn Order) */}
-        <div className="hidden md:flex items-center space-x-1 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[10px] font-bold">
-          {(['DRAW', 'MAIN', 'BATTLE', 'END'] as const).map((ph, idx) => (
-            <React.Fragment key={ph}>
-              <span
-                className={`px-2 py-0.5 rounded transition ${
-                  gameState.currentPhase === ph ? 'bg-amber-500 text-slate-950 shadow-sm' : 'text-slate-500'
-                }`}
-              >
-                {ph} PHASE
-              </span>
-              {idx < 3 && <span className="text-slate-700">→</span>}
-            </React.Fragment>
-          ))}
-        </div>
-
         {/* Controls */}
         <div className="flex items-center space-x-1.5">
+          <button
+            type="button"
+            onClick={() => setShowEventLog(open => !open)}
+            aria-label={showEventLog ? 'Close event log' : 'Open event log'}
+            aria-controls={showEventLog ? 'event-log' : undefined}
+            aria-expanded={showEventLog}
+            className={`px-2 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1 border transition ${showEventLog ? 'bg-amber-500/15 border-amber-500/40 text-amber-200' : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'}`}
+          >
+            <List className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Logs</span>
+          </button>
           <button
             onClick={() => setShowKeywordsModal(true)}
             className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium flex items-center gap-1 border border-slate-700"
@@ -938,38 +1037,29 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                   {opponent.lifeDeck.map((lifeCard, idx) => (
                     <div
                       key={lifeCard.instanceId || idx}
-                      role={lifeCard.isFaceUp ? 'button' : undefined}
-                      tabIndex={lifeCard.isFaceUp ? 0 : undefined}
-                      aria-label={lifeCard.isFaceUp
-                        ? `Revealed LIFE card: ${lifeCard.card.name}. Inspect card`
-                        : `Opponent face-down LIFE card ${idx + 1}`}
-                      title={lifeCard.isFaceUp ? lifeCard.card.name : 'Face-down LIFE card'}
-                      onClick={(e) => {
-                        if (lifeCard.isFaceUp) {
-                          e.stopPropagation();
-                          setInspectedCard(lifeCard);
-                        }
+                      onClick={event => {
+                        if (lifeCard.isFaceUp) event.stopPropagation();
                       }}
-                      onKeyDown={(e) => {
-                        if (lifeCard.isFaceUp && (e.key === 'Enter' || e.key === ' ')) {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setInspectedCard(lifeCard);
-                        }
-                      }}
-                      className={`w-6 h-8 rounded border text-[8px] flex items-center justify-center font-bold ${
-                        lifeCard.isFaceUp
-                          ? 'bg-red-950/70 border-red-500 text-red-200 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-300'
-                          : 'bg-slate-900 border-slate-700 text-amber-500'
-                      }`}
                     >
-                      {lifeCard.isFaceUp ? 'หงาย' : 'LIFE'}
+                      <LifeCardTile
+                        card={lifeCard}
+                        index={idx}
+                        compact
+                        onInspect={() => setInspectedCard(lifeCard)}
+                      />
                     </div>
                   ))}
                 </div>
               </div>
             </div>
           </div>
+
+          <PhaseTracker
+            currentPhase={gameState.currentPhase}
+            turnNumber={gameState.turnNumber}
+            activePlayerName={gameState.players[activePlayerId]?.name ?? ''}
+            isMyTurn={isMyTurn}
+          />
 
           {/* ==================== SHARED CENTER & MY TOP ROW (Matches Playmat Top Row!) ==================== */}
           {/* Construct Zone (Left 37%) | Land Magic Zone (Center 26%) | Dark Dimension (Right 37%) */}
@@ -1036,20 +1126,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
                 <div className="flex flex-col gap-1 items-center my-auto py-1">
                   {me.lifeDeck.map((lifeCard, idx) => (
-                    <button
+                    <LifeCardTile
                       key={lifeCard.instanceId || idx}
-                      type="button"
-                      disabled={!lifeCard.isFaceUp}
-                      aria-label={lifeCard.isFaceUp ? `Revealed LIFE card: ${lifeCard.card.name}. Inspect card` : `Face-down LIFE card ${idx + 1}`}
-                      onClick={() => setInspectedCard(lifeCard)}
-                      className={`w-12 sm:w-14 h-7 sm:h-8 rounded border flex items-center justify-center text-[9px] font-bold transition disabled:cursor-default ${
-                        lifeCard.isFaceUp
-                          ? 'bg-red-950/70 border-red-500 text-red-200 cursor-pointer'
-                          : 'bg-slate-900 border-emerald-700/60 text-emerald-400'
-                      }`}
-                    >
-                      {lifeCard.isFaceUp ? lifeCard.card.name.slice(0, 6) : `LIFE #${idx + 1}`}
-                    </button>
+                      card={lifeCard}
+                      index={idx}
+                      onInspect={() => setInspectedCard(lifeCard)}
+                    />
                   ))}
                 </div>
 
@@ -1172,19 +1254,40 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
           </div>
         </div>
 
-        {/* Right Side Panel: Event Log */}
-        <aside className="w-64 bg-slate-900 border-l border-slate-800 hidden lg:flex flex-col shrink-0">
-          <div className="h-9 px-3 border-b border-slate-800 flex items-center text-xs font-bold text-slate-300">
-            บันทึกเหตุการณ์ (Event Log)
-          </div>
-          <div className="flex-1 p-2.5 overflow-y-auto space-y-1.5 text-[11px]">
-            {gameState.eventLog.slice().reverse().map((ev, i) => (
-              <div key={i} className="p-2 rounded-lg bg-slate-950/90 border border-slate-800/80 text-slate-300 leading-relaxed">
-                {ev.description}
+        {showEventLog && (
+          <>
+            <button
+              type="button"
+              aria-label="ปิดบันทึกเหตุการณ์"
+              onClick={() => setShowEventLog(false)}
+              className="absolute inset-0 z-30 bg-slate-950/55 lg:hidden"
+            />
+            <aside
+              id="event-log"
+              aria-label="บันทึกเหตุการณ์"
+              className="absolute inset-y-0 right-0 z-40 flex w-[min(22rem,92vw)] shrink-0 flex-col border-l border-slate-800 bg-slate-900 shadow-2xl lg:relative lg:inset-auto lg:z-auto lg:w-64 lg:shadow-none"
+            >
+              <div className="h-9 shrink-0 px-3 border-b border-slate-800 flex items-center justify-between text-xs font-bold text-slate-300">
+                <span>บันทึกเหตุการณ์ (Event Log)</span>
+                <button
+                  type="button"
+                  aria-label="ซ่อนบันทึกเหตุการณ์"
+                  onClick={() => setShowEventLog(false)}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
-            ))}
-          </div>
-        </aside>
+              <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2.5 text-[11px]">
+                {gameState.eventLog.slice().reverse().map((ev, i) => (
+                  <div key={`${ev.timestamp}-${i}`} className="rounded-lg border border-slate-800/80 bg-slate-950/90 p-2 leading-relaxed text-slate-300">
+                    {ev.description}
+                  </div>
+                ))}
+              </div>
+            </aside>
+          </>
+        )}
       </main>
 
       {/* Notification Banner */}
