@@ -26,10 +26,13 @@ export async function POST(request: NextRequest) {
     return jsonResponse({ success: false, message: 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน' }, 400);
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !publishableKey || !serviceRoleKey) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
+  if (!supabaseUrl || !publishableKey) {
     return jsonResponse({ success: false, message: 'ระบบบัญชียังไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง' }, 503);
   }
 
@@ -37,6 +40,9 @@ export async function POST(request: NextRequest) {
     const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier);
     let email = isEmail ? identifier.toLowerCase() : '';
     if (!isEmail) {
+      if (!serviceRoleKey) {
+        return jsonResponse({ success: false, message: 'ระบบบัญชียังไม่พร้อมใช้งาน กรุณาลองใหม่ภายหลัง' }, 503);
+      }
       const admin = createAdminClient(supabaseUrl, serviceRoleKey, {
         auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
       });
