@@ -218,15 +218,19 @@ export async function saveDeckForUser(
   deckName: string,
   mainDeck: Card[],
   lifeDeck: Card[],
+  deckId?: string | null,
 ): Promise<UserAccount | null> {
-  const newDeck: SavedDeck = {
-    id: crypto.randomUUID(),
+  const existingDeck = deckId ? user.savedDecks.find((deck) => deck.id === deckId) : undefined
+  const savedDeck: SavedDeck = {
+    id: existingDeck?.id ?? crypto.randomUUID(),
     name: deckName.trim() || `เด็คใหม่ ${user.savedDecks.length + 1}`,
-    createdAt: Date.now(),
+    createdAt: existingDeck?.createdAt ?? Date.now(),
     mainDeck,
     lifeDeck,
   }
-  const savedDecks = [newDeck, ...user.savedDecks]
+  const savedDecks = existingDeck
+    ? user.savedDecks.map((deck) => deck.id === existingDeck.id ? savedDeck : deck)
+    : [savedDeck, ...user.savedDecks]
   const supabase = createClient()
   const { error } = await supabase
     .from('profiles')

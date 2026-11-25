@@ -13,10 +13,11 @@ import {
 
 interface DeckBuilderProps {
   onBack: () => void;
-  onSaveDeck: (mainDeck: Card[], lifeDeck: Card[], deckName: string) => void;
+  onSaveDeck: (mainDeck: Card[], lifeDeck: Card[], deckName: string, deckId: string | null) => void;
   initialMainDeck?: Card[];
   initialLifeDeck?: Card[];
   currentDeckName?: string;
+  currentDeckId?: string | null;
 }
 
 // Resilient Card Image Component with loading state and Thai TCG stylized fallback
@@ -76,16 +77,11 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
   onSaveDeck,
   initialMainDeck,
   initialLifeDeck,
-  currentDeckName = 'เด็คหลักของฉัน'
+  currentDeckName = 'เด็คหลักของฉัน',
+  currentDeckId = null
 }) => {
-  // If user passes empty deck, preload default valid starter deck so they see cards immediately
-  const defaultMain = (initialMainDeck && initialMainDeck.length > 0)
-    ? initialMainDeck
-    : (starterDeckData.mainDeck as Card[]);
-
-  const defaultLife = (initialLifeDeck && initialLifeDeck.length > 0)
-    ? initialLifeDeck
-    : (starterDeckData.lifeDeck as Card[]);
+  const defaultMain = initialMainDeck ?? (starterDeckData.mainDeck as Card[]);
+  const defaultLife = initialLifeDeck ?? (starterDeckData.lifeDeck as Card[]);
 
   const [deckName, setDeckName] = useState<string>(currentDeckName);
   const [mainDeck, setMainDeck] = useState<Card[]>(defaultMain);
@@ -214,18 +210,19 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
   };
 
   const handleAutoFill = () => {
-    const pool = allCards.filter(c => !c.isBias && c.type !== 'Token');
+    const mainPool = allCards.filter(c => !c.isBias && c.type !== 'Token' && c.type !== 'Life');
+    const lifePool = allCards.filter(c => !c.isBias && c.type === 'Life');
     const newMain = [...mainDeck];
     const newLife = [...lifeDeck];
 
     // 1. Ensure exactly 1 Only #1 card
     if (!newMain.some(c => c.isOnlyOne)) {
-      const onlyOneCard = pool.find(c => c.isOnlyOne);
+      const onlyOneCard = mainPool.find(c => c.isOnlyOne);
       if (onlyOneCard) newMain.push(onlyOneCard);
     }
 
     // 2. Fill Main Deck up to 50
-    for (const card of pool) {
+    for (const card of mainPool) {
       if (newMain.length >= 50) break;
       if (card.isOnlyOne) continue;
       const count = newMain.filter(c => c.name === card.name).length;
@@ -235,7 +232,7 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
     }
 
     // 3. Fill Life Deck up to 5 with unique names
-    for (const card of pool) {
+    for (const card of lifePool) {
       if (newLife.length >= 5) break;
       if (!newLife.some(c => c.name === card.name)) {
         newLife.push(card);
@@ -279,6 +276,8 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
                 type="text"
                 value={deckName}
                 onChange={(e) => setDeckName(e.target.value)}
+                aria-label="ชื่อเด็ค"
+                maxLength={40}
                 className="bg-transparent border-b border-slate-700 hover:border-amber-500 focus:border-amber-400 font-bold text-sm md:text-base text-amber-400 focus:outline-none max-w-[130px] sm:max-w-[180px]"
                 placeholder="ชื่อเด็ค..."
               />
@@ -330,7 +329,7 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
           </button>
           <button
             disabled={!validation.isValid}
-            onClick={() => onSaveDeck(mainDeck, lifeDeck, deckName)}
+            onClick={() => onSaveDeck(mainDeck, lifeDeck, deckName, currentDeckId)}
             className={`px-3 md:px-4 py-1.5 rounded-lg font-bold text-xs flex items-center gap-1.5 shadow transition ${
               validation.isValid
                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-950/50 cursor-pointer'

@@ -14,12 +14,12 @@ import {
 } from '../engine/multiplayer';
 import {
   getCurrentUser, logoutUser, saveDeckForUser,
-  deleteDeckForUser, type UserAccount
+  deleteDeckForUser, type SavedDeck, type UserAccount
 } from '../engine/authService';
 import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
-import { Swords, Users, Play, Library, Globe, User } from 'lucide-react';
+import { Swords, Users, Play, Library, Globe, User, Plus } from 'lucide-react';
 
 function createCardInstance(card: Card, ownerId: string, instanceId: string, isFaceUp = true): CardInstance {
   return {
@@ -116,6 +116,9 @@ export default function Home() {
 
   // Custom User Decks
   const [activeDeckName, setActiveDeckName] = useState<string>('เด็คเริ่มต้นทางการ');
+  const [activeDeckId, setActiveDeckId] = useState<string | null>(null);
+  const [guestDecks, setGuestDecks] = useState<SavedDeck[]>([]);
+  const deckSlots = user?.savedDecks ?? guestDecks;
   const [customMainDeck, setCustomMainDeck] = useState<Card[]>(starterDeckData.mainDeck as Card[]);
   const [customLifeDeck, setCustomLifeDeck] = useState<Card[]>(starterDeckData.lifeDeck as Card[]);
 
@@ -124,6 +127,7 @@ export default function Home() {
     loadedDeckUserId.current = user.id;
     const firstDeck = user.savedDecks[0];
     if (firstDeck) {
+      setActiveDeckId(firstDeck.id);
       setActiveDeckName(firstDeck.name);
       setCustomMainDeck(firstDeck.mainDeck);
       setCustomLifeDeck(firstDeck.lifeDeck);
@@ -136,27 +140,56 @@ export default function Home() {
     await mutateUser(null, { revalidate: false });
   };
 
-  const handleSaveDeck = async (main: Card[], life: Card[], deckName: string) => {
+  const handleSaveDeck = async (main: Card[], life: Card[], deckName: string, deckId: string | null) => {
     setCustomMainDeck(main);
     setCustomLifeDeck(life);
-    setActiveDeckName(deckName);
+    setActiveDeckName(deckName.trim() || `เด็คใหม่ ${deckSlots.length + 1}`);
     setAccountMessage(null);
 
     if (user) {
       try {
-        const updatedUser = await saveDeckForUser(user, deckName, main, life);
-        if (updatedUser) await mutateUser(updatedUser, { revalidate: false });
+        const updatedUser = await saveDeckForUser(user, deckName, main, life, deckId);
+        if (updatedUser) {
+          const savedDeck = deckId
+            ? updatedUser.savedDecks.find((deck) => deck.id === deckId)
+            : updatedUser.savedDecks[0];
+          setActiveDeckId(savedDeck?.id ?? null);
+          await mutateUser(updatedUser, { revalidate: false });
+        }
       } catch {
         setAccountMessage('บันทึกเด็คออนไลน์ไม่สำเร็จ กรุณาลองอีกครั้ง');
       }
+    } else {
+      const existingDeck = deckId ? guestDecks.find((deck) => deck.id === deckId) : undefined;
+      const savedDeck: SavedDeck = {
+        id: existingDeck?.id ?? crypto.randomUUID(),
+        name: deckName.trim() || `เด็คใหม่ ${guestDecks.length + 1}`,
+        createdAt: existingDeck?.createdAt ?? Date.now(),
+        mainDeck: main,
+        lifeDeck: life,
+      };
+      setGuestDecks((decks) => existingDeck
+        ? decks.map((deck) => deck.id === existingDeck.id ? savedDeck : deck)
+        : [savedDeck, ...decks]);
+      setActiveDeckId(savedDeck.id);
+      setActiveDeckName(savedDeck.name);
     }
     setCurrentView('HOME');
   };
 
-  const handleLoadSavedDeck = (deck: any) => {
+  const handleLoadSavedDeck = (deck: SavedDeck) => {
+    setActiveDeckId(deck.id);
     setActiveDeckName(deck.name);
     setCustomMainDeck(deck.mainDeck);
     setCustomLifeDeck(deck.lifeDeck);
+  };
+
+  const handleCreateDeck = () => {
+    setActiveDeckId(null);
+    setActiveDeckName(`เด็คใหม่ ${deckSlots.length + 1}`);
+    setCustomMainDeck([]);
+    setCustomLifeDeck([]);
+    setCurrentView('DECK_BUILDER');
   };
 
   const handleDeleteSavedDeck = async (deckId: string) => {
@@ -263,6 +296,7 @@ export default function Home() {
       <DeckBuilder
         onBack={() => setCurrentView('HOME')}
         currentDeckName={activeDeckName}
+        currentDeckId={activeDeckId}
         initialMainDeck={customMainDeck || []}
         initialLifeDeck={customLifeDeck || []}
         onSaveDeck={handleSaveDeck}
@@ -366,24 +400,42 @@ export default function Home() {
             </span>
           </div>
 
-          {user && user.savedDecks.length > 0 && (
-            <div className="flex items-center gap-1 overflow-x-auto max-w-full">
-              <span className="text-slate-500 text-[11px] shrink-0">เลือกเด็คของคุณ:</span>
-              {user.savedDecks.map(d => (
+          <div className="w-full space-y-2 pt-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-400 text-[11px]">ช่องจัดเด็คของคุณ <span className="text-slate-500">({deckSlots.length})</span></span>
+              {!user && <span className="text-[10px] text-slate-500">เข้าสู่ระบบเพื่อซิงก์ข้ามอุปกรณ์</span>}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+              {deckSlots.map((deck) => (
                 <button
-                  key={d.id}
-                  onClick={() => handleLoadSavedDeck(d)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-medium transition shrink-0 ${
-                    activeDeckName === d.name
-                      ? 'bg-amber-500 text-slate-950 font-bold'
-                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                  key={deck.id}
+                  type="button"
+                  aria-pressed={activeDeckId === deck.id}
+                  onClick={() => handleLoadSavedDeck(deck)}
+                  className={`min-w-0 rounded-lg border p-2 text-left transition ${
+                    activeDeckId === deck.id
+                      ? 'border-amber-500/70 bg-amber-500/10'
+                      : 'border-slate-800 bg-slate-950/60 hover:border-slate-600'
                   }`}
                 >
-                  {d.name}
+                  <span className={`block truncate text-[11px] font-bold ${activeDeckId === deck.id ? 'text-amber-300' : 'text-slate-200'}`}>
+                    {deck.name}
+                  </span>
+                  <span className="mt-1 block text-[10px] text-slate-500">
+                    Main {deck.mainDeck.length}/50 · LIFE {deck.lifeDeck.length}/5
+                  </span>
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={handleCreateDeck}
+                className="min-h-12 rounded-lg border border-dashed border-slate-700 bg-slate-950/30 p-2 text-slate-400 hover:border-amber-500/60 hover:text-amber-300 transition flex items-center justify-center gap-1.5 text-[11px] font-semibold"
+              >
+                <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                เพิ่มช่องจัดเด็ค
+              </button>
             </div>
-          )}
+          </div>
         </div>
 
         {/* Game Mode Cards */}
