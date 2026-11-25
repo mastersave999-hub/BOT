@@ -1,9 +1,24 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Battle of Talingchan Online | ศึกตลิ่งชัน ออนไลน์',
   description: 'Official Online Web Client for Thai Trading Card Game - Battle of Talingchan',
+  manifest: '/manifest.webmanifest',
+  applicationName: 'Battle of Talingchan',
+  appleWebApp: {
+    capable: true,
+    title: 'Battle of Talingchan',
+    statusBarStyle: 'black-translucent',
+  },
+  icons: {
+    icon: '/icons/app-icon.png',
+    apple: '/icons/app-icon.png',
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: '#020617',
 };
 
 export default function RootLayout({

@@ -20,6 +20,7 @@ import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
 import { Swords, Users, Play, Library, Globe, User, Plus } from 'lucide-react';
+import { PwaInstallButton } from '../components/PwaInstallButton';
 
 function createCardInstance(card: Card, ownerId: string, instanceId: string, isFaceUp = true): CardInstance {
   return {
@@ -349,7 +350,8 @@ export default function Home() {
         </div>
 
         {/* Top Nav Buttons & User Profile */}
-        <div className="flex items-center space-x-2 text-xs">
+        <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
+          <PwaInstallButton />
           <button
             onClick={() => setCurrentView('DECK_BUILDER')}
             className="px-2.5 sm:px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1.5 transition"
