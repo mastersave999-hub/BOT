@@ -69,6 +69,7 @@ export interface ReactionTrigger {
   targetInstanceId?: string;
   targetCardName?: string;
   sourceCardName?: string;
+  sourceInstanceId?: string;
 }
 
 export type DeferredReactionAction =
@@ -116,13 +117,23 @@ export interface PendingReactionCard {
   treatedAsReact: boolean;
 }
 
+export interface ReactionChainEntry extends PendingReactionCard {
+  targetAvatarId?: string;
+  respondedTo: ReactionTrigger;
+}
+
 export interface ReactionWindow {
   id: string;
   trigger: ReactionTrigger;
   turnOwnerId: string;
   priorityPlayerId: string;
   passedPlayerIds: string[];
-  /** Phase 1 allows one response per window; response chaining is reserved for Phase 2. */
+  /** The rulebook's turn-player-first pass order, rotated after each response. */
+  priorityOrder?: string[];
+  /** Reactions are stored in play order and resolve from the end of this array. */
+  chain?: ReactionChainEntry[];
+  /** Monotonic window version used to reject stale/duplicate network commands. */
+  revision?: number;
   pendingAction?: DeferredReactionAction;
   pendingReaction?: PendingReactionCard;
 }

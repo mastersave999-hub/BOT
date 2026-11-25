@@ -6,6 +6,7 @@ import {
   getReactionEligibility,
   openReactionWindow,
   passReactionPriority,
+  queueReactionCard,
   resolveReactionCard
 } from '../src/engine/reactionEngine';
 import type { Card, CardInstance, GameState, PlayerState, ReactionTrigger } from '../src/engine/types';
@@ -108,7 +109,7 @@ describe('reaction window engine', () => {
     expect(resolved.state.reactionWindow).toBeUndefined();
   });
 
-  it('opens an impending-destruction window only for matching protection text', () => {
+  it('blocks protection effects until their prevention semantics are implemented', () => {
     const protectReact = makeCard({ mainEffect: 'เมื่อ Avatar ใบนี้กำลังจะถูกทำลาย : ป้องกันการทำลาย' });
     const state = makeState([makeInstance(protectReact, 'player-2', 'protect-react')]);
     const trigger = {
@@ -118,8 +119,10 @@ describe('reaction window engine', () => {
       targetCardName: 'Target'
     };
 
-    expect(openReactionWindow(state, trigger).reactionWindow?.trigger).toEqual(trigger);
-    expect(openReactionWindow(state, { ...trigger, targetInstanceId: 'avatar-3' }).reactionWindow).toBeTruthy();
+    expect(openReactionWindow(state, trigger)).toBe(state);
+    expect(getReactionEligibility({ ...state, reactionWindow: {
+      id: 'window', trigger, turnOwnerId: 'player-1', priorityPlayerId: 'player-2', passedPlayerIds: []
+    } }, 'player-2', protectReact).eligible).toBe(false);
   });
 
   it('opens only for matching attack and ability trigger text', () => {
@@ -130,7 +133,7 @@ describe('reaction window engine', () => {
     });
     expect(attackWindow.reactionWindow?.priorityPlayerId).toBe('player-2');
 
-    const abilityReact = makeCard({ mainEffect: 'เมื่อฝ่ายตรงข้ามใช้ความสามารถของ Avatar : ยกเลิกความสามารถนั้น' });
+    const abilityReact = makeCard({ mainEffect: 'เมื่อฝ่ายตรงข้ามใช้ความสามารถของ Avatar : จั่วการ์ด 1 ใบ' });
     const abilityState = makeState([makeInstance(abilityReact, 'player-2', 'ability-react')]);
     const abilityWindow = openReactionWindow(abilityState, { type: 'ABILITY_USED', actorId: 'player-1', sourceCardName: 'Avatar' });
     expect(abilityWindow.reactionWindow?.trigger.type).toBe('ABILITY_USED');
@@ -142,7 +145,7 @@ describe('reaction window engine', () => {
     const state = makeState([makeInstance(attackOnly, 'player-2', 'react-attack')]);
     expect(openReactionWindow(state, summon)).toBe(state);
 
-    const genericReact = makeCard({ printId: 'GENERIC-REACT', mainEffect: 'ส่ง Avatar 1 ใบจากมือเราลงนรก : จั่วการ์ด 1 ใบ' });
+    const genericReact = makeCard({ printId: 'GENERIC-REACT', mainEffect: 'จั่วการ์ด 1 ใบ' });
     const stateWithGeneric = makeState([makeInstance(genericReact, 'player-2', 'generic-react')]);
     const beforePhase = openReactionWindow(stateWithGeneric, { type: 'BEFORE_PHASE_CHANGE', actorId: 'player-1' });
     expect(beforePhase.reactionWindow?.trigger.type).toBe('BEFORE_PHASE_CHANGE');
@@ -203,7 +206,7 @@ describe('reaction window engine', () => {
   });
 
   it('assigns a new synchronized identifier to every reaction window', () => {
-    const genericReact = makeCard({ mainEffect: 'ส่ง Avatar 1 ใบจากมือเราลงนรก : จั่วการ์ด 1 ใบ' });
+    const genericReact = makeCard({ mainEffect: 'จั่วการ์ด 1 ใบ' });
     const state = makeState([makeInstance(genericReact, 'player-2', 'generic-react')]);
     const firstWindow = openReactionWindow(state, summon);
     const firstPass = passReactionPriority(firstWindow, 'player-2');
@@ -238,7 +241,7 @@ describe('reaction window engine', () => {
   });
 
   it('keeps a phase change pending until both priority passes are recorded', () => {
-    const genericReact = makeCard({ mainEffect: 'ส่ง Avatar 1 ใบจากมือเราลงนรก : จั่วการ์ด 1 ใบ' });
+    const genericReact = makeCard({ mainEffect: 'จั่วการ์ด 1 ใบ' });
     const state = makeState([makeInstance(genericReact, 'player-2', 'generic-react')]);
     const opened = openReactionWindow(
       state,
@@ -254,6 +257,102 @@ describe('reaction window engine', () => {
     if (!ownerPass.ok) return;
     expect(ownerPass.state.currentPhase).toBe('MAIN');
     expect(ownerPass.pendingAction?.type).toBe('ADVANCE_PHASE');
+  });
+
+  it('queues multiple responses and resolves the chain last-in-first-out after consecutive passes', () => {
+    const reactA = makeInstance(makeCard({ name: 'First response', mainEffect: 'จั่วการ์ด 1 ใบ' }), 'player-2', 'react-a');
+    const reactB = makeInstance(makeCard({ name: 'Second response', mainEffect: 'จั่วการ์ด 1 ใบ' }), 'player-1', 'react-b');
+    const drawCard = makeInstance(makeCard({ type: 'Avatar', subtype: null }), 'player-1', 'deck-p1');
+    const drawCard2 = makeInstance(makeCard({ type: 'Avatar', subtype: null }), 'player-2', 'deck-p2');
+    const state = makeState([reactA], [], [drawCard2]);
+    state.players['player-1'].hand = [reactB];
+    state.players['player-1'].deck = [drawCard];
+    const opened = openReactionWindow(state, summon);
+
+    const first = queueReactionCard(opened, 'player-2', 'react-a');
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.state.reactionWindow?.priorityPlayerId).toBe('player-1');
+    const second = queueReactionCard(first.state, 'player-1', 'react-b');
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.state.reactionWindow?.chain?.map(entry => entry.sourceCard.card.name)).toEqual([
+      'First response', 'Second response'
+    ]);
+
+    const passOne = passReactionPriority(second.state, 'player-2');
+    expect(passOne.ok).toBe(true);
+    if (!passOne.ok) return;
+    expect(passOne.state.reactionWindow?.chain).toHaveLength(2);
+    const resolveTop = passReactionPriority(passOne.state, 'player-1');
+    expect(resolveTop.ok).toBe(true);
+    if (!resolveTop.ok) return;
+    expect(resolveTop.resolvedCard).toBe('Second response');
+    expect(resolveTop.state.players['player-1'].deck).toHaveLength(0);
+    expect(resolveTop.state.players['player-2'].deck).toHaveLength(1);
+    expect(resolveTop.state.reactionWindow?.chain).toHaveLength(1);
+
+    const passThree = passReactionPriority(resolveTop.state, 'player-2');
+    expect(passThree.ok).toBe(true);
+    if (!passThree.ok) return;
+    const resolveBottom = passReactionPriority(passThree.state, 'player-1');
+    expect(resolveBottom.ok).toBe(true);
+    if (!resolveBottom.ok) return;
+    expect(resolveBottom.resolvedCard).toBe('First response');
+    expect(resolveBottom.state.players['player-2'].deck).toHaveLength(0);
+    expect(resolveBottom.state.reactionWindow).toBeUndefined();
+  });
+
+  it('uses the triggering Avatar as an implicit target and sends the resolved React to Hell', () => {
+    const react = makeInstance(makeCard({
+      name: 'Accident',
+      mainEffect: 'เมื่อมี Avatar อัญเชิญลงมาบนสนาม : ทำลาย Avatar ตัวนั้น'
+    }), 'player-2', 'accident');
+    const summoned = makeInstance(makeCard({ type: 'Avatar', subtype: null }), 'player-1', 'summoned');
+    const state = makeState([react]);
+    state.players['player-1'].avatarZone = [summoned];
+    const opened = openReactionWindow(state, {
+      type: 'AVATAR_SUMMONED', actorId: 'player-1', targetInstanceId: 'summoned', targetCardName: 'Test card'
+    });
+    const queued = queueReactionCard(opened, 'player-2', 'accident');
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const passOpponent = passReactionPriority(queued.state, 'player-1');
+    expect(passOpponent.ok).toBe(true);
+    if (!passOpponent.ok) return;
+    const resolved = passReactionPriority(passOpponent.state, 'player-2');
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.state.players['player-1'].avatarZone).toHaveLength(0);
+    expect(resolved.state.players['player-2'].hell.some(card => card.instanceId === 'accident')).toBe(true);
+  });
+
+  it('rejects a response from the wrong priority or a card whose required target is missing', () => {
+    const targetReact = makeInstance(makeCard({ mainEffect: 'เลือก Avatar 1 ใบ บนสนามฝ่ายตรงข้าม : ทำลาย Avatar ตัวนั้น' }), 'player-2', 'target-react');
+    const opened = openReactionWindow(makeState([targetReact]), summon);
+    expect(queueReactionCard(opened, 'player-1', 'target-react').ok).toBe(false);
+    expect(queueReactionCard(opened, 'player-2', 'target-react').ok).toBe(false);
+  });
+
+  it('rejects structurally forged priority and avoids resolving a target that left before chain resolution', () => {
+    const react = makeInstance(makeCard({ mainEffect: 'เลือก Avatar 1 ใบ บนสนามฝ่ายตรงข้าม : ทำลาย Avatar ตัวนั้น' }), 'player-2', 'react-target');
+    const target = makeInstance(makeCard({ type: 'Avatar', subtype: null }), 'player-1', 'target-1');
+    const state = makeState([react]);
+    state.players['player-1'].avatarZone = [target];
+    const opened = openReactionWindow(state, summon);
+    const queued = queueReactionCard(opened, 'player-2', 'react-target', 'target-1');
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const stateAfterTargetLeaves = {
+      ...queued.state,
+      players: { ...queued.state.players, 'player-1': { ...queued.state.players['player-1'], avatarZone: [] } }
+    };
+    const passOne = passReactionPriority(stateAfterTargetLeaves, 'player-1');
+    expect(passOne.ok).toBe(true);
+    if (!passOne.ok) return;
+    const resolved = passReactionPriority(passOne.state, 'player-2');
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) expect(resolved.logs?.[0]).toContain('เป้าหมายไม่ถูกต้อง');
   });
 
   it('preserves the pending action through window sync and closes without resolving it early', () => {

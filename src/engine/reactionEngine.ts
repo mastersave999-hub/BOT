@@ -4,6 +4,7 @@ import type {
   CardInstance,
   DeferredReactionAction,
   GameState,
+  ReactionChainEntry,
   ReactionTrigger,
   ReactionTriggerType,
   ReactionWindow
@@ -86,6 +87,20 @@ function hasRequiredBoardCondition(card: Card, state: GameState, playerId: strin
   return true;
 }
 
+export function isReactionEffectExecutable(card: Card): boolean {
+  const effect = card.mainEffect ?? '';
+  const parsed = parseCardAbility(card);
+  const cancelsMagic = /ยกเลิกการใช้\s*Magic Card/.test(effect);
+  const hasSupportedEffect = cancelsMagic || parsed.drawCount > 0 || parsed.powerMod !== 0 ||
+    parsed.resetsPower || parsed.destroysTarget || parsed.destroysAllOpponentAvatars ||
+    parsed.bouncesTarget || parsed.summonsFromHell || parsed.recoversFromHell > 0;
+  if (!hasSupportedEffect) return false;
+  if (/ยกเลิก(?!การใช้\s*Magic Card)|ป้องกัน|สอดแนม|ค้นหา|สุ่ม|เปลี่ยนสภาพ|สับ Deck|เตะไข่/.test(effect)) return false;
+  if (/ทิ้ง\s*Avatar|ส่ง Avatar.*ลงนรก|เซ่นไหว้|นอน Avatar/.test(effect)) return false;
+  if (/(?:หาก|ถ้า)/.test(effect) && !/(?:หาก|ถ้า)บน Avatar Zone ฝ่ายเรามี\s*["“][^"”]+["”]/.test(effect)) return false;
+  return true;
+}
+
 export function isNormalMagicTreatedAsReact(card: Card): boolean {
   return card.type === 'Magic' && card.subtype === 'Normal' && REACT_MAGIC_TIMING_TEXT.test(card.mainEffect ?? '');
 }
@@ -99,20 +114,28 @@ export function canUseNormalMagicAsReactOnOwnBattle(state: GameState, playerId: 
     (state.players[playerId]?.reactMagicBudget.ownTurnRemaining ?? 0) > 0;
 }
 
+function getWindowPriorityOrder(state: GameState, window: ReactionWindow): string[] {
+  if (window.priorityOrder?.length === state.playerOrder.length) return window.priorityOrder;
+  const ownerIndex = state.playerOrder.indexOf(window.turnOwnerId);
+  return [...state.playerOrder.slice(ownerIndex + 1), ...state.playerOrder.slice(0, ownerIndex + 1)];
+}
+
+function rotatePriorityOrder(state: GameState, playerId: string): string[] {
+  const index = state.playerOrder.indexOf(playerId);
+  return [...state.playerOrder.slice(index + 1), ...state.playerOrder.slice(0, index + 1)];
+}
+
 export function isReactionWindowStructurallyValid(state: GameState): boolean {
   const window = state.reactionWindow;
   if (!window || window.turnOwnerId !== state.playerOrder[state.currentTurnPlayerIndex]) return false;
   if (!state.playerOrder.includes(window.priorityPlayerId)) return false;
   if (window.passedPlayerIds.includes(window.priorityPlayerId)) return false;
   if (window.pendingReaction && window.pendingReaction.playerId !== window.priorityPlayerId) return false;
-  const ownerIndex = state.playerOrder.indexOf(window.turnOwnerId);
-  const opponentsInPriorityOrder = [
-    ...state.playerOrder.slice(ownerIndex + 1),
-    ...state.playerOrder.slice(0, ownerIndex)
-  ];
-  if (window.passedPlayerIds.length > opponentsInPriorityOrder.length) return false;
-  const expectedPassed = opponentsInPriorityOrder.slice(0, window.passedPlayerIds.length);
-  const expectedPriority = opponentsInPriorityOrder[window.passedPlayerIds.length] ?? window.turnOwnerId;
+  const priorityOrder = getWindowPriorityOrder(state, window);
+  if (priorityOrder.length !== state.playerOrder.length || new Set(priorityOrder).size !== state.playerOrder.length) return false;
+  if (window.passedPlayerIds.length >= priorityOrder.length) return false;
+  const expectedPassed = priorityOrder.slice(0, window.passedPlayerIds.length);
+  const expectedPriority = priorityOrder[window.passedPlayerIds.length];
   const validPriority = window.priorityPlayerId === expectedPriority &&
     window.passedPlayerIds.every((playerId, index) => playerId === expectedPassed[index]);
   if (!validPriority) return false;
@@ -144,7 +167,12 @@ export function getReactionEligibility(
   const remainingReactUses = ownTurnUse
     ? player?.reactMagicBudget.ownTurnRemaining
     : player?.reactMagicBudget.opponentTurnRemaining;
-  if (window.pendingReaction || !player || (remainingReactUses ?? 0) < 1) {
+  if (
+    window.pendingReaction ||
+    !player ||
+    (remainingReactUses ?? 0) < 1 ||
+    (ownTurnUse && player.usedMagicTypesThisTurn.has('React'))
+  ) {
     return { eligible: false, reason: 'React Magic is unavailable at this time.', treatedAsReact: false };
   }
 
@@ -152,6 +180,9 @@ export function getReactionEligibility(
   const treatedAsReact = isNormalMagicTreatedAsReact(card);
   if (!isPrintedReact && !treatedAsReact) {
     return { eligible: false, reason: 'This card is not a React Magic.', treatedAsReact: false };
+  }
+  if (!isReactionEffectExecutable(card)) {
+    return { eligible: false, reason: 'This card effect is not implemented; the engine blocks unsupported effects rather than resolving them incorrectly.', treatedAsReact };
   }
 
   if (treatedAsReact) {
@@ -213,6 +244,9 @@ export function openReactionWindow(
     turnOwnerId,
     priorityPlayerId,
     passedPlayerIds: [],
+    priorityOrder: [...opponentPriorityOrder, turnOwnerId],
+    chain: [],
+    revision: 0,
     pendingAction
   };
   const candidateExists = state.playerOrder.some(playerId => {
@@ -226,9 +260,149 @@ export function openReactionWindow(
   return { ...state, reactionSequence: nextSequence, reactionWindow: provisional };
 }
 
+// Rule Book 3.2 pp.12,18: responses enter a LIFO chain and priority restarts with the turn player's opponent.
+export function queueReactionCard(
+  state: GameState,
+  playerId: string,
+  cardInstanceId: string,
+  targetAvatarId?: string
+): { ok: false; state: GameState; reason: string } | { ok: true; state: GameState } {
+  const window = state.reactionWindow;
+  if (!window || !isReactionWindowStructurallyValid(state)) {
+    return { ok: false, state, reason: 'No valid Reaction Window is open.' };
+  }
+  if (window.pendingReaction) return { ok: false, state, reason: 'A reaction card is already being resolved.' };
+  const player = state.players[playerId];
+  const sourceCard = player?.hand.find(card => card.instanceId === cardInstanceId);
+  if (!player || !sourceCard) return { ok: false, state, reason: 'The selected card is not in your hand.' };
+  const eligibility = getReactionEligibility(state, playerId, sourceCard.card);
+  if (!eligibility.eligible) return { ok: false, state, reason: eligibility.reason ?? 'This card is not eligible.' };
+
+  const parsed = parseCardAbility(sourceCard.card);
+  const requiresAvatarTarget = parsed.needsTargetAvatar || parsed.destroysTarget || parsed.bouncesTarget || parsed.resetsPower || parsed.powerMod !== 0;
+  const selectedTargetId = parsed.needsTargetAvatar ? targetAvatarId : targetAvatarId ?? window.trigger.targetInstanceId;
+  if (requiresAvatarTarget && !selectedTargetId) {
+    return { ok: false, state, reason: 'This React Magic requires a legal target.' };
+  }
+  if (selectedTargetId && requiresAvatarTarget) {
+    const targetOwnerId = state.playerOrder.find(id =>
+      state.players[id]?.avatarZone.some(avatar => avatar.instanceId === selectedTargetId)
+    );
+    if (!targetOwnerId) return { ok: false, state, reason: 'The selected Avatar is not on the field.' };
+    if (parsed.targetScope === 'OWN_AVATAR' && targetOwnerId !== playerId) {
+      return { ok: false, state, reason: 'The selected Avatar must be controlled by the reacting player.' };
+    }
+    if (parsed.targetScope === 'OPPONENT_AVATAR' && targetOwnerId === playerId) {
+      return { ok: false, state, reason: 'The selected Avatar must be controlled by an opponent.' };
+    }
+  }
+
+  const ownTurnUse = window.turnOwnerId === playerId;
+  const updatedPlayer = {
+    ...player,
+    hand: player.hand.filter(card => card.instanceId !== cardInstanceId),
+    magicZone: [...player.magicZone, { ...sourceCard, isFaceUp: true }],
+    reactMagicBudget: {
+      ...player.reactMagicBudget,
+      ownTurnRemaining: Math.max(0, player.reactMagicBudget.ownTurnRemaining - Number(ownTurnUse)),
+      opponentTurnRemaining: Math.max(0, player.reactMagicBudget.opponentTurnRemaining - Number(!ownTurnUse))
+    },
+    usedMagicTypesThisTurn: new Set(player.usedMagicTypesThisTurn)
+  };
+  if (ownTurnUse) updatedPlayer.usedMagicTypesThisTurn.add('React');
+  const chainEntry: ReactionChainEntry = {
+    playerId,
+    sourceCard,
+    treatedAsReact: eligibility.treatedAsReact,
+    targetAvatarId: selectedTargetId,
+    respondedTo: window.trigger
+  };
+  const priorityOrder = rotatePriorityOrder(state, playerId);
+  return {
+    ok: true,
+    state: {
+      ...state,
+      players: { ...state.players, [playerId]: updatedPlayer },
+      reactionWindow: {
+        ...window,
+        trigger: {
+          type: 'MAGIC_PLAYED',
+          actorId: playerId,
+          sourceCardName: sourceCard.card.name,
+          sourceInstanceId: sourceCard.instanceId
+        },
+        priorityOrder,
+        priorityPlayerId: priorityOrder[0],
+        passedPlayerIds: [],
+        chain: [...(window.chain ?? []), chainEntry],
+        revision: (window.revision ?? 0) + 1
+      }
+    }
+  };
+}
+
 export type ReactionPassResult =
   | { ok: false; state: GameState; reason: string }
-  | { ok: true; state: GameState; pendingAction?: ReactionWindow['pendingAction'] };
+  | { ok: true; state: GameState; pendingAction?: ReactionWindow['pendingAction']; logs?: string[]; resolvedCard?: string };
+
+function sendResolvedMagicToHell(state: GameState, playerId: string, instance: CardInstance): GameState {
+  const player = state.players[playerId];
+  if (!player) return state;
+  return {
+    ...state,
+    players: {
+      ...state.players,
+      [playerId]: {
+        ...player,
+        magicZone: player.magicZone.filter(card => card.instanceId !== instance.instanceId),
+        hell: player.hell.some(card => card.instanceId === instance.instanceId)
+          ? player.hell
+          : [...player.hell, instance]
+      }
+    }
+  };
+}
+
+function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: ReactionChainEntry) {
+  const parsed = parseCardAbility(entry.sourceCard.card);
+  const requiresAvatarTarget = parsed.needsTargetAvatar || parsed.destroysTarget || parsed.bouncesTarget || parsed.resetsPower || parsed.powerMod !== 0;
+  const targetOwnerId = entry.targetAvatarId
+    ? state.playerOrder.find(id => state.players[id]?.avatarZone.some(avatar => avatar.instanceId === entry.targetAvatarId))
+    : undefined;
+  const targetIsLegal = !requiresAvatarTarget || (!!targetOwnerId &&
+    (parsed.targetScope !== 'OWN_AVATAR' || targetOwnerId === entry.playerId) &&
+    (parsed.targetScope !== 'OPPONENT_AVATAR' || targetOwnerId !== entry.playerId));
+  if (!targetIsLegal) {
+    return {
+      state: sendResolvedMagicToHell(state, entry.playerId, entry.sourceCard),
+      logs: [`${entry.sourceCard.card.name}: เป้าหมายไม่ถูกต้องหรือไม่อยู่บนสนาม ผลทั้งหมดจึงไม่ทำงาน`]
+    };
+  }
+
+  const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card/.test(entry.sourceCard.card.mainEffect ?? '');
+  let nextState = state;
+  let chain = [...(window.chain ?? [])];
+  let pendingAction = window.pendingAction;
+  if (cancelsPlayedMagic && entry.respondedTo.type === 'MAGIC_PLAYED' && entry.respondedTo.sourceInstanceId) {
+    const chainIndex = chain.findIndex(item => item.sourceCard.instanceId === entry.respondedTo.sourceInstanceId);
+    const canceledEntry = chain[chainIndex];
+    if (chainIndex !== -1 && canceledEntry) {
+      chain = chain.filter((_, index) => index !== chainIndex);
+      nextState = sendResolvedMagicToHell(nextState, canceledEntry.playerId, canceledEntry.sourceCard);
+    } else if (pendingAction?.type === 'RESOLVE_MAGIC' && pendingAction.sourceCard.instanceId === entry.respondedTo.sourceInstanceId) {
+      nextState = sendResolvedMagicToHell(nextState, pendingAction.actorId, pendingAction.sourceCard);
+      pendingAction = undefined;
+    }
+  }
+
+  const result = executeCardAbility(nextState, entry.playerId, entry.sourceCard, 'MAGIC_CAST', entry.targetAvatarId);
+  return {
+    state: sendResolvedMagicToHell(result.state, entry.playerId, entry.sourceCard),
+    logs: result.logs,
+    chain,
+    pendingAction
+  };
+}
 
 export function beginReactionCard(
   state: GameState,
@@ -329,17 +503,59 @@ export function passReactionPriority(state: GameState, playerId: string): Reacti
 
   const passedPlayerIds = [...window.passedPlayerIds, playerId];
   const nextPlayerId = nextEligiblePriority(state, { ...window, passedPlayerIds });
-  if (!nextPlayerId) {
+  if (nextPlayerId) {
+    return {
+      ok: true,
+      state: {
+        ...state,
+        reactionWindow: { ...window, priorityPlayerId: nextPlayerId, passedPlayerIds, revision: (window.revision ?? 0) + 1 }
+      }
+    };
+  }
+
+  const chain = [...(window.chain ?? [])];
+  const top = chain.pop();
+  if (!top) {
     const { reactionWindow: _reactionWindow, ...closedState } = state;
     return { ok: true, state: closedState, pendingAction: window.pendingAction };
   }
 
+  const resolved = resolveQueuedReaction(state, { ...window, chain }, top);
+  const remainingChain = 'chain' in resolved ? resolved.chain : chain;
+  const pendingAction = 'pendingAction' in resolved ? resolved.pendingAction : window.pendingAction;
+  const logs = resolved.logs;
+  if (remainingChain.length > 0) {
+    const priorityOrder = rotatePriorityOrder(state, top.playerId);
+    return {
+      ok: true,
+      resolvedCard: top.sourceCard.card.name,
+      logs,
+      state: {
+        ...resolved.state,
+        reactionWindow: {
+          ...window,
+          trigger: top.respondedTo,
+          priorityOrder,
+          priorityPlayerId: priorityOrder[0],
+          passedPlayerIds: [],
+          chain: remainingChain,
+          revision: (window.revision ?? 0) + 1
+        }
+      }
+    };
+  }
+
+  const shouldCancelOriginal = window.pendingAction?.type === 'RESOLVE_MAGIC' &&
+    top.respondedTo.type === 'MAGIC_PLAYED' &&
+    top.respondedTo.sourceInstanceId === window.pendingAction.sourceCard.instanceId &&
+    /ยกเลิกการใช้\s*Magic Card/.test(top.sourceCard.card.mainEffect ?? '');
+  const { reactionWindow: _reactionWindow, ...closedState } = resolved.state;
   return {
     ok: true,
-    state: {
-      ...state,
-      reactionWindow: { ...window, priorityPlayerId: nextPlayerId, passedPlayerIds }
-    }
+    resolvedCard: top.sourceCard.card.name,
+    logs,
+    state: closedState,
+    pendingAction: shouldCancelOriginal ? undefined : pendingAction
   };
 }
 

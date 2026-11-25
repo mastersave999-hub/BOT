@@ -1,5 +1,22 @@
 import type { Card, GameState } from './types';
 
+const HIDDEN_PRIVATE_CARD: Card = {
+  printId: 'hidden-private-card',
+  name: 'Hidden card',
+  type: 'Token',
+  soi: 1,
+  cost: 0,
+  gem: 0,
+  power: 0,
+  color: 'ไร้สี',
+  rarity: 'C',
+  mainEffect: '',
+  isOnlyOne: false,
+  isBias: false,
+  isCollab: false,
+  imageUrl: 'https://cdn.bottcg.com/cards/card-back.png'
+};
+
 const FACE_DOWN_LIFE_CARD: Card = {
   printId: 'hidden-life-card',
   name: 'Face-down LIFE',
@@ -50,6 +67,8 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
           ? player
           : {
               ...player,
+              hand: player.hand.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
+              deck: player.deck.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
               lifeDeck: player.lifeDeck.map(card =>
                 card.isFaceUp ? card : { ...card, card: FACE_DOWN_LIFE_CARD }
               )
@@ -57,6 +76,43 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
       ])
     )
   };
+}
+
+export function restoreHiddenZonesFromCanonical(
+  incoming: GameState,
+  canonical: GameState,
+  senderPlayerId: string
+): GameState {
+  const players = { ...incoming.players };
+  for (const [playerId, incomingPlayer] of Object.entries(incoming.players)) {
+    if (playerId === senderPlayerId) continue;
+    const knownPlayer = canonical.players[playerId];
+    if (!knownPlayer) continue;
+    const knownInstances = new Map<string, (typeof knownPlayer.hand)[number]>();
+    const collect = (cards: typeof knownPlayer.hand) => cards.forEach(card => knownInstances.set(card.instanceId, card));
+    collect(knownPlayer.hand);
+    collect(knownPlayer.deck);
+    collect(knownPlayer.lifeDeck);
+    collect(knownPlayer.avatarZone);
+    collect(knownPlayer.constructZone);
+    collect(knownPlayer.magicZone);
+    collect(knownPlayer.hell);
+    collect(knownPlayer.darkDimension);
+    const restoreZone = (cards: typeof incomingPlayer.hand) => cards.map(card => {
+      const known = knownInstances.get(card.instanceId);
+      return known ? { ...known, isFaceUp: card.isFaceUp } : { ...card, card: HIDDEN_PRIVATE_CARD };
+    });
+    players[playerId] = {
+      ...incomingPlayer,
+      hand: restoreZone(incomingPlayer.hand),
+      deck: restoreZone(incomingPlayer.deck),
+      lifeDeck: incomingPlayer.lifeDeck.map(card => {
+        const known = knownPlayer.lifeDeck.find(item => item.instanceId === card.instanceId);
+        return known ? { ...known, isFaceUp: card.isFaceUp } : { ...card, card: FACE_DOWN_LIFE_CARD };
+      })
+    };
+  }
+  return { ...incoming, players };
 }
 
 export type RoomMode = 'DUEL' | 'AD_MUA';
@@ -67,6 +123,30 @@ export interface PlayerSetup {
   lifeDeck: Card[];
 }
 
+export interface ReactionCommand {
+  kind: 'PASS' | 'PLAY';
+  playerId: string;
+  windowId: string;
+  expectedRevision?: number;
+  commandId?: string;
+  cardInstanceId?: string;
+  targetInstanceId?: string;
+}
+
+export function isReactionCommandCurrent(
+  state: GameState,
+  command: ReactionCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const window = state.reactionWindow;
+  return !!window &&
+    Number.isInteger(window.revision) &&
+    command.playerId === authenticatedPlayerId &&
+    command.windowId === window.id &&
+    command.expectedRevision === window.revision &&
+    window.priorityPlayerId === authenticatedPlayerId;
+}
+
 export type NetMessage =
   | { type: 'HELLO'; setup: PlayerSetup }
   | { type: 'ROOM'; mode: RoomMode; capacity: number; names: string[] }
@@ -75,13 +155,8 @@ export type NetMessage =
   | { type: 'SYNC'; state: GameState; winner: string | null }
   | {
       type: 'REACTION_COMMAND';
-      command: {
-        kind: 'PASS' | 'PLAY';
-        playerId: string;
-        windowId: string;
-        cardInstanceId?: string;
-        targetInstanceId?: string;
-      };
+    command: ReactionCommand;
+
     }
   | { type: 'PING' }
   | { type: 'LEAVE' };
@@ -302,9 +377,7 @@ function createHostLink(guests: GuestEntry[]): RoomLink {
 
   guests.forEach(guest => {
     guest.link.onMessage(msg => {
-      const hostView = msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
-        : msg;
+      const hostView = msg;
       if (messageListeners.size === 0) {
         buffer.push({ message: hostView, senderPlayerId: guest.playerId });
         return;
@@ -558,9 +631,7 @@ export function joinRoom(
           return 'done';
         }
         return 'pass';
-      }, msg => msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
-        : msg);
+      });
 
       link.onClose(() => fail('การเชื่อมต่อกับห้องถูกตัด'));
 

@@ -2,17 +2,21 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { GameState, CardInstance, MagicSubtype, DeferredReactionAction } from '../../engine/types';
-import { redactLifeCardsForViewer, type RoomLink } from '../../engine/multiplayer';
 import {
-  beginReactionCard,
+  isReactionCommandCurrent,
+  redactLifeCardsForViewer,
+  restoreHiddenZonesFromCanonical,
+  type RoomLink
+} from '../../engine/multiplayer';
+import {
   canUseNormalMagicAsReactOnOwnBattle,
+  queueReactionCard,
   getEligibleReactionCards,
   getReactionEligibility,
   isReactionWindowStructurallyValid,
   isNormalMagicTreatedAsReact,
   openReactionWindow,
-  passReactionPriority,
-  resolveReactionCard
+  passReactionPriority
 } from '../../engine/reactionEngine';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
@@ -244,35 +248,29 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       if (msg.type === 'REACTION_COMMAND') {
         if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId || msg.command.playerId === meId) return;
         const currentWindow = gameState.reactionWindow;
-        if (!currentWindow || currentWindow.id !== msg.command.windowId) return;
+        if (!senderPlayerId || !isReactionCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        if (!currentWindow) return;
 
         if (msg.command.kind === 'PASS') {
           const result = passReactionPriority(gameState, msg.command.playerId);
           if (!result.ok) return;
-          if (result.pendingAction) {
-            finishDeferredReactionAction(result.state, result.pendingAction);
-          } else {
-            setGameState(result.state);
-          }
+          const loggedState = result.logs?.length
+            ? appendLogs(result.state, result.logs, 'REACTION', msg.command.playerId)
+            : result.state;
+          if (result.pendingAction) finishDeferredReactionAction(loggedState, result.pendingAction);
+          else setGameState(loggedState);
           return;
         }
 
         const cardInstanceId = msg.command.cardInstanceId;
+        if (!cardInstanceId) return;
+        const queued = queueReactionCard(gameState, msg.command.playerId, cardInstanceId, msg.command.targetInstanceId);
+        if (!queued.ok) return;
         const reactionCard = gameState.players[msg.command.playerId]?.hand.find(card => card.instanceId === cardInstanceId);
-        if (!reactionCard) return;
-        const parsed = parseCardAbility(reactionCard.card);
-        if (parsed.needsTargetAvatar && !msg.command.targetInstanceId) return;
-        const started = beginReactionCard(gameState, msg.command.playerId, reactionCard.instanceId);
-        if (!started.ok) return;
-        const resolved = resolveReactionCard(started.state, msg.command.targetInstanceId);
-        if (!resolved.ok) return;
-        const withLogs = appendLogs(
-          resolved.state,
-          [`${reactionCard.card.name} ตอบโต้การกระทำ (${currentWindow.trigger.type})`, ...resolved.logs],
-          'REACTION',
-          msg.command.playerId
-        );
-        finishDeferredReactionAction(withLogs, resolved.pendingAction);
+        const loggedState = reactionCard
+          ? appendLogs(queued.state, [`${reactionCard.card.name} ถูกวางบน Chain (${currentWindow.trigger.type})`], 'REACTION', msg.command.playerId)
+          : queued.state;
+        setGameState(loggedState);
         return;
       }
 
@@ -285,10 +283,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           !senderPlayerId ||
           incomingWindow.passedPlayerIds.length !== 0 ||
           !!incomingWindow.pendingReaction ||
+          (incomingWindow.chain?.length ?? 0) !== 0 ||
+          incomingWindow.revision !== 0 ||
           !isReactionWindowStructurallyValid(msg.state) ||
           incomingWindow.trigger.actorId !== activePlayerBeforeSync ||
           senderPlayerId !== activePlayerBeforeSync ||
           incomingWindow.turnOwnerId !== activePlayerBeforeSync ||
+          JSON.stringify(incomingWindow.priorityOrder) !== JSON.stringify([
+            ...gameState.playerOrder.slice(gameState.currentTurnPlayerIndex + 1),
+            ...gameState.playerOrder.slice(0, gameState.currentTurnPlayerIndex),
+            activePlayerBeforeSync
+          ]) ||
           msg.state.id !== gameState.id ||
           msg.state.reactionSequence !== (gameState.reactionSequence ?? 0) + 1 ||
           incomingWindow.id !== `${msg.state.id}:${msg.state.reactionSequence}:${incomingWindow.trigger.type}` ||
@@ -299,7 +304,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         ) return;
       }
       baselineStateRef.current = isHost ? null : msg.state;
-      setGameState(current => preserveOwnLifeCardIdentities(msg.state, current, meId));
+      setGameState(current => {
+        const authoritativeView = isHost && senderPlayerId
+          ? restoreHiddenZonesFromCanonical(msg.state, current, senderPlayerId)
+          : msg.state;
+        return preserveOwnLifeCardIdentities(authoritativeView, current, meId);
+      });
       setWinnerName(msg.winner);
       setSelectedAttackerId(null);
       setPendingAbility(null);
@@ -559,7 +569,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     const window = gameState.reactionWindow;
     if (!window || window.priorityPlayerId !== meId) return;
     if (link && !isHost) {
-      link.send({ type: 'REACTION_COMMAND', command: { kind: 'PASS', playerId: meId, windowId: window.id } });
+      link.send({
+        type: 'REACTION_COMMAND',
+        command: { kind: 'PASS', playerId: meId, windowId: window.id, expectedRevision: window.revision }
+      });
       return;
     }
     const result = passReactionPriority(gameState, meId);
@@ -567,12 +580,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       showNotification(result.reason);
       return;
     }
+    const loggedState = result.logs?.length
+      ? appendLogs(result.state, result.logs, 'REACTION', meId)
+      : result.state;
     if (result.pendingAction) {
-      finishDeferredReactionAction(result.state, result.pendingAction);
-      showNotification('ไม่มีการตอบโต้เพิ่มเติม — ดำเนินการเดิมต่อ');
+      finishDeferredReactionAction(loggedState, result.pendingAction);
+      showNotification('Chain resolved — ดำเนินการเดิมต่อ');
       return;
     }
-    setGameState(result.state);
+    setGameState(loggedState);
   };
 
   const handleReactionCard = (handCard: CardInstance) => {
@@ -603,6 +619,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           kind: 'PLAY',
           playerId: meId,
           windowId: window.id,
+          expectedRevision: window.revision,
           cardInstanceId: handCard.instanceId,
           targetInstanceId: triggerTargetId
         }
@@ -610,13 +627,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const started = beginReactionCard(gameState, meId, handCard.instanceId);
-    if ('reason' in started) {
-      showNotification(started.reason);
-      return;
-    }
     if (parsed.needsTargetAvatar) {
-      setGameState(started.state);
       setPendingAbility({
         sourceCard: handCard,
         triggerType: 'MAGIC_CAST',
@@ -626,13 +637,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       });
       return;
     }
-    const resolved = resolveReactionCard(started.state, triggerTargetId);
-    if ('reason' in resolved) {
-      showNotification(resolved.reason);
+    const queued = queueReactionCard(gameState, meId, handCard.instanceId, triggerTargetId);
+    if ('reason' in queued) {
+      showNotification(queued.reason);
       return;
     }
-    const withLogs = appendLogs(resolved.state, [`${handCard.card.name} ตอบโต้การกระทำ (${window.trigger.type})`, ...resolved.logs], 'REACTION', meId);
-    finishDeferredReactionAction(withLogs, resolved.pendingAction);
+    setGameState(appendLogs(
+      queued.state,
+      [`${handCard.card.name} วางลงบน Chain — รอการตอบโต้หรือผ่านสิทธิ์`],
+      'REACTION',
+      meId
+    ));
   };
 
   // Phase 1: Draw Phase Action
@@ -1047,6 +1062,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               kind: 'PLAY',
               playerId: meId,
               windowId: window.id,
+              expectedRevision: window.revision,
               cardInstanceId: pendingAbility.sourceCard.instanceId,
               targetInstanceId: avatar.instanceId
             }
@@ -1054,34 +1070,24 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           setPendingAbility(null);
           return;
         }
-        let reactionState = gameState;
-        if (window.pendingReaction && window.pendingReaction.sourceCard.instanceId !== pendingAbility.sourceCard.instanceId) {
-          showNotification('การตอบโต้ที่เลือกไม่ตรงกับการ์ดที่กำลังแก้ไข');
-          setPendingAbility(null);
-          return;
-        }
-        if (!window.pendingReaction) {
-          const started = beginReactionCard(gameState, meId, pendingAbility.sourceCard.instanceId);
-          if ('reason' in started) {
-            showNotification(started.reason);
-            setPendingAbility(null);
-            return;
-          }
-          reactionState = started.state;
-        }
-        const resolved = resolveReactionCard(reactionState, avatar.instanceId);
-        if ('reason' in resolved) {
-          showNotification(resolved.reason);
+        const queued = queueReactionCard(
+          gameState,
+          meId,
+          pendingAbility.sourceCard.instanceId,
+          avatar.instanceId
+        );
+        if ('reason' in queued) {
+          showNotification(queued.reason);
           return;
         }
         const nextState = appendLogs(
-          resolved.state,
-          [`${pendingAbility.sourceCard.card.name} ตอบโต้การกระทำ (${window.trigger.type})`, ...resolved.logs],
+          queued.state,
+          [`${pendingAbility.sourceCard.card.name} วางลงบน Chain — รอการตอบโต้หรือผ่านสิทธิ์`],
           'REACTION',
           meId
         );
         setPendingAbility(null);
-        finishDeferredReactionAction(nextState, resolved.pendingAction);
+        setGameState(nextState);
         return;
       }
 
@@ -1117,7 +1123,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             actorId: meId,
             targetInstanceId: avatar.instanceId,
             targetCardName: avatar.card.name,
-            sourceCardName: pendingAbility.sourceCard.card.name
+            sourceCardName: pendingAbility.sourceCard.card.name,
+            sourceInstanceId: pendingAbility.sourceCard.instanceId
           },
           {
             type: 'RESOLVE_MAGIC',
@@ -1430,16 +1437,29 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       </header>
 
       {gameState.reactionWindow && (
-        <section role="status" aria-live="polite" className="z-30 flex items-center justify-between gap-3 border-b border-amber-500/40 bg-amber-950/90 px-3 py-2 text-xs text-amber-100">
-          <span>
-            Reaction Window · {gameState.players[gameState.reactionWindow.priorityPlayerId]?.name ?? 'ผู้เล่น'} มีสิทธิ์ก่อน
-            {gameState.reactionWindow.pendingReaction ? ' · กำลังเลือกเป้าหมาย' : ` · ${getEligibleReactionCards(gameState, meId).length} การ์ดที่ใช้ได้`}
-          </span>
+        <section aria-label="Reaction Chain" aria-live="polite" className="z-30 flex flex-col gap-2 border-b border-amber-500/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <strong>Reaction Window · {gameState.reactionWindow.trigger.type}</strong>
+              <span>สิทธิ์: {gameState.players[gameState.reactionWindow.priorityPlayerId]?.name ?? 'ผู้เล่น'}</span>
+              <span>{gameState.reactionWindow.priorityPlayerId === meId ? `${getEligibleReactionCards(gameState, meId).length} ใบที่ใช้ได้` : 'รอคู่แข่ง'}</span>
+            </div>
+            <ol aria-label="ลำดับ Chain จากใบแรกไปใบล่าสุด" className="flex max-w-full items-center gap-1 overflow-x-auto">
+              <li className="shrink-0 rounded border border-slate-500/60 bg-slate-900 px-2 py-1 text-[10px] text-slate-200">
+                0 · การกระทำเดิม
+              </li>
+              {(gameState.reactionWindow.chain ?? []).map((entry, index) => (
+                <li key={`${entry.sourceCard.instanceId}-${index}`} className="shrink-0 rounded border border-amber-300/50 bg-amber-900/70 px-2 py-1 text-[10px] font-semibold">
+                  {index + 1} · {entry.sourceCard.card.name}
+                </li>
+              ))}
+            </ol>
+          </div>
           {gameState.reactionWindow.priorityPlayerId === meId && !gameState.reactionWindow.pendingReaction && (
             <button
               type="button"
               onClick={handleReactionPass}
-              className="shrink-0 rounded-md border border-amber-300/60 bg-amber-400 px-3 py-1 font-bold text-slate-950 hover:bg-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+              className="min-h-9 shrink-0 rounded-md border border-amber-300/60 bg-amber-400 px-3 py-1 font-bold text-slate-950 hover:bg-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             >
               ผ่านสิทธิ์ตอบโต้
             </button>
