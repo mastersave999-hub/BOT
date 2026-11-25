@@ -126,6 +126,7 @@ function rotatePriorityOrder(state: GameState, playerId: string): string[] {
 }
 
 export function isReactionWindowStructurallyValid(state: GameState): boolean {
+  if (state.playerOrder.length > 2) return false;
   const window = state.reactionWindow;
   if (!window || window.turnOwnerId !== state.playerOrder[state.currentTurnPlayerIndex]) return false;
   if (!state.playerOrder.includes(window.priorityPlayerId)) return false;
@@ -225,7 +226,8 @@ export function openReactionWindow(
   trigger: ReactionTrigger,
   pendingAction?: ReactionWindow['pendingAction']
 ): GameState {
-  if (state.reactionWindow || !state.playerOrder.includes(trigger.actorId)) return state;
+  // Rule Book 3.2 p.18 defines priority for Duel only; do not invent a 3–4 player order.
+  if (state.playerOrder.length > 2 || state.reactionWindow || !state.playerOrder.includes(trigger.actorId)) return state;
   const turnOwnerId = state.playerOrder[state.currentTurnPlayerIndex];
   if (!turnOwnerId || turnOwnerId !== trigger.actorId) return state;
 

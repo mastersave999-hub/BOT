@@ -125,6 +125,16 @@ describe('reaction window engine', () => {
     } }, 'player-2', protectReact).eligible).toBe(false);
   });
 
+  it('does not invent multi-player Reaction priority outside the official Duel rules', () => {
+    const react = makeInstance(makeCard({ mainEffect: 'จั่วการ์ด 1 ใบ' }), 'player-2', 'react');
+    const state = makeState([react]);
+    state.mode = 'AD_MUA';
+    state.playerOrder = ['player-1', 'player-2', 'player-3'];
+    state.players['player-3'] = makePlayer('player-3');
+
+    expect(openReactionWindow(state, summon)).toBe(state);
+  });
+
   it('opens only for matching attack and ability trigger text', () => {
     const attackReact = makeCard({ mainEffect: 'เมื่อฝ่ายตรงข้ามประกาศโจมตี : ทำลาย Avatar ตัวนั้น' });
     const attackState = makeState([makeInstance(attackReact, 'player-2', 'attack-react')]);
