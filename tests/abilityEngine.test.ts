@@ -367,4 +367,27 @@ describe('Ability Engine', () => {
     const endTurnState = clearEndOfTurnModifiers(res2.state);
     expect(calculateNetPower(endTurnState.players.p2.avatarZone[0])).toBe(5);
   });
+
+  it('applies one Layer 4 attack buff, includes it in combat power, preserves other modifiers, and clears it at turn end', () => {
+    const attacker = makeInstance(makeCard({
+      name: 'Attack buff Avatar',
+      power: 5,
+      mainEffect: 'อัตโนมัติ เมื่อ Avatar ใบนี้โจมตี : POWER +2 จนจบเทิร์น'
+    }), 'p1', 'attack-buff');
+    attacker.layerModifiers = [{ layer: 1, powerMod: 1, sourceCardId: 'equip-existing' }];
+    const player = { id: 'p1', name: 'P1', seat: 0, deck: [], hand: [], lifeDeck: [], avatarZone: [attacker], constructZone: [], magicZone: [], hell: [], darkDimension: [], isCritical: false, reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }, usedMagicTypesThisTurn: new Set() };
+    const opponent = { ...player, id: 'p2', name: 'P2', seat: 1, avatarZone: [] };
+    const state: GameState = { id: 'layer-four', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0, currentPhase: 'BATTLE', turnNumber: 1, roundNumber: 1, landMagicZone: null, players: { p1: player, p2: opponent }, eventLog: [] };
+
+    const result = executeCardAbility(state, 'p1', attacker, 'ON_ATTACK');
+    const afterAttack = result.state.players.p1.avatarZone[0];
+    expect(calculateNetPower(afterAttack)).toBe(8);
+    expect(afterAttack.layerModifiers.filter(modifier => modifier.layer === 4)).toHaveLength(1);
+    expect(afterAttack.layerModifiers.some(modifier => modifier.sourceCardId === 'equip-existing')).toBe(true);
+    expect(calculateNetPower(state.players.p1.avatarZone[0])).toBe(6);
+
+    const endTurn = clearEndOfTurnModifiers(result.state);
+    expect(calculateNetPower(endTurn.players.p1.avatarZone[0])).toBe(6);
+    expect(endTurn.players.p1.avatarZone[0].layerModifiers.some(modifier => modifier.sourceCardId === 'equip-existing')).toBe(true);
+  });
 });

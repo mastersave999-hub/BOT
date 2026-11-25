@@ -485,7 +485,8 @@ export function resolveReactionCard(
   const cancelledOriginalMagic =
     window.pendingAction?.type === 'RESOLVE_MAGIC' &&
     /ยกเลิกการใช้\s*Magic Card/.test(pendingReaction.sourceCard.card.mainEffect ?? '');
-  const { reactionWindow: _reactionWindow, ...closedState } = result.state;
+  const resolvedState = sendResolvedMagicToHell(result.state, pendingReaction.playerId, pendingReaction.sourceCard);
+  const { reactionWindow: _reactionWindow, ...closedState } = resolvedState;
   return {
     ok: true,
     state: closedState,

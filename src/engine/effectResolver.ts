@@ -173,23 +173,36 @@ export function resolveEffectPlan(
   for (const condition of plan.conditions ?? []) {
     const passed = condition.kind === 'player_has_avatar'
       ? !!state.players[condition.playerId]?.avatarZone.some(avatar => avatar.card.name.includes(condition.nameIncludes))
-      : !!findAvatar(state, condition.targetId);
+      : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
     if (!passed) return fail(state, 'effect condition failed');
   }
   for (const effect of plan.effects) {
-    if (!Number.isFinite('count' in effect ? effect.count : 'amount' in effect ? effect.amount : 0)) return fail(state, 'invalid effect value');
-    if ((effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'modify_power') && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
+    if (!effect || !Object.hasOwn(defaultHandlers, effect.kind)) return fail(state, 'unsupported effect');
+    if ('count' in effect && (!Number.isInteger(effect.count) || effect.count < 0)) return fail(state, 'invalid effect count');
+    if ('amount' in effect && !Number.isFinite(effect.amount)) return fail(state, 'invalid effect value');
+    if (('targetId' in effect) && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
   }
-  let staged = state;
+  for (const cost of plan.costs ?? []) {
+    if (cost.playerId !== plan.actorId) return fail(state, 'cost payer must be the acting player');
+  }
+
+  // Handlers are extensible and may mutate nested data. Isolate the entire transaction
+  // so a later rejection or exception cannot leak partial changes into the caller's state.
+  let staged = structuredClone(state);
   for (const cost of plan.costs ?? []) {
     const paid = applyCost(staged, cost);
     if (!paid) return fail(state, 'cost cannot be paid');
     staged = paid;
   }
   for (const effect of plan.effects) {
-    const next = (handlers[effect.kind] ?? defaultHandlers[effect.kind])({ state: staged, plan, effect });
-    if (!next) return fail(state, `effect handler rejected ${effect.kind}`);
-    staged = next;
+    try {
+      const handler = handlers[effect.kind] ?? defaultHandlers[effect.kind];
+      const next = handler({ state: staged, plan, effect });
+      if (!next || typeof next !== 'object' || !next.players) return fail(state, `effect handler rejected ${effect.kind}`);
+      staged = next;
+    } catch {
+      return fail(state, `effect handler failed ${effect.kind}`);
+    }
   }
   return { ok: true, state: staged, logs: [] };
 }

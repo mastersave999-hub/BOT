@@ -225,9 +225,31 @@ export function encodeNetMessage(msg: NetMessage): string {
 export function decodeNetMessage(raw: unknown): NetMessage | null {
   if (typeof raw !== 'string') return null;
   try {
-    return JSON.parse(raw, (_key, value) =>
+    const decoded: unknown = JSON.parse(raw, (_key, value) =>
       value && typeof value === 'object' && Array.isArray(value.__set) ? new Set(value.__set) : value
-    ) as NetMessage;
+    );
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null;
+    const message = decoded as Record<string, unknown>;
+    if (typeof message.type !== 'string') return null;
+    if (message.type === 'REACTION_COMMAND') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if (
+        (command.kind !== 'PASS' && command.kind !== 'PLAY') ||
+        typeof command.playerId !== 'string' ||
+        typeof command.windowId !== 'string' ||
+        !Number.isSafeInteger(command.expectedRevision) ||
+        (command.expectedRevision as number) < 0 ||
+        (command.commandId !== undefined && typeof command.commandId !== 'string') ||
+        (command.cardInstanceId !== undefined && typeof command.cardInstanceId !== 'string') ||
+        (command.targetInstanceId !== undefined && typeof command.targetInstanceId !== 'string') ||
+        (command.kind === 'PLAY' && typeof command.cardInstanceId !== 'string')
+      ) return null;
+      return decoded as NetMessage;
+    }
+    const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];
+    if (!knownTypes.includes(message.type)) return null;
+    return decoded as NetMessage;
   } catch {
     return null;
   }

@@ -517,7 +517,7 @@ export function clearEndOfTurnModifiers(state: GameState): GameState {
       ...p,
       avatarZone: p.avatarZone.map(a => ({
         ...a,
-        layerModifiers: a.layerModifiers.filter(m => m.sourceCardId.startsWith('aura-'))
+        layerModifiers: a.layerModifiers.filter(m => m.expiresAt !== 'END_OF_TURN')
       }))
     };
   }

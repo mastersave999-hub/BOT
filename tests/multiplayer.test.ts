@@ -156,6 +156,10 @@ describe('multiplayer LIFE card privacy', () => {
     expect(isReactionCommandCurrent(state, { ...command, expectedRevision: 3 }, 'player-2')).toBe(false);
     expect(isReactionCommandCurrent(state, { ...command, windowId: 'stale-window' }, 'player-2')).toBe(false);
     expect(isReactionCommandCurrent(state, { ...command, playerId: 'player-1' }, 'player-2')).toBe(false);
+    expect(decodeNetMessage(JSON.stringify({ type: 'REACTION_COMMAND', command }))?.type).toBe('REACTION_COMMAND');
+    expect(decodeNetMessage(JSON.stringify({ type: 'REACTION_COMMAND', command: { ...command, expectedRevision: undefined } }))).toBeNull();
+    expect(decodeNetMessage(JSON.stringify({ type: 'REACTION_COMMAND', command: { ...command, kind: 'EXECUTE' } }))).toBeNull();
+    expect(decodeNetMessage(JSON.stringify({ type: 'UNKNOWN' }))).toBeNull();
   });
 
   it('rejects a duplicate serialized pass after the window revision advances', () => {

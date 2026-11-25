@@ -9,6 +9,7 @@ import {
   queueReactionCard,
   resolveReactionCard
 } from '../src/engine/reactionEngine';
+import { decodeNetMessage, encodeNetMessage } from '../src/engine/multiplayer';
 import type { Card, CardInstance, GameState, PlayerState, ReactionTrigger } from '../src/engine/types';
 
 function makeCard(overrides: Partial<Card> = {}): Card {
@@ -105,6 +106,8 @@ describe('reaction window engine', () => {
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.state.players['player-1'].avatarZone).toHaveLength(0);
+    expect(resolved.state.players['player-2'].magicZone).toHaveLength(0);
+    expect(resolved.state.players['player-2'].hell.map(card => card.instanceId)).toContain('react-1');
     expect(resolved.pendingAction?.type).toBe('SUMMON_JUTI');
     expect(resolved.state.reactionWindow).toBeUndefined();
   });
@@ -301,6 +304,14 @@ describe('reaction window engine', () => {
     expect(resolveTop.state.players['player-1'].deck).toHaveLength(0);
     expect(resolveTop.state.players['player-2'].deck).toHaveLength(1);
     expect(resolveTop.state.reactionWindow?.chain).toHaveLength(1);
+    const synchronized = decodeNetMessage(encodeNetMessage({ type: 'SYNC', state: resolveTop.state, winner: null }));
+    expect(synchronized?.type).toBe('SYNC');
+    if (synchronized?.type === 'SYNC') {
+      expect(synchronized.state.players['player-1'].deck).toHaveLength(0);
+      expect(synchronized.state.players['player-2'].deck).toHaveLength(1);
+      expect(synchronized.state.reactionWindow?.chain).toHaveLength(1);
+      expect(synchronized.state.reactionWindow?.revision).toBe(resolveTop.state.reactionWindow?.revision);
+    }
 
     const passThree = passReactionPriority(resolveTop.state, 'player-2');
     expect(passThree.ok).toBe(true);

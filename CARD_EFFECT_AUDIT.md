@@ -2,7 +2,7 @@
 
 ## Scope and method
 
-Audited every row in `cards_clean.json`: **2014 card records** (1633 distinct print IDs). Card text is taken verbatim from the checked-in catalog; Rule Book 3.2 (`rulebook_raw.txt`) is authoritative. This report uses a conservative, text-pattern audit against handlers currently present in `src/engine/abilityEngine.ts`, `combatEngine.ts`, and `reactionEngine.ts`. It is a triage/status inventory, not a claim of official card rulings or per-card runtime verification. A card marked Working means its obvious simple operation maps to an engine handler; it does not prove that the full effect works in game state or every context-specific ruling for that print.
+Audited every row in `cards_clean.json`: **2014 card records** (1633 distinct print IDs). Card text is taken verbatim from the checked-in catalog; Rule Book 3.2 (`rulebook_raw.txt`) is authoritative. This report uses a conservative, text-pattern audit against the handlers currently present in `src/engine/abilityEngine.ts`, `combatEngine.ts`, and `reactionEngine.ts`. It is a triage/status inventory, not a claim of official card rulings or per-card runtime verification. The catalog status labels below mean only **implemented-but-unverified**, **partial**, **unsupported**, or **unsupported/unclear**; none means "Working" or verifies a card print.
 
 ### Status totals
 
@@ -37,19 +37,20 @@ No catalog card is marked **tested**: the status inventory is pattern-based and 
 | Last Words / destruction trigger | 77 |
 | Unclassified text | 11 |
 
-## Root causes confirmed in the engine
+## Root causes and current engine findings
 
-- Ability text was reduced to a few global regex/substring flags. Most of the catalog's search, discard/payment, mill/scout, prevention/cancellation, control-change, zone movement, conditional, and choice effects have no resolvers.
-- `executeCardAbility` previously ran draw, destruction, recovery, and targeting logic regardless of the supplied trigger. A Last Words or Life effect could therefore resolve at the wrong timing.
-- Target resolution accepted any Avatar in any player zone without enforcing the parsed own/opponent scope; absent targets could result in a silent no-op or partial resolution.
-- Multi-clause effects and costs cannot be modeled atomically with the existing API: it lacks a choice/payment/target plan and a resolution result that can refuse the entire effect. Rule Book 3.2 pp.12–13 requires all effects to be achievable before using an ability and costs must be paid before resolution.
+- Ability text is still adapted using regex/substring flags. Most catalog search, discard/payment parsing, mill/scout, prevention/cancellation, control-change, zone movement, conditional, and choice effects have no reliable text adapter and are blocked rather than partially applied.
+- Trigger dispatch now blocks abilities at the wrong timing. Game-state tests cover Last Words timing; LIFE-specific printed timing and many trigger combinations remain incomplete.
+- Typed plans validate referenced Avatars and conditions before costs; costs are explicit and restricted to the acting player. Resolution runs against a cloned staged state, so rejected or throwing custom handlers cannot mutate the caller's state. The text adapter does not yet derive all printed costs, choices, or typed plans from card text.
+- Rule Book 3.2 pp.12–13 requires the whole effect to be achievable and costs paid before resolution; unsupported free-text costs/choices remain blocked pending complete player choice/payment input.
 - Continuous effects only interpret limited POWER text and a few symbol/name patterns; keyword, stat, zone and condition effects are not generally represented as layers.
 - Reaction legality has a conservative supported-effect gate, but the shared resolver and card-by-card timing/cost/target vocabulary are still incomplete.
 - Removing an Avatar from the field must also send its attached Modification Magic to Hell (Rule Book 3.2 p.18); the shared destroy and bounce operations now preserve those cards instead of dropping them.
 - Status labels are text-pattern triage only, not per-card runtime verification. `Implemented (unverified per card)` is handler overlap, not proof that a card's full text has passed a game-state test; no eligible-card completion total can be claimed from this audit.
 - `src/engine/effectResolver.ts` now provides typed ordered plans, conditions, target preflight, explicit discard/sacrifice costs, extensible handlers, and staged all-or-nothing resolution. Existing ability/reaction calls pass through this resolver for the supported operation subset; Reaction chains still resolve from the top of their existing LIFO stack, and multiplayer continues to transmit authoritative game state rather than effect plans.
-- Runtime-tested coverage added in this change is resolver-level representative coverage (state changes, invalid targets/conditions/costs, order, rollback, custom handlers) plus the existing reaction tests. It does not individually verify any of the 2,014 catalog rows.
-- Effect types still unsupported by the integrated text adapter include searches, scout/mill, prevention/cancellation semantics, control changes, arbitrary choices, conditional/cost parsing from free text, and many keyword/combat interactions. Explicit cost types exist in the resolver API but cards that encode costs in text remain blocked until a caller can provide and validate a complete cost/choice plan.
+- **Verified by actual Game State tests (representative mechanics, not card-print audit):** successful typed draw/modifier/cost resolution; invalid targets; false conditions; insufficient and foreign-player costs; ordered effects; failure and throwing-handler rollback; supported ability timing/target behavior; reaction-window timing and opponent-first priority; both players' passes; multiple responses resolving LIFO; target removal before resolution; eligible Normal Magic used as React; multiplayer serialization of reaction-window/chain state and stale/sender/window/revision rejection; and Layer 4 attack-buff application, combat power calculation, preservation of other modifiers, and end-of-turn expiration. The test suite does **not** verify all catalog records or all rulebook permutations.
+- **Unsupported/partial:** integrated text effects still omit searches, scout/mill, prevention/cancellation semantics beyond the narrow Reaction chain case, control changes, arbitrary choices, and reliable free-text conditions/costs. The resolver supports explicit typed costs, but catalog cards encoding costs remain blocked until callers supply and validate a complete payment/choice plan.
+- **Multiplayer limitation:** PeerJS uses a host-authoritative client, not a trusted server. Sender identity is the host's connection-to-seat mapping; window ID/revision/priority checks reject stale and cross-seat reaction commands. A compromised or modified host can still forge canonical state and bypass game rules; this is not server-grade anti-cheat.
 
 ## Ambiguity and unsupported card inventory
 
