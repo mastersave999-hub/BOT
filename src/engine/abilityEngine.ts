@@ -1,5 +1,6 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { calculateNetPower } from './layers';
+import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 
 type LayerMod = CardInstance['layerModifiers'][number];
 
@@ -335,6 +336,51 @@ export function executeCardAbility(
     logs.push(`${sourceCard.card.name}: เป้าหมายไม่ถูกต้องหรือไม่ได้เลือกเป้าหมาย ผลของการ์ดไม่ทำงาน`);
     return { state, logs };
   }
+
+  const effectText = sourceCard.card.mainEffect || '';
+  const effectDefinitions: Array<{ position: number; effect: EffectDefinition }> = [];
+  const addEffect = (needle: string, effect: EffectDefinition) => {
+    const position = effectText.indexOf(needle);
+    if (position >= 0) effectDefinitions.push({ position, effect });
+  };
+  if (parsed.drawCount > 0) addEffect('จั่ว', { kind: 'draw', playerId: actorId, count: parsed.drawCount });
+  if (parsed.destroysAllOpponentAvatars) addEffect('ทำลาย Avatar', { kind: 'destroy_opponent_avatars', actorId });
+  if (triggerType === 'ON_ATTACK' && parsed.powerMod !== 0) {
+    effectDefinitions.push({ position: effectText.indexOf('POWER'), effect: { kind: 'modify_power', targetId: sourceCard.instanceId, amount: parsed.powerMod, layer: 4, expiresAt: 'END_OF_TURN' } });
+  } else if (targetAvatarId && parsed.destroysTarget) addEffect('ทำลาย', { kind: 'destroy_avatar', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.bouncesTarget) addEffect('กลับขึ้นมือ', { kind: 'bounce_avatar', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.resetsPower) addEffect('ปรับ', { kind: 'reset_power', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.powerMod !== 0) addEffect('POWER', { kind: 'modify_power', targetId: targetAvatarId, amount: parsed.powerMod });
+  if (parsed.recoversFromHell > 0) {
+    const destination = /นรก.{0,80}นำขึ้นมือ|นำขึ้นมือ.{0,80}นรก/.test(effectText) ? 'hand' : 'deck';
+    addEffect('นรก', { kind: 'recover_from_hell', playerId: actorId, count: parsed.recoversFromHell, destination });
+  }
+  if (parsed.summonsFromHell) {
+    const candidates = actor.hell.filter(card => card.card.type === 'Avatar');
+    if (candidates.length !== 1) {
+      logs.push(`${sourceCard.card.name}: ต้องระบุ Avatar จากนรกอย่างชัดเจน จึงไม่ทำผลใด ๆ`);
+      return { state, logs };
+    }
+    addEffect('นรก', { kind: 'summon_from_hell', playerId: actorId, instanceId: candidates[0].instanceId });
+  }
+  effectDefinitions.sort((left, right) => left.position - right.position);
+  const resolved = resolveEffectPlan(state, { actorId, effects: effectDefinitions.map(item => item.effect) });
+  if (!resolved.ok) {
+    logs.push(`${sourceCard.card.name}: Effect Resolver ปฏิเสธผลทั้งหมด (${resolved.reason})`);
+    return { state, logs };
+  }
+  const resolvedState = recomputeContinuousAuras(resolved.state);
+  return { state: resolvedState, logs: effectDefinitions.map(({ effect }) => {
+    switch (effect.kind) {
+      case 'draw': return `${sourceCard.card.name}: จั่วการ์ด ${effect.count} ใบ`;
+      case 'modify_power': return `${sourceCard.card.name}: ปรับ POWER ${effect.amount >= 0 ? '+' : ''}${effect.amount}`;
+      case 'destroy_avatar': return `${sourceCard.card.name}: ทำลาย Avatar เป้าหมายลงนรก`;
+      case 'bounce_avatar': return `${sourceCard.card.name}: นำ Avatar เป้าหมายกลับขึ้นมือ`;
+      case 'destroy_opponent_avatars': return `${sourceCard.card.name}: ทำลาย Avatar ฝ่ายตรงข้ามทั้งหมด`;
+      case 'recover_from_hell': return `${sourceCard.card.name}: นำการ์ดจากนรกกลับ${effect.destination === 'hand' ? 'ขึ้นมือ' : 'เข้า Deck'}`;
+      case 'summon_from_hell': return `${sourceCard.card.name}: อัญเชิญ Avatar จากนรก`;
+    }
+  }) };
 
   // 1. Handle Draw Effect ("จั่วการ์ด X ใบ")
   if (parsed.drawCount > 0) {
