@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
+import { useClerk, useUser } from '@clerk/nextjs';
 import { Playmat } from '../components/game/Playmat';
 import { DeckBuilder } from '../components/deck/DeckBuilder';
 import { MatchmakingLobby } from '../components/lobby/MatchmakingLobby';
@@ -13,8 +14,8 @@ import {
   type MatchSession, type PlayerSetup, type RoomMode
 } from '../engine/multiplayer';
 import {
-  getCurrentUser, logoutUser, saveDeckForUser,
-  deleteDeckForUser, type SavedDeck, type UserAccount
+  getCurrentUser, saveDeckForUser, deleteDeckForUser,
+  type SavedDeck, type UserAccount
 } from '../engine/authService';
 import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
@@ -110,7 +111,12 @@ export default function Home() {
   const [initialGameState, setInitialGameState] = useState<GameState | null>(null);
   const [onlineSession, setOnlineSession] = useState<MatchSession | null>(null);
 
-  const { data: user = null, mutate: mutateUser } = useSWR<UserAccount | null>('current-user', getCurrentUser);
+  const { isLoaded: isClerkLoaded, isSignedIn } = useUser();
+  const { signOut } = useClerk();
+  const { data: user = null, mutate: mutateUser } = useSWR<UserAccount | null>(
+    isClerkLoaded && isSignedIn ? 'current-user' : null,
+    getCurrentUser,
+  );
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [accountMessage, setAccountMessage] = useState<string | null>(null);
   const loadedDeckUserId = useRef<string | null>(null);
@@ -136,7 +142,7 @@ export default function Home() {
   }, [user]);
 
   const handleLogout = async () => {
-    await logoutUser();
+    await signOut();
     loadedDeckUserId.current = null;
     await mutateUser(null, { revalidate: false });
   };
@@ -149,7 +155,7 @@ export default function Home() {
 
     if (user) {
       try {
-        const updatedUser = await saveDeckForUser(user, deckName, main, life, deckId);
+        const updatedUser = await saveDeckForUser(deckName, main, life, deckId);
         if (updatedUser) {
           const savedDeck = deckId
             ? updatedUser.savedDecks.find((deck) => deck.id === deckId)
@@ -196,7 +202,7 @@ export default function Home() {
   const handleDeleteSavedDeck = async (deckId: string) => {
     if (!user) return;
     try {
-      const updated = await deleteDeckForUser(user, deckId);
+      const updated = await deleteDeckForUser(deckId);
       if (updated) await mutateUser(updated, { revalidate: false });
     } catch {
       setAccountMessage('ลบเด็คไม่สำเร็จ กรุณาลองอีกครั้ง');
@@ -372,11 +378,9 @@ export default function Home() {
 
           {/* User Account Button */}
           {user ? (
-            <ProfileMenu
-              user={user}
-              onUserUpdate={(updatedUser) => void mutateUser(updatedUser, { revalidate: false })}
-              onLogout={() => void handleLogout()}
-            />
+            <ProfileMenu user={user} onLogout={() => void handleLogout()} />
+          ) : !isClerkLoaded || isSignedIn ? (
+            <span role="status" className="text-xs text-slate-500">กำลังโหลดบัญชี…</span>
           ) : (
             <button
               onClick={() => setIsAuthOpen(true)}
@@ -522,7 +526,6 @@ export default function Home() {
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
-        onSuccess={(account) => void mutateUser(account, { revalidate: false })}
       />
     </div>
   );

@@ -1,4 +1,6 @@
 import type { Metadata, Viewport } from 'next';
+import { ClerkProvider } from '@clerk/nextjs';
+import { thTH } from '@clerk/localizations';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -37,7 +39,7 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased bg-slate-950 text-slate-100 overflow-x-hidden font-kanit">
-        {children}
+        <ClerkProvider localization={thTH}>{children}</ClerkProvider>
       </body>
     </html>
   );
