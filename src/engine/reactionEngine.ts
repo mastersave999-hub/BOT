@@ -1,4 +1,4 @@
-import { executeCardAbility, parseCardAbility } from './abilityEngine';
+import { executeCardAbility, getUnsupportedEffectReason, parseCardAbility } from './abilityEngine';
 import type {
   Card,
   CardInstance,
@@ -90,6 +90,7 @@ function hasRequiredBoardCondition(card: Card, state: GameState, playerId: strin
 export function isReactionEffectExecutable(card: Card): boolean {
   const effect = card.mainEffect ?? '';
   const parsed = parseCardAbility(card);
+  if (getUnsupportedEffectReason(card)) return false;
   const cancelsMagic = /ยกเลิกการใช้\s*Magic Card/.test(effect);
   const hasSupportedEffect = cancelsMagic || parsed.drawCount > 0 || parsed.powerMod !== 0 ||
     parsed.resetsPower || parsed.destroysTarget || parsed.destroysAllOpponentAvatars ||
