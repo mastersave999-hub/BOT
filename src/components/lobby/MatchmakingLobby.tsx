@@ -1,22 +1,25 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Copy, Check, ArrowRight, Play, ArrowLeft, Loader2, AlertTriangle } from 'lucide-react';
+import { Copy, Check, ArrowRight, Play, ArrowLeft, Loader2, AlertTriangle, User } from 'lucide-react';
 import type { GameState } from '../../engine/types';
 import {
   hostRoom,
   joinRoom,
   normalizeRoomCode,
+  ROOM_LIMITS,
+  type HostController,
   type MatchSession,
   type PlayerSetup,
-  type RoomController
+  type RoomController,
+  type RoomMode
 } from '../../engine/multiplayer';
 
 interface MatchmakingLobbyProps {
   onBack: () => void;
   defaultPlayerName: string;
   localDeck: Pick<PlayerSetup, 'mainDeck' | 'lifeDeck'>;
-  buildState: (host: PlayerSetup, guest: PlayerSetup) => GameState;
+  buildState: (mode: RoomMode, setups: PlayerSetup[]) => GameState;
   onMatchReady: (session: MatchSession) => void;
 }
 
@@ -34,7 +37,11 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
   const [status, setStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'HOST' | 'JOIN' | null>(null);
-  const controllerRef = useRef<RoomController | null>(null);
+  const [hostMode, setHostMode] = useState<RoomMode>('DUEL');
+  const [roster, setRoster] = useState<string[]>([]);
+  const [capacity, setCapacity] = useState<number>(2);
+  const controllerRef = useRef<RoomController | HostController | null>(null);
+  const hostControllerRef = useRef<HostController | null>(null);
 
   useEffect(() => {
     return () => controllerRef.current?.cancel();
@@ -49,18 +56,27 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
   const resetRoom = () => {
     controllerRef.current?.cancel();
     controllerRef.current = null;
+    hostControllerRef.current = null;
     setGeneratedRoomCode(null);
     setBusy(null);
     setStatus('');
+    setRoster([]);
   };
 
-  const handleCreateRoom = () => {
+  const handleRoster = (names: string[], max: number) => {
+    setRoster(names);
+    setCapacity(max);
+  };
+
+  const handleCreateRoom = (mode: RoomMode) => {
     resetRoom();
     setError(null);
+    setHostMode(mode);
     setBusy('HOST');
     setStatus('กำลังสร้างห้อง...');
-    controllerRef.current = hostRoom(localSetup(), buildState, {
+    const controller = hostRoom(mode, localSetup(), setups => buildState(mode, setups), {
       onCode: setGeneratedRoomCode,
+      onPlayers: handleRoster,
       onStatus: setStatus,
       onError: message => {
         setError(message);
@@ -68,6 +84,8 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
       },
       onReady: onMatchReady
     });
+    controllerRef.current = controller;
+    hostControllerRef.current = controller;
   };
 
   const handleJoinRoom = () => {
@@ -77,6 +95,7 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
     setError(null);
     setBusy('JOIN');
     controllerRef.current = joinRoom(code, localSetup(), {
+      onPlayers: handleRoster,
       onStatus: setStatus,
       onError: message => {
         setError(message);
@@ -138,7 +157,9 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
             {generatedRoomCode ? (
               <>
                 <div className="space-y-1">
-                  <span className="text-xs text-slate-400 block">สร้างห้อง Duel (2 คน) สำเร็จแล้ว!</span>
+                  <span className="text-xs text-slate-400 block">
+                    สร้างห้อง {hostMode === 'DUEL' ? 'Duel (2 คน)' : 'อัดมั่ว (3-4 คน)'} สำเร็จแล้ว!
+                  </span>
                   <span className="text-3xl font-extrabold text-amber-400 font-mono tracking-widest block">
                     {generatedRoomCode}
                   </span>
@@ -155,8 +176,12 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
                 </div>
 
                 <p className="text-xs text-slate-500">
-                  ส่งรหัสนี้ให้เพื่อน แล้วอยู่หน้านี้ไว้ เมื่อเพื่อนใส่รหัส ระบบจะพาทั้งคู่เข้าสนามพร้อมกันอัตโนมัติ
+                  {hostMode === 'DUEL'
+                    ? 'ส่งรหัสนี้ให้เพื่อน แล้วอยู่หน้านี้ไว้ เมื่อเพื่อนใส่รหัส ระบบจะพาทั้งคู่เข้าสนามพร้อมกันอัตโนมัติ'
+                    : 'ส่งรหัสนี้ให้เพื่อน 2-3 คน แล้วกด "เริ่มเกม" เมื่อทุกคนเข้าห้องครบ'}
                 </p>
+
+                <RosterList names={roster} capacity={capacity} />
               </>
             ) : null}
 
@@ -164,6 +189,17 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
               <Loader2 className="w-4 h-4 animate-spin" />
               {status}
             </div>
+
+            {hostMode === 'AD_MUA' && (
+              <button
+                onClick={() => hostControllerRef.current?.start()}
+                disabled={roster.length < ROOM_LIMITS.AD_MUA.min}
+                className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-sm flex items-center justify-center gap-2 transition"
+              >
+                <Play className="w-4 h-4 fill-white" />
+                เริ่มเกม ({roster.length} คน)
+              </button>
+            )}
 
             <button
               onClick={resetRoom}
@@ -177,7 +213,7 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
             <span className="text-xs font-semibold text-slate-400 block">เลือกสร้างห้องใหม่:</span>
             <div className="grid grid-cols-2 gap-3">
               <button
-                onClick={handleCreateRoom}
+                onClick={() => handleCreateRoom('DUEL')}
                 disabled={busy !== null}
                 className="p-4 rounded-xl bg-gradient-to-br from-red-950/60 to-slate-900 border border-red-500/30 hover:border-red-500 disabled:opacity-50 text-left transition flex flex-col justify-between"
               >
@@ -190,16 +226,19 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
                 </span>
               </button>
 
-              <div
-                aria-disabled="true"
-                className="p-4 rounded-xl bg-gradient-to-br from-purple-950/30 to-slate-900 border border-purple-500/20 text-left opacity-60 flex flex-col justify-between cursor-not-allowed"
+              <button
+                onClick={() => handleCreateRoom('AD_MUA')}
+                disabled={busy !== null}
+                className="p-4 rounded-xl bg-gradient-to-br from-purple-950/60 to-slate-900 border border-purple-500/30 hover:border-purple-500 disabled:opacity-50 text-left transition flex flex-col justify-between"
               >
                 <div>
                   <span className="font-bold text-purple-400 text-sm block">ห้องอัดมั่ว (3-4 คน)</span>
                   <span className="text-[11px] text-slate-400 mt-1 block">Multiplayer Free-for-all</span>
                 </div>
-                <span className="mt-3 text-xs text-slate-400 font-semibold">เร็วๆ นี้ (ออนไลน์)</span>
-              </div>
+                <span className="mt-3 text-xs text-amber-400 font-semibold flex items-center gap-1">
+                  สร้างห้องอัดมั่ว <ArrowRight className="w-3.5 h-3.5" />
+                </span>
+              </button>
             </div>
 
             <div className="flex items-center my-4">
@@ -242,11 +281,14 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
                 </button>
               </div>
               {busy === 'JOIN' && (
-                <div className="flex items-center justify-between">
-                  <span role="status" className="text-xs text-emerald-400">{status}</span>
-                  <button onClick={resetRoom} className="text-xs text-slate-400 hover:text-slate-200 underline">
-                    ยกเลิก
-                  </button>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span role="status" className="text-xs text-emerald-400">{status}</span>
+                    <button onClick={resetRoom} className="text-xs text-slate-400 hover:text-slate-200 underline">
+                      ยกเลิก
+                    </button>
+                  </div>
+                  {roster.length > 0 && <RosterList names={roster} capacity={capacity} />}
                 </div>
               )}
             </div>
@@ -261,3 +303,23 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
     </div>
   );
 };
+
+const RosterList: React.FC<{ names: string[]; capacity: number }> = ({ names, capacity }) => (
+  <ul aria-label="ผู้เล่นในห้อง" className="space-y-1.5 text-left">
+    {Array.from({ length: capacity }, (_, index) => {
+      const name = names[index];
+      return (
+        <li
+          key={index}
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+            name ? 'bg-slate-900 border-emerald-700/50 text-slate-100' : 'bg-slate-950 border-dashed border-slate-800 text-slate-600'
+          }`}
+        >
+          <User className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">{name ?? 'รอผู้เล่น...'}</span>
+          {index === 0 && name && <span className="ml-auto text-[10px] text-amber-400 font-semibold">โฮสต์</span>}
+        </li>
+      );
+    })}
+  </ul>
+);

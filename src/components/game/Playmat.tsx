@@ -5,7 +5,7 @@ import { GameState, CardInstance, MagicSubtype } from '../../engine/types';
 import type { RoomLink } from '../../engine/multiplayer';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
-import { executeDrawPhase } from '../../engine/turnEngine';
+import { executeDrawPhase, eliminatePlayer } from '../../engine/turnEngine';
 import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
 import {
   parseCardAbility,
@@ -69,7 +69,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   const initialGameStateRef = useRef<GameState>(gameState);
 
   const meId = currentUserId;
-  const opponentId = gameState.playerOrder.find(id => id !== meId) || gameState.playerOrder[1];
+  const [focusedOpponentId, setFocusedOpponentId] = useState<string | null>(null);
+  const opponentIds = gameState.playerOrder.filter(id => id !== meId);
+  const opponentId =
+    focusedOpponentId && opponentIds.includes(focusedOpponentId)
+      ? focusedOpponentId
+      : opponentIds[0] ?? Object.keys(gameState.players).find(id => id !== meId)!;
+  const isEliminated = !gameState.playerOrder.includes(meId);
+  const activePlayerId = gameState.playerOrder[gameState.currentTurnPlayerIndex];
+  const isAttackLockedInFirstRound =
+    gameState.mode === 'AD_MUA' && gameState.turnNumber < Object.keys(gameState.players).length;
+  const leftPlayerIdsRef = useRef<Set<string>>(new Set());
+  const [leftTick, setLeftTick] = useState<number>(0);
 
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
@@ -87,11 +98,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       setPendingCost(null);
     });
     const offClose = link.onClose(() => setOpponentLeft(true));
+    const offPeerLeft = link.onPeerLeft?.(playerId => {
+      leftPlayerIdsRef.current.add(playerId);
+      setLeftTick(tick => tick + 1);
+    });
     return () => {
       offMessage();
       offClose();
+      offPeerLeft?.();
     };
   }, [link]);
+
+  // Host only: a guest who dropped out of an Ad-Mua match is eliminated, even if a stale sync re-adds them.
+  useEffect(() => {
+    if (gameState.mode !== 'AD_MUA' || leftPlayerIdsRef.current.size === 0) return;
+    let next = gameState;
+    leftPlayerIdsRef.current.forEach(id => {
+      if (next.playerOrder.includes(id)) next = eliminatePlayer(next, id, 'หลุดการเชื่อมต่อและถูกกำจัดออกจากเกม').state;
+    });
+    if (next === gameState) return;
+    setGameState(next);
+    if (next.playerOrder.length === 1 && !winnerName) {
+      setWinnerName(next.players[next.playerOrder[0]].name);
+    }
+  }, [gameState, leftTick, winnerName]);
+
+  // Follow whoever is taking their turn so their moves are visible without manual switching.
+  useEffect(() => {
+    if (activePlayerId && activePlayerId !== meId) setFocusedOpponentId(activePlayerId);
+  }, [activePlayerId, meId]);
 
   useEffect(() => {
     if (!link) return;
@@ -129,11 +164,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   // Phase 1: Draw Phase Action
   const handleDrawPhase = () => {
     if (!isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
-    const nextState = recomputeContinuousAuras(executeDrawPhase(gameState));
-    setGameState(nextState);
+    let nextState = recomputeContinuousAuras(executeDrawPhase(gameState));
     if (nextState.players[meId].deck.length === 0 && gameState.players[meId].deck.length === 0) {
-      setWinnerName(opponent.name);
+      if (gameState.mode === 'AD_MUA') {
+        const elimination = eliminatePlayer(nextState, meId, 'การ์ดในเด็คหมดและถูกกำจัดออกจากเกม');
+        nextState = elimination.state;
+        if (elimination.winnerId) setWinnerName(nextState.players[elimination.winnerId].name);
+      } else {
+        setWinnerName(opponent.name);
+      }
     }
+    setGameState(nextState);
     showNotification('จั่วการ์ดและตื่น Avatar ทั้งหมดแล้ว — เข้าสู่ Main Phase');
   };
 
@@ -159,9 +200,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         currentPhase: 'DRAW',
         turnNumber: nextTurnNum
       };
-      nextState = appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${opponent.name}`], 'TURN_CHANGE');
+      const nextPlayerName = nextState.players[nextState.playerOrder[nextIndex]].name;
+      nextState = appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE');
       setGameState(nextState);
-      showNotification(`ส่งเทิร์นให้ ${opponent.name}`);
+      showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
 
       if (!isOnline) {
         // Execute simple AI Opponent turn automatically after short delay
@@ -489,6 +531,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         return;
       }
 
+      if (isAttackLockedInFirstRound) {
+        showNotification('โหมดอัดมั่ว: ห้ามโจมตีจนกว่าผู้เล่นคนสุดท้ายของรอบแรกจะได้เล่นเทิร์น');
+        return;
+      }
+
       if (avatar.isRested) {
         showNotification('Avatar ใบนี้อยู่ในสภาพนอน (โจมตีไปแล้ว)');
         return;
@@ -621,7 +668,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     }
 
     if (lifeRes.isGameOver) {
-      setWinnerName(me.name);
+      if (gameState.mode === 'AD_MUA') {
+        const elimination = eliminatePlayer(nextState, opponentId, 'LIFE หมดและถูกกำจัดออกจากเกม (การ์ดทั้งหมดถูกนำออกจากเกม)');
+        nextState = elimination.state;
+        if (elimination.winnerId) setWinnerName(nextState.players[elimination.winnerId].name);
+      } else {
+        setWinnerName(me.name);
+      }
     }
 
     setGameState(nextState);
@@ -709,7 +762,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
           ) : (
             <span className="text-xs text-amber-400 font-medium animate-pulse flex items-center gap-1 px-2">
               <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              เทิร์นคู่แข่ง...
+              {isEliminated ? 'คุณถูกกำจัดแล้ว' : `เทิร์นของ ${gameState.players[activePlayerId]?.name ?? 'คู่แข่ง'}...`}
             </span>
           )}
         </div>
@@ -731,12 +784,53 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         </div>
       )}
 
+      {isEliminated && !winnerName && (
+        <div role="status" className="bg-red-950 text-red-200 text-xs font-semibold px-4 py-1.5 z-30 border-b border-red-800">
+          คุณถูกกำจัดออกจากเกมแล้ว — กำลังรับชมจนจบเกม
+        </div>
+      )}
+
+      {isAttackLockedInFirstRound && !isEliminated && (
+        <div role="status" className="bg-purple-950 text-purple-200 text-[11px] px-4 py-1 z-30 border-b border-purple-800">
+          โหมดอัดมั่ว: รอบแรกห้ามโจมตี จนกว่าผู้เล่นคนสุดท้ายของรอบจะได้เล่นเทิร์น (เทิร์น {gameState.turnNumber}/{Object.keys(gameState.players).length})
+        </div>
+      )}
+
       {/* Main Playmat + Side Event Log */}
       <main className="flex-1 flex overflow-hidden relative">
         {/* Official Playmat Arena */}
         <div className="flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
           {/* ==================== OPPONENT PLAYMAT HALF (MIRRORED) ==================== */}
           <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-1.5 sm:p-2 space-y-1.5">
+            {opponentIds.length > 1 && (
+              <div role="tablist" aria-label="เลือกคู่แข่ง" className="flex gap-1.5 overflow-x-auto pb-0.5">
+                {opponentIds.map(id => {
+                  const rival = gameState.players[id];
+                  const isFocused = id === opponentId;
+                  return (
+                    <button
+                      key={id}
+                      role="tab"
+                      aria-selected={isFocused}
+                      onClick={() => setFocusedOpponentId(id)}
+                      className={`shrink-0 px-2.5 py-1 rounded-lg border text-[10px] sm:text-[11px] text-left transition ${
+                        isFocused
+                          ? 'bg-red-950/70 border-red-500 text-red-100'
+                          : 'bg-slate-950/70 border-slate-800 text-slate-400 hover:border-slate-600'
+                      }`}
+                    >
+                      <span className="font-bold flex items-center gap-1">
+                        {id === activePlayerId && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-label="กำลังเล่นเทิร์น" />}
+                        {rival.name}
+                      </span>
+                      <span className="block text-[9px] opacity-80">
+                        LIFE {rival.lifeDeck.filter(c => !c.isFaceUp).length}/5 • Avatar {rival.avatarZone.length} • มือ {rival.hand.length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="flex items-center justify-between text-[10px] sm:text-xs px-1 text-slate-400">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-red-400">{opponent.name}</span>

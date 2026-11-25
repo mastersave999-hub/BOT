@@ -7,8 +7,8 @@ import { MatchmakingLobby } from '../components/lobby/MatchmakingLobby';
 import { AuthModal } from '../components/auth/AuthModal';
 import { GameState, CardInstance, Card, PlayerState } from '../engine/types';
 import {
-  HOST_PLAYER_ID, GUEST_PLAYER_ID,
-  type MatchSession, type PlayerSetup
+  playerIdForSeat,
+  type MatchSession, type PlayerSetup, type RoomMode
 } from '../engine/multiplayer';
 import {
   getCurrentUser, logoutUser, saveDeckForUser,
@@ -43,7 +43,7 @@ function resolveDecks(main: Card[] | undefined, life: Card[] | undefined) {
 
 function createOnlinePlayer(playerId: string, seat: number, setup: PlayerSetup): PlayerState {
   const { main, life } = resolveDecks(setup.mainDeck, setup.lifeDeck);
-  const prefix = seat === 0 ? 'p1' : 'p2';
+  const prefix = `p${seat + 1}`;
   return {
     id: playerId,
     name: setup.name,
@@ -62,25 +62,38 @@ function createOnlinePlayer(playerId: string, seat: number, setup: PlayerSetup):
   };
 }
 
-function buildOnlineState(host: PlayerSetup, guest: PlayerSetup): GameState {
+function shuffled<T>(items: T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function buildOnlineState(mode: RoomMode, setups: PlayerSetup[]): GameState {
+  const ids = setups.map((_, seat) => playerIdForSeat(seat));
+  const players: Record<string, PlayerState> = {};
+  setups.forEach((setup, seat) => {
+    players[ids[seat]] = createOnlinePlayer(ids[seat], seat, setup);
+  });
+
   return {
     id: `online-${Date.now()}`,
-    mode: 'DUEL',
-    playerOrder: [HOST_PLAYER_ID, GUEST_PLAYER_ID],
+    mode,
+    // Ad-Mua: turn order comes from a dice roll, so the first seat is random. Duel: host goes first.
+    playerOrder: mode === 'AD_MUA' ? shuffled(ids) : ids,
     currentTurnPlayerIndex: 0,
     currentPhase: 'DRAW',
     turnNumber: 1,
     roundNumber: 1,
     landMagicZone: null,
-    players: {
-      [HOST_PLAYER_ID]: createOnlinePlayer(HOST_PLAYER_ID, 0, host),
-      [GUEST_PLAYER_ID]: createOnlinePlayer(GUEST_PLAYER_ID, 1, guest)
-    },
+    players,
     eventLog: [
       {
         timestamp: Date.now(),
         type: 'GAME_STARTED',
-        description: `${host.name} พบกับ ${guest.name} ในศึกออนไลน์! เริ่มเกมรอบแรก`,
+        description: `${setups.map(s => s.name).join(' vs ')} — ศึกออนไลน์โหมด ${mode === 'AD_MUA' ? 'อัดมั่ว' : 'Duel'} เริ่มแล้ว!`,
         actorId: 'system'
       }
     ]
@@ -244,7 +257,7 @@ export default function Home() {
         buildState={buildOnlineState}
         onMatchReady={(session) => {
           setOnlineSession(session);
-          setGameMode('DUEL');
+          setGameMode(session.initialState.mode);
           setInitialGameState(session.initialState);
           setCurrentView('GAME');
         }}

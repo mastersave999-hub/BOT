@@ -77,3 +77,57 @@ export function executeDrawPhase(state: GameState): GameState {
     ]
   };
 }
+
+/**
+ * Ad-Mua rule 5: an eliminated player's cards leave the game immediately and the
+ * turn order closes up. The last surviving player is reported as the winner.
+ */
+export function eliminatePlayer(
+  state: GameState,
+  playerId: string,
+  reason = 'ถูกกำจัดออกจากเกม'
+): { state: GameState; winnerId: string | null } {
+  const eliminatedIndex = state.playerOrder.indexOf(playerId);
+  if (eliminatedIndex === -1) return { state, winnerId: null };
+
+  const playerOrder = state.playerOrder.filter(id => id !== playerId);
+  const wasActive = eliminatedIndex === state.currentTurnPlayerIndex;
+
+  let currentTurnPlayerIndex = state.currentTurnPlayerIndex;
+  if (eliminatedIndex < currentTurnPlayerIndex) currentTurnPlayerIndex -= 1;
+  if (playerOrder.length > 0) currentTurnPlayerIndex %= playerOrder.length;
+
+  const eliminated = state.players[playerId];
+  const clearedPlayer: PlayerState = {
+    ...eliminated,
+    deck: [],
+    hand: [],
+    lifeDeck: [],
+    avatarZone: [],
+    constructZone: [],
+    magicZone: [],
+    hell: [],
+    darkDimension: []
+  };
+
+  const nextState: GameState = {
+    ...state,
+    playerOrder,
+    currentTurnPlayerIndex,
+    currentPhase: wasActive ? 'DRAW' : state.currentPhase,
+    turnNumber: wasActive ? state.turnNumber + 1 : state.turnNumber,
+    landMagicZone: state.landMagicZone?.ownerId === playerId ? null : state.landMagicZone,
+    players: { ...state.players, [playerId]: clearedPlayer },
+    eventLog: [
+      ...state.eventLog,
+      {
+        timestamp: Date.now(),
+        type: 'PLAYER_ELIMINATED',
+        description: `${eliminated?.name ?? playerId} ${reason}`,
+        actorId: playerId
+      }
+    ]
+  };
+
+  return { state: nextState, winnerId: playerOrder.length === 1 ? playerOrder[0] : null };
+}

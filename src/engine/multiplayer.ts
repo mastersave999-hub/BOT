@@ -1,5 +1,7 @@
 import type { Card, GameState } from './types';
 
+export type RoomMode = 'DUEL' | 'AD_MUA';
+
 export interface PlayerSetup {
   name: string;
   mainDeck: Card[];
@@ -8,7 +10,9 @@ export interface PlayerSetup {
 
 export type NetMessage =
   | { type: 'HELLO'; setup: PlayerSetup }
-  | { type: 'START'; state: GameState }
+  | { type: 'ROOM'; mode: RoomMode; capacity: number; names: string[] }
+  | { type: 'REJECT'; reason: string }
+  | { type: 'START'; state: GameState; myPlayerId: string }
   | { type: 'SYNC'; state: GameState; winner: string | null }
   | { type: 'PING' }
   | { type: 'LEAVE' };
@@ -17,7 +21,10 @@ export interface RoomLink {
   send: (msg: NetMessage) => void;
   /** Messages received before the first subscriber attaches are buffered and replayed. */
   onMessage: (cb: (msg: NetMessage) => void) => () => void;
+  /** Fires once nobody is connected any more (for a guest: the host is gone). */
   onClose: (cb: () => void) => () => void;
+  /** Host only: fires with the player id whenever one guest drops out. */
+  onPeerLeft?: (cb: (playerId: string) => void) => () => void;
   close: () => void;
 }
 
@@ -33,13 +40,26 @@ export interface RoomHandlers {
   onStatus: (status: string) => void;
   onError: (message: string) => void;
   onReady: (session: MatchSession) => void;
+  /** Called with the names of everybody in the room (host first) whenever it changes. */
+  onPlayers?: (names: string[], capacity: number) => void;
   /** Host only: called once the room code is registered with the signalling server. */
   onCode?: (code: string) => void;
+}
+
+export interface HostController {
+  cancel: () => void;
+  /** Starts the match with whoever has joined so far. No-op when too few players joined. */
+  start: () => void;
 }
 
 export interface RoomController {
   cancel: () => void;
 }
+
+export const ROOM_LIMITS: Record<RoomMode, { min: number; max: number }> = {
+  DUEL: { min: 2, max: 2 },
+  AD_MUA: { min: 3, max: 4 }
+};
 
 const PEER_PREFIX = 'bot-tcg-talingchan-';
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -49,7 +69,7 @@ const HEARTBEAT_INTERVAL_MS = 5000;
 const HEARTBEAT_TIMEOUT_MS = 45000;
 
 export const HOST_PLAYER_ID = 'player-1';
-export const GUEST_PLAYER_ID = 'player-2';
+export const playerIdForSeat = (seat: number) => `player-${seat + 1}`;
 
 // JSON cannot represent Set, but PlayerState.usedMagicTypesThisTurn is one.
 function encode(msg: NetMessage): string {
@@ -92,11 +112,20 @@ interface DataConnectionLike {
   on: (event: string, cb: (...args: any[]) => void) => void;
 }
 
-function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => boolean): RoomLink {
+/**
+ * 'pass'     - not a handshake message, deliver it to subscribers.
+ * 'consumed' - handshake message handled, keep the handshake handler installed.
+ * 'done'     - handshake message handled, remove the handshake handler.
+ */
+type HandshakeResult = 'pass' | 'consumed' | 'done';
+
+function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => HandshakeResult): RoomLink {
   const messageListeners = new Set<(msg: NetMessage) => void>();
   const closeListeners = new Set<() => void>();
   const buffer: NetMessage[] = [];
   let closed = false;
+  let lastSeen = Date.now();
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   const dispatch = (msg: NetMessage) => {
     if (messageListeners.size === 0) {
@@ -105,9 +134,6 @@ function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => b
     }
     messageListeners.forEach(cb => cb(msg));
   };
-
-  let lastSeen = Date.now();
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
 
   const notifyClosed = () => {
     if (closed) return;
@@ -136,13 +162,17 @@ function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => b
       notifyClosed();
       return;
     }
-    if (handshake && handshake(msg)) {
-      handshake = undefined;
-      startHeartbeat();
-      return;
+    if (handshake) {
+      const result = handshake(msg);
+      if (result !== 'pass') {
+        startHeartbeat();
+        if (result === 'done') handshake = undefined;
+        return;
+      }
     }
     dispatch(msg);
   });
+
   conn.on('close', notifyClosed);
   conn.on('error', notifyClosed);
 
@@ -181,17 +211,125 @@ function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => b
   };
 }
 
-export function hostRoom(
-  local: PlayerSetup,
-  buildState: (host: PlayerSetup, guest: PlayerSetup) => GameState,
-  handlers: RoomHandlers
-): RoomController {
-  let cancelled = false;
-  let peer: any = null;
-  let guestConn: DataConnectionLike | null = null;
-  let matched = false;
+interface GuestEntry {
+  playerId: string;
+  conn: DataConnectionLike;
+  link: RoomLink;
+  setup: PlayerSetup | null;
+}
 
-  const start = async (attempt: number) => {
+/** Star topology: the host owns every connection and relays guest updates to the other guests. */
+function createHostLink(guests: GuestEntry[]): RoomLink {
+  const messageListeners = new Set<(msg: NetMessage) => void>();
+  const closeListeners = new Set<() => void>();
+  const peerLeftListeners = new Set<(playerId: string) => void>();
+  const buffer: NetMessage[] = [];
+  const openGuests = new Set(guests.map(g => g.playerId));
+  let allClosed = false;
+
+  guests.forEach(guest => {
+    guest.link.onMessage(msg => {
+      if (msg.type === 'SYNC') {
+        guests.forEach(other => {
+          if (other.playerId !== guest.playerId) other.link.send(msg);
+        });
+      }
+      if (messageListeners.size === 0) {
+        buffer.push(msg);
+        return;
+      }
+      messageListeners.forEach(cb => cb(msg));
+    });
+
+    guest.link.onClose(() => {
+      openGuests.delete(guest.playerId);
+      peerLeftListeners.forEach(cb => cb(guest.playerId));
+      if (openGuests.size === 0 && !allClosed) {
+        allClosed = true;
+        closeListeners.forEach(cb => cb());
+      }
+    });
+  });
+
+  return {
+    send: msg => guests.forEach(g => g.link.send(msg)),
+    onMessage: cb => {
+      messageListeners.add(cb);
+      if (buffer.length > 0) {
+        const pending = buffer.splice(0, buffer.length);
+        pending.forEach(cb);
+      }
+      return () => messageListeners.delete(cb);
+    },
+    onClose: cb => {
+      closeListeners.add(cb);
+      if (allClosed) cb();
+      return () => closeListeners.delete(cb);
+    },
+    onPeerLeft: cb => {
+      peerLeftListeners.add(cb);
+      return () => peerLeftListeners.delete(cb);
+    },
+    close: () => guests.forEach(g => g.link.close())
+  };
+}
+
+export function hostRoom(
+  mode: RoomMode,
+  local: PlayerSetup,
+  buildState: (setups: PlayerSetup[]) => GameState,
+  handlers: RoomHandlers
+): HostController {
+  const { min, max } = ROOM_LIMITS[mode];
+  let cancelled = false;
+  let started = false;
+  let peer: any = null;
+  let roomCode = '';
+  const guests: GuestEntry[] = [];
+
+  const joinedGuests = () => guests.filter(g => g.setup);
+  const names = () => [local.name, ...joinedGuests().map(g => g.setup!.name)];
+
+  const publishRoster = () => {
+    const roster = names();
+    handlers.onPlayers?.(roster, max);
+    joinedGuests().forEach(g => g.link.send({ type: 'ROOM', mode, capacity: max, names: roster }));
+    if (roster.length < min) {
+      handlers.onStatus(`รอเพื่อนเข้าห้อง... (${roster.length}/${max})`);
+    } else {
+      handlers.onStatus(
+        mode === 'DUEL' ? 'เพื่อนเข้าห้องแล้ว' : `ผู้เล่นครบขั้นต่ำแล้ว (${roster.length}/${max}) กดเริ่มเกมได้เลย`
+      );
+    }
+  };
+
+  const startMatch = () => {
+    const ready = joinedGuests();
+    if (started || cancelled || ready.length + 1 < min) return;
+    started = true;
+
+    const setups = [local, ...ready.map(g => g.setup!)];
+    const initialState = buildState(setups);
+    ready.forEach((guest, index) => {
+      guest.playerId = playerIdForSeat(index + 1);
+    });
+    ready.forEach(guest => {
+      guest.link.send({ type: 'START', state: initialState, myPlayerId: guest.playerId });
+    });
+
+    // Anybody who connected but never said hello is not part of the match.
+    guests.filter(g => !g.setup).forEach(g => g.link.close());
+
+    handlers.onReady({
+      link: createHostLink(ready),
+      role: 'host',
+      myPlayerId: HOST_PLAYER_ID,
+      code: roomCode,
+      initialState
+    });
+  };
+
+  const begin = async (attempt: number) => {
     const { Peer } = await import('peerjs');
     if (cancelled) return;
 
@@ -200,46 +338,49 @@ export function hostRoom(
 
     peer.on('open', () => {
       if (cancelled) return;
+      roomCode = code;
       handlers.onCode?.(code);
-      handlers.onStatus('รอเพื่อนเข้าห้อง...');
+      publishRoster();
     });
 
     peer.on('connection', (conn: DataConnectionLike) => {
-      if (matched || guestConn) {
-        conn.on('open', () => conn.close());
-        return;
-      }
-      guestConn = conn;
+      const reject = (reason: string) => {
+        conn.on('open', () => {
+          conn.send(encode({ type: 'REJECT', reason }));
+          setTimeout(() => conn.close(), 500);
+        });
+      };
+      if (started) return reject('เกมในห้องนี้เริ่มไปแล้ว');
+      if (guests.length >= max - 1) return reject('ห้องเต็มแล้ว');
+
+      const entry: GuestEntry = {
+        playerId: playerIdForSeat(guests.length + 1),
+        conn,
+        setup: null,
+        link: createLink(conn, msg => {
+          if (msg.type !== 'HELLO' || started) return 'pass';
+          entry.setup = msg.setup;
+          publishRoster();
+          if (mode === 'DUEL') startMatch();
+          return 'consumed';
+        })
+      };
+      guests.push(entry);
       handlers.onStatus('เพื่อนกำลังเชื่อมต่อ...');
 
-      const link = createLink(conn, msg => {
-        if (msg.type !== 'HELLO' || matched) return false;
-        matched = true;
-        const initialState = buildState(local, msg.setup);
-        conn.send(encode({ type: 'START', state: initialState }));
-        handlers.onReady({
-          link,
-          role: 'host',
-          myPlayerId: HOST_PLAYER_ID,
-          code,
-          initialState
-        });
-        return true;
-      });
-
-      conn.on('close', () => {
-        if (!matched) {
-          guestConn = null;
-          handlers.onStatus('เพื่อนหลุดการเชื่อมต่อ รอเข้าห้องใหม่อีกครั้ง...');
-        }
+      entry.link.onClose(() => {
+        if (started) return;
+        const index = guests.indexOf(entry);
+        if (index !== -1) guests.splice(index, 1);
+        if (!cancelled) publishRoster();
       });
     });
 
     peer.on('error', (err: { type?: string; message?: string }) => {
-      if (cancelled || matched) return;
+      if (cancelled || started) return;
       if (err.type === 'unavailable-id' && attempt < 5) {
         peer.destroy();
-        start(attempt + 1);
+        begin(attempt + 1);
         return;
       }
       handlers.onError(
@@ -250,14 +391,16 @@ export function hostRoom(
     });
   };
 
-  start(0).catch(() => handlers.onError('โหลดระบบเชื่อมต่อไม่สำเร็จ'));
+  begin(0).catch(() => handlers.onError('โหลดระบบเชื่อมต่อไม่สำเร็จ'));
 
   return {
+    start: startMatch,
     cancel: () => {
       cancelled = true;
-      if (!matched && peer) {
+      if (!started) {
+        guests.forEach(g => g.link.close());
         try {
-          peer.destroy();
+          peer?.destroy();
         } catch {}
       }
     }
@@ -272,6 +415,7 @@ export function joinRoom(
   const code = normalizeRoomCode(rawCode);
   let cancelled = false;
   let peer: any = null;
+  let link: RoomLink | null = null;
   let matched = false;
   let timeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -279,6 +423,7 @@ export function joinRoom(
     if (cancelled || matched) return;
     if (timeout) clearTimeout(timeout);
     handlers.onError(message);
+    link?.close();
     try {
       peer?.destroy();
     } catch {}
@@ -304,22 +449,41 @@ export function joinRoom(
       if (cancelled) return;
       const conn: DataConnectionLike = peer.connect(peerIdFor(code), { reliable: true });
 
-      const link = createLink(conn, msg => {
-        if (msg.type !== 'START' || matched) return false;
-        matched = true;
-        if (timeout) clearTimeout(timeout);
-        handlers.onReady({
-          link,
-          role: 'guest',
-          myPlayerId: GUEST_PLAYER_ID,
-          code,
-          initialState: msg.state
-        });
-        return true;
+      link = createLink(conn, msg => {
+        if (msg.type === 'REJECT') {
+          fail(msg.reason);
+          return 'consumed';
+        }
+        if (msg.type === 'ROOM') {
+          // Connected: from here the host decides when the match begins, so stop the connect timeout.
+          if (timeout) clearTimeout(timeout);
+          handlers.onPlayers?.(msg.names, msg.capacity);
+          handlers.onStatus(
+            msg.mode === 'DUEL'
+              ? 'เข้าห้องแล้ว กำลังเริ่มเกม...'
+              : `เข้าห้องแล้ว รอโฮสต์กดเริ่มเกม (${msg.names.length}/${msg.capacity})`
+          );
+          return 'consumed';
+        }
+        if (msg.type === 'START') {
+          matched = true;
+          if (timeout) clearTimeout(timeout);
+          handlers.onReady({
+            link: link!,
+            role: 'guest',
+            myPlayerId: msg.myPlayerId,
+            code,
+            initialState: msg.state
+          });
+          return 'done';
+        }
+        return 'pass';
       });
 
+      link.onClose(() => fail('การเชื่อมต่อกับห้องถูกตัด'));
+
       conn.on('open', () => {
-        handlers.onStatus('พบห้องแล้ว กำลังเข้าสู่สนาม...');
+        handlers.onStatus('พบห้องแล้ว กำลังเข้าร่วม...');
         conn.send(encode({ type: 'HELLO', setup: local }));
       });
     });
@@ -329,9 +493,10 @@ export function joinRoom(
     cancel: () => {
       cancelled = true;
       if (timeout) clearTimeout(timeout);
-      if (!matched && peer) {
+      if (!matched) {
+        link?.close();
         try {
-          peer.destroy();
+          peer?.destroy();
         } catch {}
       }
     }
