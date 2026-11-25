@@ -14,6 +14,7 @@ import {
 interface DeckBuilderProps {
   onBack: () => void;
   onSaveDeck: (mainDeck: Card[], lifeDeck: Card[], deckName: string, deckId: string | null) => void;
+  saveError?: string | null;
   initialMainDeck?: Card[];
   initialLifeDeck?: Card[];
   currentDeckName?: string;
@@ -75,6 +76,7 @@ function CardImageThumbnail({
 export const DeckBuilder: React.FC<DeckBuilderProps> = ({
   onBack,
   onSaveDeck,
+  saveError = null,
   initialMainDeck,
   initialLifeDeck,
   currentDeckName = 'เด็คหลักของฉัน',
@@ -340,6 +342,11 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
             <span>บันทึกเด็ค</span>
           </button>
         </div>
+        {saveError && (
+          <p role="alert" className="basis-full rounded-lg border border-red-900/70 bg-red-950/50 px-3 py-2 text-xs text-red-200">
+            {saveError}
+          </p>
+        )}
       </header>
 
       {/* Main Workspace Layout */}

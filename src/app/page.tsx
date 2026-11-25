@@ -148,23 +148,23 @@ export default function Home() {
   };
 
   const handleSaveDeck = async (main: Card[], life: Card[], deckName: string, deckId: string | null) => {
-    setCustomMainDeck(main);
-    setCustomLifeDeck(life);
-    setActiveDeckName(deckName.trim() || `เด็คใหม่ ${deckSlots.length + 1}`);
     setAccountMessage(null);
 
     if (user) {
       try {
         const updatedUser = await saveDeckForUser(deckName, main, life, deckId);
-        if (updatedUser) {
-          const savedDeck = deckId
-            ? updatedUser.savedDecks.find((deck) => deck.id === deckId)
-            : updatedUser.savedDecks[0];
-          setActiveDeckId(savedDeck?.id ?? null);
-          await mutateUser(updatedUser, { revalidate: false });
-        }
-      } catch {
-        setAccountMessage('บันทึกเด็คออนไลน์ไม่สำเร็จ กรุณาลองอีกครั้ง');
+        const savedDeck = deckId
+          ? updatedUser.savedDecks.find((deck) => deck.id === deckId)
+          : updatedUser.savedDecks[0];
+        setActiveDeckId(savedDeck?.id ?? null);
+        await mutateUser(updatedUser, { revalidate: false });
+      } catch (error) {
+        setAccountMessage(error instanceof TypeError
+          ? 'เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้ง'
+          : error instanceof Error
+            ? error.message
+            : 'บันทึกเด็คออนไลน์ไม่สำเร็จ กรุณาลองอีกครั้ง');
+        return;
       }
     } else {
       const existingDeck = deckId ? guestDecks.find((deck) => deck.id === deckId) : undefined;
@@ -179,8 +179,11 @@ export default function Home() {
         ? decks.map((deck) => deck.id === existingDeck.id ? savedDeck : deck)
         : [savedDeck, ...decks]);
       setActiveDeckId(savedDeck.id);
-      setActiveDeckName(savedDeck.name);
     }
+
+    setCustomMainDeck(main);
+    setCustomLifeDeck(life);
+    setActiveDeckName(deckName.trim() || `เด็คใหม่ ${deckSlots.length + 1}`);
     setCurrentView('HOME');
   };
 
@@ -192,6 +195,7 @@ export default function Home() {
   };
 
   const handleCreateDeck = () => {
+    setAccountMessage(null);
     setActiveDeckId(null);
     setActiveDeckName(`เด็คใหม่ ${deckSlots.length + 1}`);
     setCustomMainDeck([]);
@@ -306,6 +310,7 @@ export default function Home() {
         currentDeckId={activeDeckId}
         initialMainDeck={customMainDeck || []}
         initialLifeDeck={customLifeDeck || []}
+        saveError={accountMessage}
         onSaveDeck={handleSaveDeck}
       />
     );
@@ -359,7 +364,10 @@ export default function Home() {
         <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
           <PwaInstallButton />
           <button
-            onClick={() => setCurrentView('DECK_BUILDER')}
+            onClick={() => {
+              setAccountMessage(null);
+              setCurrentView('DECK_BUILDER');
+            }}
             className="px-2.5 sm:px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1.5 transition"
           >
             <Library className="w-3.5 h-3.5 text-amber-400" />
