@@ -20,6 +20,10 @@ function createDummyCard(id: string, name: string, isOnlyOne = false, isBias = f
   };
 }
 
+function createLifeCard(id: string, name: string): Card {
+  return { ...createDummyCard(id, name), type: 'Life' };
+}
+
 describe('Deck Validator (Official Rule Book 3.2)', () => {
   it('should accept a valid 50-card Main Deck with exactly 1 Only#1 card and 5 unique LIFE cards', () => {
     const mainDeck: Card[] = [];
@@ -36,11 +40,11 @@ describe('Deck Validator (Official Rule Book 3.2)', () => {
 
     // 5 unique LIFE cards
     const lifeDeck: Card[] = [
-      createDummyCard('LIFE-001', 'Life 1'),
-      createDummyCard('LIFE-002', 'Life 2'),
-      createDummyCard('LIFE-003', 'Life 3'),
-      createDummyCard('LIFE-004', 'Life 4'),
-      createDummyCard('LIFE-005', 'Life 5')
+      createLifeCard('LIFE-001', 'Life 1'),
+      createLifeCard('LIFE-002', 'Life 2'),
+      createLifeCard('LIFE-003', 'Life 3'),
+      createLifeCard('LIFE-004', 'Life 4'),
+      createLifeCard('LIFE-005', 'Life 5')
     ];
 
     const result = validateDeck(mainDeck, lifeDeck);
@@ -50,7 +54,7 @@ describe('Deck Validator (Official Rule Book 3.2)', () => {
 
   it('should reject a Main Deck with wrong card count', () => {
     const mainDeck = [createDummyCard('SD01-001', 'Card 1', true)];
-    const lifeDeck = [createDummyCard('LIFE-001', 'Life 1')];
+    const lifeDeck = [createLifeCard('LIFE-001', 'Life 1')];
 
     const result = validateDeck(mainDeck, lifeDeck);
     expect(result.isValid).toBe(false);
@@ -63,11 +67,11 @@ describe('Deck Validator (Official Rule Book 3.2)', () => {
     mainDeck.push(createDummyCard('ONLY-1', 'Only One Boss', true));
 
     const duplicateLifeDeck = [
-      createDummyCard('L-1', 'Twin Life'),
-      createDummyCard('L-2', 'Twin Life'), // Duplicate name!
-      createDummyCard('L-3', 'Life 3'),
-      createDummyCard('L-4', 'Life 4'),
-      createDummyCard('L-5', 'Life 5')
+      createLifeCard('L-1', 'Twin Life'),
+      createLifeCard('L-2', 'Twin Life'), // Duplicate name!
+      createLifeCard('L-3', 'Life 3'),
+      createLifeCard('L-4', 'Life 4'),
+      createLifeCard('L-5', 'Life 5')
     ];
 
     const result = validateDeck(mainDeck, duplicateLifeDeck);
@@ -85,7 +89,7 @@ describe('Deck Validator (Official Rule Book 3.2)', () => {
     }
     mainDeck.push(createDummyCard('ONLY-1', 'Only One', true));
 
-    const lifeDeck = Array(5).fill(null).map((_, i) => createDummyCard(`L-${i}`, `Unique Life ${i}`));
+    const lifeDeck = Array(5).fill(null).map((_, i) => createLifeCard(`L-${i}`, `Unique Life ${i}`));
     const result = validateDeck(mainDeck, lifeDeck);
     expect(result.isValid).toBe(false);
     expect(result.errors.some(e => e.includes('exceeds maximum allowed 4 copies'))).toBe(true);
@@ -96,7 +100,7 @@ describe('Deck Validator (Official Rule Book 3.2)', () => {
     mainDeck[0] = createDummyCard('PROMO-1', 'Promo Biased Card', false, true); // Bias card
     mainDeck.push(createDummyCard('ONLY-1', 'Only One', true));
 
-    const lifeDeck = Array(5).fill(null).map((_, i) => createDummyCard(`L-${i}`, `Unique Life ${i}`));
+    const lifeDeck = Array(5).fill(null).map((_, i) => createLifeCard(`L-${i}`, `Unique Life ${i}`));
     const result = validateDeck(mainDeck, lifeDeck);
     expect(result.isValid).toBe(false);
     expect(result.errors.some(e => e.includes('ลำเอียง'))).toBe(true);

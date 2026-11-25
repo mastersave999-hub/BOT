@@ -86,7 +86,7 @@ export function resolveAvatarCombat(
 export function attackLifeZone(
   attacker: CardInstance,
   defendingPlayer: PlayerState
-): { damageDealt: boolean; isGameOver: boolean; event: string } {
+): { damageDealt: boolean; isGameOver: boolean; revealedCardId?: string; event: string } {
   const attackerPower = calculateNetPower(attacker);
 
   // RuleBook p.25: Avatar with 0 POWER cannot deal damage to LIFE Card Zone
@@ -118,7 +118,8 @@ export function attackLifeZone(
     return {
       damageDealt: true,
       isGameOver: false,
-      event: `${attacker.card.name} damaged LIFE Card #${nextLifeCardIndex + 1} (${defendingPlayer.lifeDeck[nextLifeCardIndex].card.name}).${allRevealed ? ' Defending player entered Critical State (สถานะสาหัส)!' : ''}`
+      revealedCardId: defendingPlayer.lifeDeck[nextLifeCardIndex].instanceId,
+      event: `${attacker.card.name} revealed LIFE Card #${nextLifeCardIndex + 1}.${allRevealed ? ' Defending player entered Critical State (สถานะสาหัส)!' : ''}`
     };
   }
 

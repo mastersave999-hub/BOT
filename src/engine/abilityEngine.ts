@@ -273,11 +273,11 @@ export function executeCardAbility(
   }
 
   // 1. Handle Draw Effect ("จั่วการ์ด X ใบ")
-  if (parsed.drawCount > 0 || triggerType === 'LIFE_FLIP') {
-    const count = triggerType === 'LIFE_FLIP' ? Math.max(1, parsed.drawCount) : parsed.drawCount;
-    if (count > 0 && actor.deck.length > 0) {
-      const drawn = actor.deck.slice(0, count).map(c => ({ ...c, isFaceUp: true }));
-      actor.deck = actor.deck.slice(count);
+  if (parsed.drawCount > 0) {
+    const mainDeck = actor.deck.filter(card => card.card.type !== 'Life');
+    if (mainDeck.length > 0) {
+      const drawn = mainDeck.slice(0, parsed.drawCount).map(c => ({ ...c, isFaceUp: true }));
+      actor.deck = mainDeck.slice(drawn.length);
       actor.hand = [...actor.hand, ...drawn];
       logs.push(`✨ ความสามารถ "${sourceCard.card.name}": จั่วการ์ด ${drawn.length} ใบ`);
     }
@@ -372,8 +372,11 @@ export function executeCardAbility(
       logs.push(`🔥 "${sourceCard.card.name}" อัญเชิญ "${revived.card.name}" จากนรกกลับลงสนาม!`);
     }
   } else if (parsed.recoversFromHell > 0 && actor.hell.length > 0) {
-    const toRecover = actor.hell.slice(0, parsed.recoversFromHell);
-    actor.hell = actor.hell.slice(parsed.recoversFromHell);
+    const toRecover = actor.hell
+      .filter(card => card.card.type !== 'Life')
+      .slice(0, parsed.recoversFromHell);
+    const recoveredIds = new Set(toRecover.map(card => card.instanceId));
+    actor.hell = actor.hell.filter(card => !recoveredIds.has(card.instanceId));
     actor.deck = [...actor.deck, ...toRecover.map(c => ({ ...c, isFaceUp: false }))];
     logs.push(`♻️ "${sourceCard.card.name}" นำการ์ด ${toRecover.length} ใบจากนรกกลับเข้า Deck!`);
   }

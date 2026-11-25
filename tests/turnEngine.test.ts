@@ -70,6 +70,55 @@ describe('Turn Engine: Draw Phase Rules (Rule Book 3.2 p.21)', () => {
     expect(nextState.currentPhase).toBe('MAIN');
   });
 
+  it('never draws a LIFE card from the main deck into hand', () => {
+    const lifeCard = createMockCard('LIFE-1');
+    lifeCard.card.type = 'Life';
+    const player: PlayerState = {
+      id: 'p1', name: 'Player 1', seat: 0,
+      deck: [lifeCard, createMockCard('D1'), createMockCard('D2')],
+      hand: [createMockCard('H1')], lifeDeck: [], avatarZone: [], constructZone: [],
+      magicZone: [], hell: [], darkDimension: [], isCritical: false,
+      reactMagicBudget: { ownTurnRemaining: 0, opponentTurnRemaining: 0 },
+      usedMagicTypesThisTurn: new Set()
+    };
+    const state: GameState = {
+      id: 'game-1', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0,
+      currentPhase: 'DRAW', turnNumber: 2, roundNumber: 1, players: { p1: player },
+      landMagicZone: null, eventLog: []
+    };
+
+    const updated = executeDrawPhase(state).players.p1;
+    expect(updated.hand.some(card => card.card.type === 'Life')).toBe(false);
+    expect(updated.deck.some(card => card.card.type === 'Life')).toBe(false);
+    expect(updated.hand.map(card => card.instanceId)).toEqual(['H1', 'D1', 'D2']);
+  });
+
+  it('resolves queued attack-revealed LIFE abilities at the start of the owner\'s Main Phase', () => {
+    const lifeCard = createMockCard('LIFE-1');
+    lifeCard.card.type = 'Life';
+    lifeCard.card.mainEffect = 'จั่วการ์ด 1 ใบ';
+    const player: PlayerState = {
+      id: 'p1', name: 'Player 1', seat: 0,
+      deck: [createMockCard('D1'), createMockCard('D2'), createMockCard('D3')],
+      hand: [createMockCard('H1'), createMockCard('H2'), createMockCard('H3')],
+      lifeDeck: [{ ...lifeCard, isFaceUp: true }], pendingLifeEffects: ['LIFE-1'],
+      avatarZone: [], constructZone: [], magicZone: [], hell: [], darkDimension: [],
+      isCritical: false, reactMagicBudget: { ownTurnRemaining: 0, opponentTurnRemaining: 0 },
+      usedMagicTypesThisTurn: new Set()
+    };
+    const state: GameState = {
+      id: 'game-1', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0,
+      currentPhase: 'DRAW', turnNumber: 2, roundNumber: 1, players: { p1: player },
+      landMagicZone: null, eventLog: []
+    };
+
+    const nextState = executeDrawPhase(state);
+    expect(nextState.currentPhase).toBe('MAIN');
+    expect(nextState.players.p1.hand.map(card => card.instanceId)).toEqual(['H1', 'H2', 'H3', 'D1', 'D2']);
+    expect(nextState.players.p1.pendingLifeEffects).toEqual([]);
+    expect(nextState.eventLog.some(event => event.type === 'LIFE_FLIP')).toBe(true);
+  });
+
   it('Hand with fewer than 3 cards draws up to 3 cards', () => {
     const player: PlayerState = {
       id: 'p1',

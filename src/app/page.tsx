@@ -163,7 +163,15 @@ export default function Home() {
   };
 
   const startMatch = (mode: 'DUEL' | 'AD_MUA', opponentName = 'ผู้เล่นฝ่ายตรงข้าม (AI Opponent)') => {
-    const rawCards = shuffled(sampleCardsData as Card[]);
+    const sampleCards = sampleCardsData as Card[];
+    const aiMainCandidates = shuffled(sampleCards.filter(card => card.type !== 'Life'));
+    const aiLifeCandidates = shuffled(sampleCards.filter(card => card.type === 'Life'));
+    const aiMainPool = aiMainCandidates.length >= 50
+      ? aiMainCandidates.slice(0, 50)
+      : (starterDeckData.mainDeck as Card[]);
+    const aiLifePool = aiLifeCandidates.length >= 5
+      ? aiLifeCandidates.slice(0, 5)
+      : (starterDeckData.lifeDeck as Card[]);
 
     // Use custom decks if built, otherwise official starter deck
     const mainCardsPool = shuffled(
@@ -178,11 +186,11 @@ export default function Home() {
     const p1Hand = mainCardsPool.slice(0, 5).map((c, i) => createCardInstance(c, 'player-1', `p1-hand-${i}`, true));
     const p1Life = lifeCardsPool.map((c, i) => createCardInstance(c, 'player-1', `p1-life-${i}`, false));
 
-    // Player 2
-    const p2DeckCards = rawCards.slice(20, 65).map((c, i) => createCardInstance(c, 'player-2', `p2-deck-${i}`, false));
-    const p2Hand = rawCards.slice(10, 15).map((c, i) => createCardInstance(c, 'player-2', `p2-hand-${i}`, false));
-    const p2Life = rawCards.slice(15, 20).map((c, i) => createCardInstance(c, 'player-2', `p2-life-${i}`, false));
-    const p2StarterAvatar = createCardInstance(rawCards.find(c => c.type === 'Avatar') ?? rawCards[0], 'player-2', 'p2-starter-1', true);
+    // Player 2 uses disjoint Main and LIFE pools, with exactly five LIFE cards.
+    const p2DeckCards = aiMainPool.slice(5).map((c, i) => createCardInstance(c, 'player-2', `p2-deck-${i}`, false));
+    const p2Hand = aiMainPool.slice(0, 5).map((c, i) => createCardInstance(c, 'player-2', `p2-hand-${i}`, false));
+    const p2Life = aiLifePool.map((c, i) => createCardInstance(c, 'player-2', `p2-life-${i}`, false));
+    const p2StarterAvatar = createCardInstance(aiMainPool.find(c => c.type === 'Avatar') ?? aiMainPool[0], 'player-2', 'p2-starter-1', true);
 
     const initialGame: GameState = {
       id: `match-${Date.now()}`,
