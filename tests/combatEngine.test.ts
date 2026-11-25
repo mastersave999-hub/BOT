@@ -124,6 +124,8 @@ describe('Combat Engine (Rule Book 3.2 pp. 22-25)', () => {
     expect(res.damageDealt).toBe(true);
     expect(res.isGameOver).toBe(false);
     expect(defender.lifeDeck[4].isFaceUp).toBe(true);
+    expect(res.revealedCardId).toBe('L5');
+    expect(res.event).not.toContain('Life 5');
     expect(defender.isCritical).toBe(true); // Now Critical State!
 
     // Next attack while in Critical State should end the game

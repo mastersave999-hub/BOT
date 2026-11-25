@@ -1,4 +1,5 @@
 import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
+import { executeCardAbility } from './abilityEngine';
 
 export function executeDrawPhase(state: GameState): GameState {
   const currentTurnPlayerId = state.playerOrder[state.currentTurnPlayerIndex];
@@ -31,15 +32,16 @@ export function executeDrawPhase(state: GameState): GameState {
     drawCount = 1;
   }
 
-  // Draw cards from top of deck and set isFaceUp to true for hand
-  const cardsDrawn = player.deck.slice(0, drawCount).map(c => ({
+  // LIFE cards are a separate zone and must never enter normal deck drawing.
+  const mainDeck = player.deck.filter(card => card.card.type !== 'Life');
+  const cardsDrawn = mainDeck.slice(0, drawCount).map(c => ({
     ...c,
     isFaceUp: true
   }));
-  const remainingDeck = player.deck.slice(drawCount);
+  const remainingDeck = mainDeck.slice(drawCount);
 
-  // Win/Loss Condition: Deck reaches 0 immediately [RuleBook p.21]
-  if (player.deck.length < drawCount) {
+  // Win/Loss Condition: Main Deck reaches 0 immediately [RuleBook p.21]
+  if (mainDeck.length < drawCount) {
     state.eventLog.push({
       timestamp: Date.now(),
       type: 'PLAYER_DECK_OUT',
@@ -55,11 +57,12 @@ export function executeDrawPhase(state: GameState): GameState {
     avatarZone: updatedAvatarZone,
     deck: remainingDeck,
     hand: updatedHand,
+    pendingLifeEffects: [],
     usedMagicTypesThisTurn: updatedMagicTypes,
     reactMagicBudget: updatedBudget
   };
 
-  return {
+  let nextState: GameState = {
     ...state,
     currentPhase: 'MAIN',
     players: {
@@ -71,11 +74,34 @@ export function executeDrawPhase(state: GameState): GameState {
       {
         timestamp: Date.now(),
         type: 'DRAW_PHASE_COMPLETE',
-        description: `${player.name} drew ${drawCount} card(s) and awakened avatars. Transitioned to Main Phase.`,
+        description: `${player.name} drew ${cardsDrawn.length} card(s) and awakened avatars. Transitioned to Main Phase.`,
         actorId: player.id
       }
     ]
   };
+
+  // Rule Book 3.2 p.22: resolve LIFE abilities revealed by attacks last turn
+  // immediately as this player's Main Phase begins, in queued (top-to-bottom) order.
+  for (const lifeCardId of player.pendingLifeEffects ?? []) {
+    const lifeCard = updatedPlayer.lifeDeck.find(card => card.instanceId === lifeCardId);
+    if (!lifeCard?.isFaceUp) continue;
+
+    const result = executeCardAbility(nextState, currentTurnPlayerId, lifeCard, 'LIFE_FLIP');
+    nextState = result.state;
+    if (result.logs.length > 0) {
+      nextState.eventLog = [
+        ...nextState.eventLog,
+        ...result.logs.map(description => ({
+          timestamp: Date.now(),
+          type: 'LIFE_FLIP',
+          description,
+          actorId: currentTurnPlayerId
+        }))
+      ];
+    }
+  }
+
+  return nextState;
 }
 
 /**

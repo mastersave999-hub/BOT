@@ -18,6 +18,14 @@ export function validateDeck(mainDeck: Card[], lifeDeck: Card[]): DeckValidation
     errors.push(`LIFE Deck must contain exactly 5 cards (current: ${lifeDeck.length}) [RuleBook p.1]`);
   }
 
+  // LIFE cards belong exclusively to the separate LIFE Deck (Rule Book 3.2, p.1).
+  if (mainDeck.some(card => card.type === 'Life')) {
+    errors.push('Main Deck cannot contain LIFE cards; they must remain in the separate LIFE Deck [RuleBook p.1]');
+  }
+  if (lifeDeck.some(card => card.type !== 'Life')) {
+    errors.push('LIFE Deck can contain only LIFE cards [RuleBook p.1]');
+  }
+
   // Rule 3: Life deck cards must have unique names
   const lifeNames = new Set<string>();
   for (const card of lifeDeck) {

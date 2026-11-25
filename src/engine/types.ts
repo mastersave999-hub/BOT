@@ -60,6 +60,8 @@ export interface PlayerState {
   deck: CardInstance[];
   hand: CardInstance[];
   lifeDeck: CardInstance[];
+  /** LIFE card abilities revealed by a successful attack, resolved at this player's next Main Phase. */
+  pendingLifeEffects?: string[];
   avatarZone: CardInstance[]; // Max 4 Avatar, max 6 total including Tokens
   constructZone: CardInstance[]; // Max 3 unique names
   magicZone: CardInstance[]; // Unlimited (active/attached magic or relocated avatars)

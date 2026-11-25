@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { GameState, CardInstance, MagicSubtype } from '../../engine/types';
-import type { RoomLink } from '../../engine/multiplayer';
+import { redactLifeCardsForViewer, type RoomLink } from '../../engine/multiplayer';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
@@ -26,6 +26,34 @@ interface PlaymatProps {
   currentUserId: string;
   /** When provided the match is played against a remote player instead of the built-in AI. */
   link?: RoomLink;
+}
+
+function preserveOwnLifeCardIdentities(
+  incomingState: GameState,
+  currentState: GameState,
+  viewerId: string
+): GameState {
+  const incomingPlayer = incomingState.players[viewerId];
+  const currentPlayer = currentState.players[viewerId];
+  if (!incomingPlayer || !currentPlayer) return incomingState;
+
+  const knownCards = new Map(currentPlayer.lifeDeck.map(card => [card.instanceId, card]));
+  let changed = false;
+  const lifeDeck = incomingPlayer.lifeDeck.map(card => {
+    const knownCard = knownCards.get(card.instanceId);
+    if (!knownCard || card.card.printId !== 'hidden-life-card') return card;
+    changed = true;
+    return { ...card, card: knownCard.card };
+  });
+  if (!changed) return incomingState;
+
+  return {
+    ...incomingState,
+    players: {
+      ...incomingState.players,
+      [viewerId]: { ...incomingPlayer, lifeDeck }
+    }
+  };
 }
 
 interface PendingAbilityAction {
@@ -93,7 +121,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     const offMessage = link.onMessage(msg => {
       if (msg.type !== 'SYNC') return;
       baselineStateRef.current = msg.state;
-      setGameState(msg.state);
+      setGameState(current => preserveOwnLifeCardIdentities(msg.state, current, meId));
       setWinnerName(msg.winner);
       setSelectedAttackerId(null);
       setPendingAbility(null);
@@ -109,7 +137,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       offClose();
       offPeerLeft?.();
     };
-  }, [link]);
+  }, [link, meId]);
 
   // Host only: a guest who dropped out of an Ad-Mua match is eliminated, even if a stale sync re-adds them.
   useEffect(() => {
@@ -645,9 +673,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       ...opponent,
       lifeDeck: opponent.lifeDeck.map(l => ({ ...l }))
     };
-    const prevFlipped = oppClone.lifeDeck.filter(l => l.isFaceUp).length;
     const lifeRes = attackLifeZone(attacker, oppClone);
-    const newlyFlippedCard = oppClone.lifeDeck.filter(l => l.isFaceUp)[prevFlipped];
+    const newlyFlippedCard = lifeRes.revealedCardId
+      ? oppClone.lifeDeck.find(card => card.instanceId === lifeRes.revealedCardId)
+      : undefined;
 
     const updatedMyAvatarZone = me.avatarZone.map(c =>
       c.instanceId === attacker.instanceId ? { ...c, isRested: true } : c
@@ -658,16 +687,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       players: {
         ...gameState.players,
         [meId]: { ...me, avatarZone: updatedMyAvatarZone },
-        [opponentId]: oppClone
+        [opponentId]: newlyFlippedCard
+          ? { ...oppClone, pendingLifeEffects: [...(oppClone.pendingLifeEffects ?? []), newlyFlippedCard.instanceId] }
+          : oppClone
       }
     };
     nextState = appendLogs(nextState, [lifeRes.event], 'ATTACK_LIFE');
-
-    // Trigger flipped LIFE card ability for opponent
-    if (newlyFlippedCard) {
-      const lifeEffRes = executeCardAbility(nextState, opponentId, newlyFlippedCard, 'LIFE_FLIP');
-      nextState = appendLogs(lifeEffRes.state, lifeEffRes.logs, 'LIFE_FLIP', opponentId);
-    }
 
     if (lifeRes.isGameOver) {
       if (gameState.mode === 'AD_MUA') {
@@ -913,19 +938,32 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                   {opponent.lifeDeck.map((lifeCard, idx) => (
                     <div
                       key={lifeCard.instanceId || idx}
+                      role={lifeCard.isFaceUp ? 'button' : undefined}
+                      tabIndex={lifeCard.isFaceUp ? 0 : undefined}
+                      aria-label={lifeCard.isFaceUp
+                        ? `Revealed LIFE card: ${lifeCard.card.name}. Inspect card`
+                        : `Opponent face-down LIFE card ${idx + 1}`}
+                      title={lifeCard.isFaceUp ? lifeCard.card.name : 'Face-down LIFE card'}
                       onClick={(e) => {
                         if (lifeCard.isFaceUp) {
                           e.stopPropagation();
                           setInspectedCard(lifeCard);
                         }
                       }}
+                      onKeyDown={(e) => {
+                        if (lifeCard.isFaceUp && (e.key === 'Enter' || e.key === ' ')) {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setInspectedCard(lifeCard);
+                        }
+                      }}
                       className={`w-6 h-8 rounded border text-[8px] flex items-center justify-center font-bold ${
                         lifeCard.isFaceUp
-                          ? 'bg-red-950/70 border-red-500 text-red-200'
+                          ? 'bg-red-950/70 border-red-500 text-red-200 cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-300'
                           : 'bg-slate-900 border-slate-700 text-amber-500'
                       }`}
                     >
-                      {lifeCard.isFaceUp ? 'หงาย' : idx + 1}
+                      {lifeCard.isFaceUp ? 'หงาย' : 'LIFE'}
                     </div>
                   ))}
                 </div>
@@ -998,17 +1036,20 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
                 <div className="flex flex-col gap-1 items-center my-auto py-1">
                   {me.lifeDeck.map((lifeCard, idx) => (
-                    <div
+                    <button
                       key={lifeCard.instanceId || idx}
-                      onClick={() => lifeCard.isFaceUp && setInspectedCard(lifeCard)}
-                      className={`w-12 sm:w-14 h-7 sm:h-8 rounded border flex items-center justify-center text-[9px] font-bold cursor-pointer transition ${
+                      type="button"
+                      disabled={!lifeCard.isFaceUp}
+                      aria-label={lifeCard.isFaceUp ? `Revealed LIFE card: ${lifeCard.card.name}. Inspect card` : `Face-down LIFE card ${idx + 1}`}
+                      onClick={() => setInspectedCard(lifeCard)}
+                      className={`w-12 sm:w-14 h-7 sm:h-8 rounded border flex items-center justify-center text-[9px] font-bold transition disabled:cursor-default ${
                         lifeCard.isFaceUp
-                          ? 'bg-red-950/70 border-red-500 text-red-200'
+                          ? 'bg-red-950/70 border-red-500 text-red-200 cursor-pointer'
                           : 'bg-slate-900 border-emerald-700/60 text-emerald-400'
                       }`}
                     >
                       {lifeCard.isFaceUp ? lifeCard.card.name.slice(0, 6) : `LIFE #${idx + 1}`}
-                    </div>
+                    </button>
                   ))}
                 </div>
 

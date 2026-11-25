@@ -1,5 +1,64 @@
 import type { Card, GameState } from './types';
 
+const FACE_DOWN_LIFE_CARD: Card = {
+  printId: 'hidden-life-card',
+  name: 'Face-down LIFE',
+  type: 'Life',
+  soi: 1,
+  cost: 0,
+  gem: 0,
+  power: 0,
+  color: 'ไร้สี',
+  rarity: 'C',
+  mainEffect: '',
+  isOnlyOne: false,
+  isBias: false,
+  isCollab: false,
+  imageUrl: 'https://cdn.bottcg.com/cards/card-back.png'
+};
+
+/** Strip card identity from face-down LIFE cards before sending a state to a peer. */
+export function redactLifeCardsInSetup(setup: PlayerSetup): PlayerSetup {
+  return { ...setup, lifeDeck: setup.lifeDeck.map(() => FACE_DOWN_LIFE_CARD) };
+}
+
+export function restoreOwnLifeCardsFromSetup(
+  state: GameState,
+  setup: PlayerSetup,
+  playerId: string
+): GameState {
+  const player = state.players[playerId];
+  if (!player) return state;
+  let changed = false;
+  const lifeDeck = player.lifeDeck.map((card, index) => {
+    const knownCard = setup.lifeDeck[index];
+    if (!knownCard || card.card.printId !== 'hidden-life-card') return card;
+    changed = true;
+    return { ...card, card: knownCard };
+  });
+  if (!changed) return state;
+  return { ...state, players: { ...state.players, [playerId]: { ...player, lifeDeck } } };
+}
+
+export function redactLifeCardsForViewer(state: GameState, viewerId: string): GameState {
+  return {
+    ...state,
+    players: Object.fromEntries(
+      Object.entries(state.players).map(([playerId, player]) => [
+        playerId,
+        playerId === viewerId
+          ? player
+          : {
+              ...player,
+              lifeDeck: player.lifeDeck.map(card =>
+                card.isFaceUp ? card : { ...card, card: FACE_DOWN_LIFE_CARD }
+              )
+            }
+      ])
+    )
+  };
+}
+
 export type RoomMode = 'DUEL' | 'AD_MUA';
 
 export interface PlayerSetup {
@@ -119,7 +178,11 @@ interface DataConnectionLike {
  */
 type HandshakeResult = 'pass' | 'consumed' | 'done';
 
-function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => HandshakeResult): RoomLink {
+function createLink(
+  conn: DataConnectionLike,
+  handshake?: (msg: NetMessage) => HandshakeResult,
+  transformOutgoing?: (msg: NetMessage) => NetMessage
+): RoomLink {
   const messageListeners = new Set<(msg: NetMessage) => void>();
   const closeListeners = new Set<() => void>();
   const buffer: NetMessage[] = [];
@@ -181,7 +244,7 @@ function createLink(conn: DataConnectionLike, handshake?: (msg: NetMessage) => H
   return {
     send: msg => {
       if (closed || !conn.open) return;
-      conn.send(encode(msg));
+      conn.send(encode(transformOutgoing ? transformOutgoing(msg) : msg));
     },
     onMessage: cb => {
       messageListeners.add(cb);
@@ -231,14 +294,22 @@ function createHostLink(guests: GuestEntry[]): RoomLink {
     guest.link.onMessage(msg => {
       if (msg.type === 'SYNC') {
         guests.forEach(other => {
-          if (other.playerId !== guest.playerId) other.link.send(msg);
+          if (other.playerId !== guest.playerId) {
+            other.link.send({
+              ...msg,
+              state: redactLifeCardsForViewer(msg.state, other.playerId)
+            });
+          }
         });
       }
+      const hostView = msg.type === 'SYNC'
+        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
+        : msg;
       if (messageListeners.size === 0) {
-        buffer.push(msg);
+        buffer.push(hostView);
         return;
       }
-      messageListeners.forEach(cb => cb(msg));
+      messageListeners.forEach(cb => cb(hostView));
     });
 
     guest.link.onClose(() => {
@@ -252,7 +323,12 @@ function createHostLink(guests: GuestEntry[]): RoomLink {
   });
 
   return {
-    send: msg => guests.forEach(g => g.link.send(msg)),
+    send: msg => guests.forEach(g => {
+      const viewerMessage = msg.type === 'SYNC'
+        ? { ...msg, state: redactLifeCardsForViewer(msg.state, g.playerId) }
+        : msg;
+      g.link.send(viewerMessage);
+    }),
     onMessage: cb => {
       messageListeners.add(cb);
       if (buffer.length > 0) {
@@ -314,7 +390,11 @@ export function hostRoom(
       guest.playerId = playerIdForSeat(index + 1);
     });
     ready.forEach(guest => {
-      guest.link.send({ type: 'START', state: initialState, myPlayerId: guest.playerId });
+      guest.link.send({
+        type: 'START',
+        state: redactLifeCardsForViewer(initialState, guest.playerId),
+        myPlayerId: guest.playerId
+      });
     });
 
     // Anybody who connected but never said hello is not part of the match.
@@ -473,18 +553,20 @@ export function joinRoom(
             role: 'guest',
             myPlayerId: msg.myPlayerId,
             code,
-            initialState: msg.state
+            initialState: restoreOwnLifeCardsFromSetup(msg.state, local, msg.myPlayerId)
           });
           return 'done';
         }
         return 'pass';
-      });
+      }, msg => msg.type === 'SYNC'
+        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
+        : msg);
 
       link.onClose(() => fail('การเชื่อมต่อกับห้องถูกตัด'));
 
       conn.on('open', () => {
         handlers.onStatus('พบห้องแล้ว กำลังเข้าร่วม...');
-        conn.send(encode({ type: 'HELLO', setup: local }));
+        conn.send(encode({ type: 'HELLO', setup: redactLifeCardsInSetup(local) }));
       });
     });
   })().catch(() => fail('โหลดระบบเชื่อมต่อไม่สำเร็จ'));
