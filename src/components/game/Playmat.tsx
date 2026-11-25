@@ -17,6 +17,11 @@ import {
 } from '../../engine/abilityEngine';
 import { calculateNetPower } from '../../engine/layers';
 import {
+  getGemPaymentCardUnavailableReason,
+  getSelectedGemTotal,
+  validateGemPayment
+} from '../../engine/gemPayment';
+import {
   Swords, Shield, Flame, Play, RefreshCw,
   CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info, List
 } from 'lucide-react';
@@ -443,7 +448,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     }
 
     const cost = handCard.card.cost ?? 0;
-    if (cost > 0 && me.hand.length > 1) {
+    const requiresGemPayment =
+      (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && cost > 0;
+
+    if (requiresGemPayment) {
       setPendingCost({
         handCard,
         requiredCost: cost,
@@ -454,10 +462,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     }
   };
 
-  // Finalize playing card after Cost payment (or Free/Effect)
+  // Finalize playing a card only after its Cost Step has been successfully completed.
   const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean) => {
-    setPendingCost(null);
+    const requiredCost = handCard.card.cost ?? 0;
+    const requiresGemPayment =
+      (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && requiredCost > 0;
 
+    if (
+      (requiresGemPayment &&
+        (!paidCost || !validateGemPayment(me.hand, handCard, discardIds, requiredCost).valid)) ||
+      (!requiresGemPayment && discardIds.length > 0)
+    ) {
+      showNotification('เลือก GEM ที่ถูกต้องและเพียงพอก่อนยืนยัน Cost');
+      return;
+    }
+
+    setPendingCost(null);
     const discardedCards = me.hand.filter(c => discardIds.includes(c.instanceId));
     const remainingHand = me.hand.filter(
       c => c.instanceId !== handCard.instanceId && !discardIds.includes(c.instanceId)
@@ -1299,115 +1319,137 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       )}
 
       {/* Gem Cost Payment Modal */}
-      {pendingCost && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-amber-500/50 rounded-2xl max-w-lg w-full p-4 space-y-3 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-sm text-amber-400">
-                จ่าย Cost เพื่อเล่น "{pendingCost.handCard.card.name}" (ต้องการ Cost: {pendingCost.requiredCost})
-              </h3>
-              <button onClick={() => setPendingCost(null)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="rounded-lg bg-slate-950 border border-slate-800 p-2 space-y-1">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-semibold text-slate-300">ความสามารถของการ์ดที่จะลง</span>
+      {pendingCost && (() => {
+        const selectedCards = me.hand.filter(c => pendingCost.selectedDiscardIds.includes(c.instanceId));
+        const selectedTotal = getSelectedGemTotal(me.hand, pendingCost.selectedDiscardIds);
+        const paymentValidation = validateGemPayment(
+          me.hand,
+          pendingCost.handCard,
+          pendingCost.selectedDiscardIds,
+          pendingCost.requiredCost
+        );
+        const actionLabel = pendingCost.handCard.card.type === 'Avatar' ? 'อัญเชิญ' : 'ก่อสร้าง';
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="gem-payment-title"
+              className="max-h-[92vh] w-full max-w-lg space-y-3 overflow-y-auto rounded-2xl border border-amber-500/50 bg-slate-900 p-4 shadow-2xl"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <h3 id="gem-payment-title" className="text-sm font-bold text-amber-400">
+                  เลือก GEM เพื่อ{actionLabel} "{pendingCost.handCard.card.name}" (Cost {pendingCost.requiredCost})
+                </h3>
                 <button
                   type="button"
-                  onClick={() => setInspectedCard(pendingCost.handCard)}
-                  className="text-[11px] text-amber-400 hover:text-amber-300 underline shrink-0"
+                  aria-label="ปิดหน้าต่างชำระ Cost"
+                  onClick={() => setPendingCost(null)}
+                  className="text-slate-400 hover:text-white"
                 >
-                  ดูการ์ดเต็ม
+                  <X className="h-4 w-4" />
                 </button>
               </div>
-              <p className="text-[11px] text-slate-400 leading-relaxed max-h-24 overflow-y-auto whitespace-pre-line">
-                {pendingCost.handCard.card.mainEffect || 'ไม่มีความสามารถพิเศษ (Normal Avatar)'}
-              </p>
-            </div>
-            <p className="text-xs text-slate-400">
-              เลือกการ์ดจากบนมือเพื่อส่งลงนรกเป็นค่า Cost (กด "ดูความสามารถ" ในแต่ละใบก่อนตัดสินใจทิ้ง):
-            </p>
-            <div className="flex gap-2 overflow-x-auto py-2">
-              {me.hand
-                .filter(c => c.instanceId !== pendingCost.handCard.instanceId)
-                .map(c => {
-                  const isSel = pendingCost.selectedDiscardIds.includes(c.instanceId);
-                  return (
-                    <div
-                      key={c.instanceId}
-                      onClick={() => {
-                        setPendingCost(prev =>
-                          prev
-                            ? {
-                                ...prev,
-                                selectedDiscardIds: isSel
-                                  ? prev.selectedDiscardIds.filter(id => id !== c.instanceId)
-                                  : [...prev.selectedDiscardIds, c.instanceId]
-                              }
-                            : null
-                        );
-                      }}
-                      className={`relative p-1.5 rounded-lg border-2 cursor-pointer shrink-0 w-36 transition ${
-                        isSel ? 'border-amber-400 bg-amber-950/40' : 'border-slate-800 bg-slate-950'
-                      }`}
-                    >
-                      <div className="text-[11px] font-bold text-slate-200 truncate">{c.card.name}</div>
-                      <div className="text-[10px] text-emerald-400">GEM: {c.card.gem ?? 0}</div>
-                      <p className="mt-1 text-[10px] leading-snug text-slate-400 line-clamp-3 min-h-[3.1em]">
-                        {c.card.mainEffect || 'ไม่มีความสามารถพิเศษ'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={e => {
-                          e.stopPropagation();
-                          setInspectedCard(c);
-                        }}
-                        className="mt-1 w-full flex items-center justify-center gap-1 rounded border border-amber-400/60 py-1 text-[10px] font-semibold text-amber-300 hover:bg-amber-500 hover:text-slate-950 transition"
-                      >
-                        <Info className="w-3 h-3" aria-hidden="true" />
-                        ดูความสามารถ
-                        <span className="sr-only"> {c.card.name}</span>
-                      </button>
-                    </div>
-                  );
-                })}
-            </div>
-            {(() => {
-              const totalGems = me.hand
-                .filter(c => pendingCost.selectedDiscardIds.includes(c.instanceId))
-                .reduce((acc, c) => acc + Math.max(1, c.card.gem ?? 1), 0);
-              return (
-                <div className="flex items-center justify-between pt-2 border-t border-slate-800 gap-2">
-                  <span className="text-xs text-slate-300">
-                    จ่ายแล้ว: <b className="text-amber-400">{totalGems}</b> / {pendingCost.requiredCost}
-                  </span>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => finalizePlayCard(pendingCost.handCard, [], false)}
-                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
-                    >
-                      เล่นฟรี (ไม่ติดจุติ)
-                    </button>
-                    <button
-                      onClick={() => {
-                        const autoIds = me.hand
-                          .filter(c => c.instanceId !== pendingCost.handCard.instanceId)
-                          .slice(0, Math.min(2, pendingCost.requiredCost))
-                          .map(c => c.instanceId);
-                        finalizePlayCard(pendingCost.handCard, autoIds, true);
-                      }}
-                      className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs"
-                    >
-                      จ่าย Cost และอัญเชิญ!
-                    </button>
-                  </div>
+              <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950 p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-slate-300">ความสามารถของการ์ดที่จะลง</span>
+                  <button
+                    type="button"
+                    onClick={() => setInspectedCard(pendingCost.handCard)}
+                    className="shrink-0 text-[11px] text-amber-400 underline hover:text-amber-300"
+                  >
+                    ดูการ์ดเต็ม
+                  </button>
                 </div>
-              );
-            })()}
+                <p className="max-h-24 overflow-y-auto whitespace-pre-line text-[11px] leading-relaxed text-slate-400">
+                  {pendingCost.handCard.card.mainEffect || 'ไม่มีความสามารถพิเศษ (Normal Avatar)'}
+                </p>
+              </div>
+              <p className="text-xs text-slate-400">
+                เลือกการ์ดที่ต้องการใช้จ่ายด้วยตนเอง: GEM 0 ใช้ไม่ได้ และ GEM สีต้องตรงกับสีของการ์ดเป้าหมาย
+              </p>
+              <div className="flex gap-2 overflow-x-auto py-2" aria-label="เลือกการ์ด GEM จากมือ">
+                {me.hand
+                  .filter(c => c.instanceId !== pendingCost.handCard.instanceId)
+                  .map(c => {
+                    const isSelected = pendingCost.selectedDiscardIds.includes(c.instanceId);
+                    const unavailableReason = getGemPaymentCardUnavailableReason(c, pendingCost.handCard);
+                    const canToggle = isSelected || (!unavailableReason && selectedTotal < pendingCost.requiredCost);
+
+                    return (
+                      <div
+                        key={c.instanceId}
+                        className={`w-36 shrink-0 rounded-lg border-2 p-1.5 transition ${
+                          isSelected ? 'border-amber-400 bg-amber-950/40' : 'border-slate-800 bg-slate-950'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          disabled={!canToggle}
+                          aria-pressed={isSelected}
+                          onClick={() => {
+                            if (!isSelected && (unavailableReason || selectedTotal >= pendingCost.requiredCost)) return;
+                            setPendingCost(prev =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    selectedDiscardIds: isSelected
+                                      ? prev.selectedDiscardIds.filter(id => id !== c.instanceId)
+                                      : [...prev.selectedDiscardIds, c.instanceId]
+                                  }
+                                : null
+                            );
+                          }}
+                          className="w-full text-left disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <span className="block truncate text-[11px] font-bold text-slate-200">{c.card.name}</span>
+                          <span className="block text-[10px] text-emerald-400">GEM: {c.card.gem ?? 0}</span>
+                          <span className="mt-1 block min-h-[3.1em] line-clamp-3 text-[10px] leading-snug text-slate-400">
+                            {c.card.mainEffect || 'ไม่มีความสามารถพิเศษ'}
+                          </span>
+                          {unavailableReason && (
+                            <span className="mt-1 block text-[9px] leading-snug text-rose-300">{unavailableReason}</span>
+                          )}
+                          {!isSelected && !unavailableReason && selectedTotal >= pendingCost.requiredCost && (
+                            <span className="mt-1 block text-[9px] text-slate-500">GEM เพียงพอแล้ว</span>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setInspectedCard(c)}
+                          className="mt-1 flex w-full items-center justify-center gap-1 rounded border border-amber-400/60 py-1 text-[10px] font-semibold text-amber-300 transition hover:bg-amber-500 hover:text-slate-950"
+                        >
+                          <Info className="h-3 w-3" aria-hidden="true" />
+                          ดูความสามารถ
+                          <span className="sr-only"> {c.card.name}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+              </div>
+              <div className="space-y-2 border-t border-slate-800 pt-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs">
+                  <span className="text-slate-300">
+                    การ์ดที่เลือก: {selectedCards.length ? selectedCards.map(c => c.card.name).join(' / ') : 'ยังไม่ได้เลือก'}
+                  </span>
+                  <span className="text-slate-300">
+                    GEM รวม <b className="text-amber-400">{selectedTotal}</b> / {pendingCost.requiredCost}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={!paymentValidation.valid}
+                  onClick={() => finalizePlayCard(pendingCost.handCard, pendingCost.selectedDiscardIds, true)}
+                  className="w-full rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                >
+                  ยืนยันจ่าย Cost และ{actionLabel}
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Keyword Reference Modal (From Playmat Bottom-Left Legend) */}
       {showKeywordsModal && (
