@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  decodeNetMessage,
+  encodeNetMessage,
   redactLifeCardsForViewer,
   redactLifeCardsInSetup,
   restoreOwnLifeCardsFromSetup,
@@ -90,6 +92,31 @@ describe('multiplayer LIFE card privacy', () => {
     expect(opponentLife[0].instanceId).toBe('player-2-life-instance-0');
     expect(opponentLife[1].card.name).toBe('LIFE player-2 1');
     expect(JSON.stringify(view)).not.toContain('LIFE player-2 0');
+  });
+
+  it('sends identical Reaction Window priority and pending action state to both clients', () => {
+    const state = makeState();
+    const sourceCard = makeLifeInstance('player-1', 0);
+    state.reactionWindow = {
+      id: 'game:2:5:AVATAR_SUMMONED',
+      trigger: {
+        type: 'AVATAR_SUMMONED',
+        actorId: 'player-1',
+        targetInstanceId: 'avatar-1',
+        targetCardName: 'Ghui'
+      },
+      turnOwnerId: 'player-1',
+      priorityPlayerId: 'player-2',
+      passedPlayerIds: [],
+      pendingAction: { type: 'SUMMON_JUTI', actorId: 'player-1', sourceCard, paidCost: true }
+    };
+    state.players['player-2'].usedMagicTypesThisTurn.add('React');
+
+    const receivedByPeer = decodeNetMessage(encodeNetMessage({ type: 'SYNC', state, winner: null }));
+    expect(receivedByPeer?.type).toBe('SYNC');
+    if (receivedByPeer?.type !== 'SYNC') return;
+    expect(receivedByPeer.state.reactionWindow).toEqual(state.reactionWindow);
+    expect(receivedByPeer.state.players['player-2'].usedMagicTypesThisTurn).toBeInstanceOf(Set);
   });
 
   it('redacts setup LIFE cards before peer transmission and restores the owner copy', () => {

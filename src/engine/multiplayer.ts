@@ -73,13 +73,23 @@ export type NetMessage =
   | { type: 'REJECT'; reason: string }
   | { type: 'START'; state: GameState; myPlayerId: string }
   | { type: 'SYNC'; state: GameState; winner: string | null }
+  | {
+      type: 'REACTION_COMMAND';
+      command: {
+        kind: 'PASS' | 'PLAY';
+        playerId: string;
+        windowId: string;
+        cardInstanceId?: string;
+        targetInstanceId?: string;
+      };
+    }
   | { type: 'PING' }
   | { type: 'LEAVE' };
 
 export interface RoomLink {
   send: (msg: NetMessage) => void;
   /** Messages received before the first subscriber attaches are buffered and replayed. */
-  onMessage: (cb: (msg: NetMessage) => void) => () => void;
+  onMessage: (cb: (msg: NetMessage, senderPlayerId?: string) => void) => () => void;
   /** Fires once nobody is connected any more (for a guest: the host is gone). */
   onClose: (cb: () => void) => () => void;
   /** Host only: fires with the player id whenever one guest drops out. */
@@ -131,13 +141,13 @@ export const HOST_PLAYER_ID = 'player-1';
 export const playerIdForSeat = (seat: number) => `player-${seat + 1}`;
 
 // JSON cannot represent Set, but PlayerState.usedMagicTypesThisTurn is one.
-function encode(msg: NetMessage): string {
+export function encodeNetMessage(msg: NetMessage): string {
   return JSON.stringify(msg, (_key, value) =>
     value instanceof Set ? { __set: Array.from(value) } : value
   );
 }
 
-function decode(raw: unknown): NetMessage | null {
+export function decodeNetMessage(raw: unknown): NetMessage | null {
   if (typeof raw !== 'string') return null;
   try {
     return JSON.parse(raw, (_key, value) =>
@@ -183,7 +193,7 @@ function createLink(
   handshake?: (msg: NetMessage) => HandshakeResult,
   transformOutgoing?: (msg: NetMessage) => NetMessage
 ): RoomLink {
-  const messageListeners = new Set<(msg: NetMessage) => void>();
+  const messageListeners = new Set<(msg: NetMessage, senderPlayerId?: string) => void>();
   const closeListeners = new Set<() => void>();
   const buffer: NetMessage[] = [];
   let closed = false;
@@ -213,13 +223,13 @@ function createLink(
         notifyClosed();
         return;
       }
-      if (conn.open) conn.send(encode({ type: 'PING' }));
+      if (conn.open) conn.send(encodeNetMessage({ type: 'PING' }));
     }, HEARTBEAT_INTERVAL_MS);
   };
 
   conn.on('data', (raw: unknown) => {
     lastSeen = Date.now();
-    const msg = decode(raw);
+    const msg = decodeNetMessage(raw);
     if (!msg || msg.type === 'PING') return;
     if (msg.type === 'LEAVE') {
       notifyClosed();
@@ -244,13 +254,13 @@ function createLink(
   return {
     send: msg => {
       if (closed || !conn.open) return;
-      conn.send(encode(transformOutgoing ? transformOutgoing(msg) : msg));
+      conn.send(encodeNetMessage(transformOutgoing ? transformOutgoing(msg) : msg));
     },
     onMessage: cb => {
       messageListeners.add(cb);
       if (buffer.length > 0) {
         const pending = buffer.splice(0, buffer.length);
-        pending.forEach(cb);
+        pending.forEach(message => cb(message));
       }
       return () => messageListeners.delete(cb);
     },
@@ -262,7 +272,7 @@ function createLink(
     close: () => {
       if (!closed && conn.open) {
         try {
-          conn.send(encode({ type: 'LEAVE' }));
+          conn.send(encodeNetMessage({ type: 'LEAVE' }));
         } catch {}
       }
       closed = true;
@@ -283,70 +293,60 @@ interface GuestEntry {
 
 /** Star topology: the host owns every connection and relays guest updates to the other guests. */
 function createHostLink(guests: GuestEntry[]): RoomLink {
-  const messageListeners = new Set<(msg: NetMessage) => void>();
+  const messageListeners = new Set<(msg: NetMessage, senderPlayerId?: string) => void>();
   const closeListeners = new Set<() => void>();
   const peerLeftListeners = new Set<(playerId: string) => void>();
-  const buffer: NetMessage[] = [];
-  const openGuests = new Set(guests.map(g => g.playerId));
+  const buffer: Array<{ message: NetMessage; senderPlayerId: string }> = [];
+  const openGuests = new Set(guests.map(guest => guest.playerId));
   let allClosed = false;
 
   guests.forEach(guest => {
     guest.link.onMessage(msg => {
-      if (msg.type === 'SYNC') {
-        guests.forEach(other => {
-          if (other.playerId !== guest.playerId) {
-            other.link.send({
-              ...msg,
-              state: redactLifeCardsForViewer(msg.state, other.playerId)
-            });
-          }
-        });
-      }
       const hostView = msg.type === 'SYNC'
         ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
         : msg;
       if (messageListeners.size === 0) {
-        buffer.push(hostView);
+        buffer.push({ message: hostView, senderPlayerId: guest.playerId });
         return;
       }
-      messageListeners.forEach(cb => cb(hostView));
+      messageListeners.forEach(callback => callback(hostView, guest.playerId));
     });
 
     guest.link.onClose(() => {
       openGuests.delete(guest.playerId);
-      peerLeftListeners.forEach(cb => cb(guest.playerId));
+      peerLeftListeners.forEach(callback => callback(guest.playerId));
       if (openGuests.size === 0 && !allClosed) {
         allClosed = true;
-        closeListeners.forEach(cb => cb());
+        closeListeners.forEach(callback => callback());
       }
     });
   });
 
   return {
-    send: msg => guests.forEach(g => {
+    send: msg => guests.forEach(guest => {
       const viewerMessage = msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, g.playerId) }
+        ? { ...msg, state: redactLifeCardsForViewer(msg.state, guest.playerId) }
         : msg;
-      g.link.send(viewerMessage);
+      guest.link.send(viewerMessage);
     }),
-    onMessage: cb => {
-      messageListeners.add(cb);
+    onMessage: callback => {
+      messageListeners.add(callback);
       if (buffer.length > 0) {
         const pending = buffer.splice(0, buffer.length);
-        pending.forEach(cb);
+        pending.forEach(({ message, senderPlayerId }) => callback(message, senderPlayerId));
       }
-      return () => messageListeners.delete(cb);
+      return () => messageListeners.delete(callback);
     },
-    onClose: cb => {
-      closeListeners.add(cb);
-      if (allClosed) cb();
-      return () => closeListeners.delete(cb);
+    onClose: callback => {
+      closeListeners.add(callback);
+      if (allClosed) callback();
+      return () => closeListeners.delete(callback);
     },
-    onPeerLeft: cb => {
-      peerLeftListeners.add(cb);
-      return () => peerLeftListeners.delete(cb);
+    onPeerLeft: callback => {
+      peerLeftListeners.add(callback);
+      return () => peerLeftListeners.delete(callback);
     },
-    close: () => guests.forEach(g => g.link.close())
+    close: () => guests.forEach(guest => guest.link.close())
   };
 }
 
@@ -426,7 +426,7 @@ export function hostRoom(
     peer.on('connection', (conn: DataConnectionLike) => {
       const reject = (reason: string) => {
         conn.on('open', () => {
-          conn.send(encode({ type: 'REJECT', reason }));
+          conn.send(encodeNetMessage({ type: 'REJECT', reason }));
           setTimeout(() => conn.close(), 500);
         });
       };
@@ -566,7 +566,7 @@ export function joinRoom(
 
       conn.on('open', () => {
         handlers.onStatus('พบห้องแล้ว กำลังเข้าร่วม...');
-        conn.send(encode({ type: 'HELLO', setup: redactLifeCardsInSetup(local) }));
+        conn.send(encodeNetMessage({ type: 'HELLO', setup: redactLifeCardsInSetup(local) }));
       });
     });
   })().catch(() => fail('โหลดระบบเชื่อมต่อไม่สำเร็จ'));

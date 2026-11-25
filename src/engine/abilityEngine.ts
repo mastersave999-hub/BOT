@@ -18,6 +18,7 @@ export interface AbilityParseResult {
   targetScope: 'ANY_AVATAR' | 'OWN_AVATAR' | 'OPPONENT_AVATAR' | 'NONE';
   drawCount: number;
   powerMod: number;
+  resetsPower: boolean;
   destroysTarget: boolean;
   destroysAllOpponentAvatars: boolean;
   bouncesTarget: boolean;
@@ -57,6 +58,7 @@ export function parseCardAbility(card: Card): AbilityParseResult {
   if (powerMatch) {
     powerMod = parseInt(powerMatch[1], 10);
   }
+  const resetsPower = /ปรับ\s*POWER.*กลับเป็น\s*POWER ตั้งต้น/.test(eff);
 
   // Parse destroy effects
   const destroysAllOpponentAvatars =
@@ -125,6 +127,7 @@ export function parseCardAbility(card: Card): AbilityParseResult {
     targetScope,
     drawCount,
     powerMod,
+    resetsPower,
     destroysTarget,
     destroysAllOpponentAvatars,
     bouncesTarget,
@@ -336,6 +339,13 @@ export function executeCardAbility(
           p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
           p.hand = [...p.hand, { ...targetAvatar, isRested: false, layerModifiers: [], attachedInstances: [] }];
           logs.push(`🌪️ "${sourceCard.card.name}" นำ "${targetAvatar.card.name}" กลับขึ้นมือ!`);
+        } else if (parsed.resetsPower) {
+          const updatedTarget: CardInstance = {
+            ...targetAvatar,
+            layerModifiers: targetAvatar.layerModifiers.filter(modifier => modifier.sourceCardId.startsWith('aura-'))
+          };
+          p.avatarZone = p.avatarZone.map(a => (a.instanceId === targetAvatarId ? updatedTarget : a));
+          logs.push(`⚡ "${sourceCard.card.name}" คืน POWER ของ "${targetAvatar.card.name}" เป็นค่าเริ่มต้น`);
         } else if (parsed.powerMod !== 0) {
           const updatedTarget: CardInstance = {
             ...targetAvatar,

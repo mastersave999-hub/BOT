@@ -1,8 +1,19 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { GameState, CardInstance, MagicSubtype } from '../../engine/types';
+import { GameState, CardInstance, MagicSubtype, DeferredReactionAction } from '../../engine/types';
 import { redactLifeCardsForViewer, type RoomLink } from '../../engine/multiplayer';
+import {
+  beginReactionCard,
+  canUseNormalMagicAsReactOnOwnBattle,
+  getEligibleReactionCards,
+  getReactionEligibility,
+  isReactionWindowStructurallyValid,
+  isNormalMagicTreatedAsReact,
+  openReactionWindow,
+  passReactionPriority,
+  resolveReactionCard
+} from '../../engine/reactionEngine';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
@@ -29,6 +40,7 @@ import {
 interface PlaymatProps {
   initialState: GameState;
   currentUserId: string;
+  isHost?: boolean;
   /** When provided the match is played against a remote player instead of the built-in AI. */
   link?: RoomLink;
 }
@@ -66,6 +78,7 @@ interface PendingAbilityAction {
   triggerType: 'SUMMON_JUTI' | 'MAGIC_CAST' | 'EQUIP_MODIFICATION';
   targetScope: 'ANY_AVATAR' | 'OWN_AVATAR' | 'OPPONENT_AVATAR';
   prompt: string;
+  reaction?: boolean;
 }
 
 interface PendingCostPayment {
@@ -185,7 +198,7 @@ const KEYWORD_LEGEND = [
   { kw: 'แทงหลัง', color: 'bg-purple-600', desc: 'สามารถเลือกโจมตี Avatar ที่อยู่ในสภาพนอนได้โดยตรง' },
 ];
 
-export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, link }) => {
+export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, isHost = true, link }) => {
   const [gameState, setGameState] = useState<GameState>(() => recomputeContinuousAuras(initialState));
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<CardInstance | null>(null);
@@ -227,9 +240,65 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
   useEffect(() => {
     if (!link) return;
-    const offMessage = link.onMessage(msg => {
+    const offMessage = link.onMessage((msg, senderPlayerId) => {
+      if (msg.type === 'REACTION_COMMAND') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId || msg.command.playerId === meId) return;
+        const currentWindow = gameState.reactionWindow;
+        if (!currentWindow || currentWindow.id !== msg.command.windowId) return;
+
+        if (msg.command.kind === 'PASS') {
+          const result = passReactionPriority(gameState, msg.command.playerId);
+          if (!result.ok) return;
+          if (result.pendingAction) {
+            finishDeferredReactionAction(result.state, result.pendingAction);
+          } else {
+            setGameState(result.state);
+          }
+          return;
+        }
+
+        const cardInstanceId = msg.command.cardInstanceId;
+        const reactionCard = gameState.players[msg.command.playerId]?.hand.find(card => card.instanceId === cardInstanceId);
+        if (!reactionCard) return;
+        const parsed = parseCardAbility(reactionCard.card);
+        if (parsed.needsTargetAvatar && !msg.command.targetInstanceId) return;
+        const started = beginReactionCard(gameState, msg.command.playerId, reactionCard.instanceId);
+        if (!started.ok) return;
+        const resolved = resolveReactionCard(started.state, msg.command.targetInstanceId);
+        if (!resolved.ok) return;
+        const withLogs = appendLogs(
+          resolved.state,
+          [`${reactionCard.card.name} ตอบโต้การกระทำ (${currentWindow.trigger.type})`, ...resolved.logs],
+          'REACTION',
+          msg.command.playerId
+        );
+        finishDeferredReactionAction(withLogs, resolved.pendingAction);
+        return;
+      }
+
       if (msg.type !== 'SYNC') return;
-      baselineStateRef.current = msg.state;
+      if (isHost && gameState.reactionWindow) return;
+      if (isHost && msg.state.reactionWindow) {
+        const incomingWindow = msg.state.reactionWindow;
+        const activePlayerBeforeSync = gameState.playerOrder[gameState.currentTurnPlayerIndex];
+        if (
+          !senderPlayerId ||
+          incomingWindow.passedPlayerIds.length !== 0 ||
+          !!incomingWindow.pendingReaction ||
+          !isReactionWindowStructurallyValid(msg.state) ||
+          incomingWindow.trigger.actorId !== activePlayerBeforeSync ||
+          senderPlayerId !== activePlayerBeforeSync ||
+          incomingWindow.turnOwnerId !== activePlayerBeforeSync ||
+          msg.state.id !== gameState.id ||
+          msg.state.reactionSequence !== (gameState.reactionSequence ?? 0) + 1 ||
+          incomingWindow.id !== `${msg.state.id}:${msg.state.reactionSequence}:${incomingWindow.trigger.type}` ||
+          msg.state.currentTurnPlayerIndex !== gameState.currentTurnPlayerIndex ||
+          msg.state.currentPhase !== gameState.currentPhase ||
+          msg.state.turnNumber !== gameState.turnNumber ||
+          JSON.stringify(msg.state.playerOrder) !== JSON.stringify(gameState.playerOrder)
+        ) return;
+      }
+      baselineStateRef.current = isHost ? null : msg.state;
       setGameState(current => preserveOwnLifeCardIdentities(msg.state, current, meId));
       setWinnerName(msg.winner);
       setSelectedAttackerId(null);
@@ -246,7 +315,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       offClose();
       offPeerLeft?.();
     };
-  }, [link, meId]);
+  }, [gameState, isHost, link, meId]);
 
   // Host only: a guest who dropped out of an Ad-Mua match is eliminated, even if a stale sync re-adds them.
   useEffect(() => {
@@ -300,9 +369,275 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     };
   };
 
+  const resolveCombatAction = (
+    state: GameState,
+    attackerPlayerId: string,
+  targetPlayerId: string,
+  attackerInstanceId: string,
+  targetAvatarId: string,
+  checkedAvatarIds: string[] = []
+  ): { state: GameState; events: string[] } => {
+    const attackerPlayer = state.players[attackerPlayerId];
+    const targetPlayer = state.players[targetPlayerId];
+    const attacker = attackerPlayer?.avatarZone.find(card => card.instanceId === attackerInstanceId);
+    const target = targetPlayer?.avatarZone.find(card => card.instanceId === targetAvatarId);
+    if (!attackerPlayer || !attacker) return { state, events: [] };
+    if (!targetPlayer || !target) {
+      const restedAttacker = { ...attacker, isRested: true };
+      return {
+        state: {
+          ...state,
+          players: {
+            ...state.players,
+            [attackerPlayerId]: {
+              ...attackerPlayer,
+              avatarZone: attackerPlayer.avatarZone.map(card =>
+                card.instanceId === attackerInstanceId ? restedAttacker : card
+              )
+            }
+          }
+        },
+        events: [`${attacker.card.name} — เป้าหมายไม่อยู่บนสนาม การโจมตีสิ้นสุดลง`]
+      };
+    }
+
+    const combat = resolveAvatarCombat(attacker, target);
+    const destroyedAvatars = [
+      combat.defenderDestroyed ? target : null,
+      combat.attackerDestroyed ? attacker : null
+    ].filter((avatar): avatar is CardInstance => avatar !== null);
+    // Phase 1 has a single-target pending action; simultaneous destruction target ordering remains unresolved.
+    if (destroyedAvatars.length === 1 && !checkedAvatarIds.includes(destroyedAvatars[0].instanceId)) {
+      const avatar = destroyedAvatars[0];
+      const reactionState = openReactionWindow(
+        state,
+        {
+          type: 'AVATAR_WOULD_BE_DESTROYED',
+          actorId: attackerPlayerId,
+          targetInstanceId: avatar.instanceId,
+          targetCardName: avatar.card.name,
+          sourceCardName: attacker.card.name
+        },
+        {
+          type: 'RESOLVE_COMBAT',
+          actorId: attackerPlayerId,
+          sourceCard: attacker,
+          targetPlayerId,
+          targetAvatarId,
+          checkedAvatarIds: [...checkedAvatarIds, avatar.instanceId]
+        }
+      );
+      if (reactionState !== state) {
+        return { state: reactionState, events: [`${avatar.card.name} กำลังจะถูกทำลาย — เปิด Reaction Window`] };
+      }
+    }
+
+    const updatedAttackerZone = attackerPlayer.avatarZone
+      .map(card => card.instanceId === attacker.instanceId ? { ...card, isRested: true } : card)
+      .filter(card => !(combat.attackerDestroyed && card.instanceId === attacker.instanceId));
+    const updatedTargetZone = targetPlayer.avatarZone.filter(
+      card => !(combat.defenderDestroyed && card.instanceId === target.instanceId)
+    );
+    let nextState: GameState = {
+      ...state,
+      players: {
+        ...state.players,
+        [attackerPlayerId]: {
+          ...attackerPlayer,
+          avatarZone: updatedAttackerZone,
+          hell: combat.attackerDestroyed
+            ? [...attackerPlayer.hell, attacker, ...(attacker.attachedInstances || [])]
+            : attackerPlayer.hell
+        },
+        [targetPlayerId]: {
+          ...targetPlayer,
+          avatarZone: updatedTargetZone,
+          hell: combat.defenderDestroyed
+            ? [...targetPlayer.hell, target, ...(target.attachedInstances || [])]
+            : targetPlayer.hell
+        }
+      }
+    };
+
+    nextState = appendLogs(nextState, combat.events, 'COMBAT', attackerPlayerId);
+    if (combat.attackerDestroyed && parseCardAbility(attacker.card).hasLastWords) {
+      const result = executeCardAbility(nextState, attackerPlayerId, attacker, 'LAST_WORDS');
+      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', attackerPlayerId);
+    }
+    if (combat.defenderDestroyed && parseCardAbility(target.card).hasLastWords) {
+      const result = executeCardAbility(nextState, targetPlayerId, target, 'LAST_WORDS');
+      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', targetPlayerId);
+    }
+    return { state: recomputeContinuousAuras(nextState), events: combat.events };
+  };
+
+  const finishDeferredReactionAction = (state: GameState, action?: DeferredReactionAction) => {
+    let nextState = state;
+    if (action?.type === 'SUMMON_JUTI' && action.paidCost && parseCardAbility(action.sourceCard.card).hasJuti) {
+      const parsed = parseCardAbility(action.sourceCard.card);
+      if (parsed.needsTargetAvatar) {
+        setGameState(nextState);
+        setPendingAbility({
+          sourceCard: action.sourceCard,
+          triggerType: 'SUMMON_JUTI',
+          targetScope: parsed.targetScope === 'NONE' ? 'ANY_AVATAR' : parsed.targetScope,
+          prompt: `ความสามารถ จุติ ของ "${action.sourceCard.card.name}": คลิกเลือก Avatar เป้าหมายบนสนาม`
+        });
+        return;
+      }
+      const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, 'SUMMON_JUTI');
+      nextState = appendLogs(ability.state, ability.logs, 'ABILITY', action.actorId);
+    } else if (action?.type === 'RESOLVE_MAGIC') {
+      const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, 'MAGIC_CAST', action.targetAvatarId);
+      nextState = appendLogs(ability.state, ability.logs, 'MAGIC', action.actorId);
+    } else if (action?.type === 'RESOLVE_ABILITY') {
+      const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, action.abilityTrigger);
+      nextState = appendLogs(ability.state, ability.logs, 'ABILITY', action.actorId);
+    } else if (action?.type === 'RESOLVE_COMBAT') {
+      const result = resolveCombatAction(
+        nextState,
+        action.actorId,
+        action.targetPlayerId,
+        action.sourceCard.instanceId,
+        action.targetAvatarId,
+        action.checkedAvatarIds ?? []
+      );
+      setGameState(result.state);
+      setSelectedAttackerId(null);
+      showNotification(result.events[result.events.length - 1] ?? 'การต่อสู้สิ้นสุดลง');
+      return;
+    } else if (action?.type === 'START_ATTACK') {
+      const attacker = nextState.players[action.actorId]?.avatarZone.find(card => card.instanceId === action.sourceCard.instanceId);
+      if (attacker) {
+        const parsed = parseCardAbility(attacker.card);
+        if (parsed.hasOnAttack) {
+          const ability = executeCardAbility(nextState, action.actorId, attacker, 'ON_ATTACK');
+          nextState = appendLogs(ability.state, ability.logs, 'ABILITY', action.actorId);
+        }
+        setSelectedAttackerId(attacker.instanceId);
+        setGameState(nextState);
+        showNotification(`เลือก "${attacker.card.name}" โจมตี! คลิกเป้าหมายฝ่ายตรงข้ามหรือ LIFE`);
+      } else {
+        setSelectedAttackerId(null);
+        setGameState(nextState);
+      }
+      return;
+    } else if (action?.type === 'AI_TURN_CONTINUATION') {
+      runAiOpponentTurn(nextState, true, action.logs);
+      return;
+    } else if (action?.type === 'ADVANCE_PHASE') {
+      const actorName = nextState.players[action.actorId]?.name ?? 'ผู้เล่น';
+      if (action.nextPhase === 'BATTLE' || action.nextPhase === 'END') {
+        nextState = appendLogs(
+          { ...nextState, currentPhase: action.nextPhase },
+          [`${actorName} เข้าสู่ ${action.nextPhase === 'BATTLE' ? 'Battle' : 'End'} Phase`],
+          'PHASE_CHANGE',
+          action.actorId
+        );
+        if (action.nextPhase === 'END') setSelectedAttackerId(null);
+      } else if (action.nextPhase === 'DRAW') {
+        nextState = clearEndOfTurnModifiers(nextState);
+        const nextIndex = (nextState.currentTurnPlayerIndex + 1) % nextState.playerOrder.length;
+        nextState = {
+          ...nextState,
+          currentTurnPlayerIndex: nextIndex,
+          currentPhase: 'DRAW',
+          turnNumber: nextState.turnNumber + 1
+        };
+        const nextPlayerName = nextState.players[nextState.playerOrder[nextIndex]].name;
+        nextState = appendLogs(nextState, [`จบเทิร์นของ ${actorName} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', action.actorId);
+        setGameState(nextState);
+        if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
+        showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
+        return;
+      }
+    }
+    setGameState(nextState);
+  };
+
+  const handleReactionPass = () => {
+    const window = gameState.reactionWindow;
+    if (!window || window.priorityPlayerId !== meId) return;
+    if (link && !isHost) {
+      link.send({ type: 'REACTION_COMMAND', command: { kind: 'PASS', playerId: meId, windowId: window.id } });
+      return;
+    }
+    const result = passReactionPriority(gameState, meId);
+    if ('reason' in result) {
+      showNotification(result.reason);
+      return;
+    }
+    if (result.pendingAction) {
+      finishDeferredReactionAction(result.state, result.pendingAction);
+      showNotification('ไม่มีการตอบโต้เพิ่มเติม — ดำเนินการเดิมต่อ');
+      return;
+    }
+    setGameState(result.state);
+  };
+
+  const handleReactionCard = (handCard: CardInstance) => {
+    const eligibility = getReactionEligibility(gameState, meId, handCard.card);
+    if (!eligibility.eligible) {
+      showNotification(eligibility.reason ?? 'การ์ดนี้ไม่สามารถตอบโต้การกระทำดังกล่าวได้');
+      return;
+    }
+    const window = gameState.reactionWindow;
+    if (!window) return;
+
+    const parsed = parseCardAbility(handCard.card);
+    const triggerTargetId = window.trigger.targetInstanceId;
+    if (!isHost && link) {
+      if (parsed.needsTargetAvatar) {
+        setPendingAbility({
+          sourceCard: handCard,
+          triggerType: 'MAGIC_CAST',
+          targetScope: parsed.targetScope === 'NONE' ? 'ANY_AVATAR' : parsed.targetScope,
+          prompt: `ตอบโต้ด้วย "${handCard.card.name}": คลิกเลือก Avatar เป้าหมาย`,
+          reaction: true
+        });
+        return;
+      }
+      link.send({
+        type: 'REACTION_COMMAND',
+        command: {
+          kind: 'PLAY',
+          playerId: meId,
+          windowId: window.id,
+          cardInstanceId: handCard.instanceId,
+          targetInstanceId: triggerTargetId
+        }
+      });
+      return;
+    }
+
+    const started = beginReactionCard(gameState, meId, handCard.instanceId);
+    if ('reason' in started) {
+      showNotification(started.reason);
+      return;
+    }
+    if (parsed.needsTargetAvatar) {
+      setGameState(started.state);
+      setPendingAbility({
+        sourceCard: handCard,
+        triggerType: 'MAGIC_CAST',
+        targetScope: parsed.targetScope === 'NONE' ? 'ANY_AVATAR' : parsed.targetScope,
+        prompt: `ตอบโต้ด้วย "${handCard.card.name}": คลิกเลือก Avatar เป้าหมาย`,
+        reaction: true
+      });
+      return;
+    }
+    const resolved = resolveReactionCard(started.state, triggerTargetId);
+    if ('reason' in resolved) {
+      showNotification(resolved.reason);
+      return;
+    }
+    const withLogs = appendLogs(resolved.state, [`${handCard.card.name} ตอบโต้การกระทำ (${window.trigger.type})`, ...resolved.logs], 'REACTION', meId);
+    finishDeferredReactionAction(withLogs, resolved.pendingAction);
+  };
+
   // Phase 1: Draw Phase Action
   const handleDrawPhase = () => {
-    if (!isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
+    if (gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
     let nextState = recomputeContinuousAuras(executeDrawPhase(gameState));
     if (nextState.players[meId].deck.length === 0 && gameState.players[meId].deck.length === 0) {
       if (gameState.mode === 'AD_MUA') {
@@ -319,7 +654,27 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
   // Advance Phases & AI Opponent Turn
   const handleNextPhase = () => {
-    if (!isMyTurn || winnerName) return;
+    if (gameState.reactionWindow || !isMyTurn || winnerName) return;
+
+    const nextPhase = gameState.currentPhase === 'MAIN'
+      ? 'BATTLE'
+      : gameState.currentPhase === 'BATTLE'
+        ? 'END'
+        : gameState.currentPhase === 'END'
+          ? 'DRAW'
+          : null;
+    if (nextPhase) {
+      const reactionState = openReactionWindow(
+        gameState,
+        { type: 'BEFORE_PHASE_CHANGE', actorId: meId },
+        { type: 'ADVANCE_PHASE', actorId: meId, nextPhase }
+      );
+      if (reactionState !== gameState) {
+        setGameState(reactionState);
+        showNotification('ก่อนเปลี่ยน Phase — เปิด Reaction Window ตามลำดับสิทธิ์');
+        return;
+      }
+    }
 
     if (gameState.currentPhase === 'MAIN') {
       setGameState(prev => appendLogs({ ...prev, currentPhase: 'BATTLE' }, [`${me.name} เข้าสู่ Battle Phase`], 'PHASE_CHANGE'));
@@ -352,25 +707,49 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   };
 
   // Automated AI Opponent Turn for smooth single-player testing
-  const runAiOpponentTurn = (startState: GameState) => {
-    let state = executeDrawPhase(startState);
-    const ai = { ...state.players[opponentId] };
-    const player = { ...state.players[meId] };
-    const logs: string[] = [`🤖 ${ai.name} จั่วการ์ดและเข้าสู่ Main Phase`];
+  const runAiOpponentTurn = (startState: GameState, resumeAfterReaction = false, savedLogs: string[] = []) => {
+    let state = resumeAfterReaction ? startState : executeDrawPhase(startState);
+    const logs = resumeAfterReaction
+      ? [...savedLogs]
+      : [`🤖 ${state.players[opponentId].name} จั่วการ์ดและเข้าสู่ Main Phase`];
 
-    // AI summons up to 1 Avatar from hand if space < 4
-    const avatarIdx = ai.hand.findIndex(c => c.card.type === 'Avatar');
-    if (avatarIdx !== -1 && ai.avatarZone.length < 4) {
-      const summoned = { ...ai.hand[avatarIdx], isFaceUp: true, isRested: false };
-      ai.hand = ai.hand.filter((_, i) => i !== avatarIdx);
-      ai.avatarZone = [...ai.avatarZone, summoned];
-      logs.push(`🤖 ${ai.name} อัญเชิญ "${summoned.card.name}" (PWR ${summoned.card.power})`);
+    if (!resumeAfterReaction) {
+      const aiForMain = { ...state.players[opponentId] };
+      const playerForMain = { ...state.players[meId] };
+      const avatarIdx = aiForMain.hand.findIndex(c => c.card.type === 'Avatar');
+      let summoned: CardInstance | undefined;
+      if (avatarIdx !== -1 && aiForMain.avatarZone.length < 4) {
+        summoned = { ...aiForMain.hand[avatarIdx], isFaceUp: true, isRested: false };
+        aiForMain.hand = aiForMain.hand.filter((_, i) => i !== avatarIdx);
+        aiForMain.avatarZone = [...aiForMain.avatarZone, summoned];
+        logs.push(`🤖 ${aiForMain.name} อัญเชิญ "${summoned.card.name}" (PWR ${summoned.card.power})`);
+      }
+
+      state = recomputeContinuousAuras({
+        ...state,
+        players: { ...state.players, [opponentId]: aiForMain, [meId]: playerForMain }
+      });
+
+      if (summoned) {
+        const reactionState = openReactionWindow(
+          state,
+          {
+            type: 'AVATAR_SUMMONED',
+            actorId: opponentId,
+            targetInstanceId: summoned.instanceId,
+            targetCardName: summoned.card.name,
+            sourceCardName: summoned.card.name
+          },
+          { type: 'AI_TURN_CONTINUATION', actorId: opponentId, sourceCard: summoned, logs }
+        );
+        if (reactionState !== state) {
+          setGameState(reactionState);
+          return;
+        }
+      }
     }
 
-    state = recomputeContinuousAuras({
-      ...state,
-      players: { ...state.players, [opponentId]: ai, [meId]: player }
-    });
+    const ai = state.players[opponentId];
 
     // AI Battle: Attack player's LIFE if player has no Avatars, or attack weaker Avatar
     const readyAiAvatar = state.players[opponentId].avatarZone.find(a => !a.isRested && calculateNetPower(a) > 0);
@@ -418,14 +797,23 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
   // Start playing a card from Hand (checks Cost first)
   const handleInitiatePlayCard = (handCard: CardInstance) => {
+    if (gameState.reactionWindow) {
+      if (gameState.reactionWindow.priorityPlayerId === meId) {
+        handleReactionCard(handCard);
+      } else {
+        setInspectedCard(handCard);
+      }
+      return;
+    }
     if (!isMyTurn || winnerName) {
       setInspectedCard(handCard);
       return;
     }
 
     const isReactMagic = handCard.card.type === 'Magic' && handCard.card.subtype === 'React';
-    if (gameState.currentPhase !== 'MAIN' && !(gameState.currentPhase === 'BATTLE' && isReactMagic)) {
-      showNotification('สามารถอัญเชิญหรือใช้การ์ดได้ใน Main Phase (หรือใช้ React Magic ใน Battle Phase)');
+    const normalTreatedAsReact = canUseNormalMagicAsReactOnOwnBattle(gameState, meId, handCard.card);
+    if (gameState.currentPhase !== 'MAIN' && !(gameState.currentPhase === 'BATTLE' && (isReactMagic || normalTreatedAsReact))) {
+      showNotification('สามารถอัญเชิญหรือใช้การ์ดได้ใน Main Phase (React Magic หรือ Normal ที่ระบุว่าเป็น React ใช้ได้ตามเงื่อนไข)');
       return;
     }
 
@@ -440,7 +828,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     }
 
     if (handCard.card.type === 'Magic') {
-      const subtype = (handCard.card.subtype || 'Normal') as MagicSubtype;
+      const subtype = normalTreatedAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
       if (me.usedMagicTypesThisTurn.has(subtype) && subtype !== 'Modification') {
         showNotification(`สามารถเล่น Magic ประเภท "${subtype}" ได้ประเภทละ 1 ครั้งต่อเทิร์น`);
         return;
@@ -458,12 +846,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         selectedDiscardIds: []
       });
     } else {
-      finalizePlayCard(handCard, [], cost === 0);
+      finalizePlayCard(handCard, [], cost === 0, normalTreatedAsReact);
     }
   };
 
   // Finalize playing a card only after its Cost Step has been successfully completed.
-  const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean) => {
+  const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean, playAsReact = false) => {
     const requiredCost = handCard.card.cost ?? 0;
     const requiresGemPayment =
       (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && requiredCost > 0;
@@ -497,6 +885,25 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         [`${me.name} อัญเชิญ Avatar "${handCard.card.name}"${discardedCards.length > 0 ? ` (จ่าย Cost ${discardedCards.length} ใบ)` : ''}`],
         'CARD_SUMMONED'
       );
+
+      const summonWindow = openReactionWindow(
+        nextState,
+        {
+          type: 'AVATAR_SUMMONED',
+          actorId: meId,
+          targetInstanceId: summoned.instanceId,
+          targetCardName: summoned.card.name,
+          sourceCardName: summoned.card.name
+        },
+        paidCost && parsed.hasJuti
+          ? { type: 'SUMMON_JUTI', actorId: meId, sourceCard: summoned, paidCost }
+          : undefined
+      );
+      if (summonWindow !== nextState) {
+        setGameState(summonWindow);
+        showNotification(`อัญเชิญ "${summoned.card.name}" — เปิด Reaction Window ให้ผู้เล่นตามลำดับสิทธิ์`);
+        return;
+      }
 
       // Trigger จุติ if paid Cost and card has จุติ
       if (paidCost && parsed.hasJuti) {
@@ -533,10 +940,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
     }
 
     if (handCard.card.type === 'Magic') {
-      const subtype = (handCard.card.subtype || 'Normal') as MagicSubtype;
+      const subtype = playAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
       const newUsedTypes = new Set(updatedMe.usedMagicTypesThisTurn);
       newUsedTypes.add(subtype);
       updatedMe.usedMagicTypesThisTurn = newUsedTypes;
+      if (subtype === 'React') {
+        updatedMe.reactMagicBudget = {
+          ...updatedMe.reactMagicBudget,
+          ownTurnRemaining: Math.max(0, updatedMe.reactMagicBudget.ownTurnRemaining - 1)
+        };
+      }
 
       if (subtype === 'Land') {
         // Replace previous Land Magic
@@ -575,9 +988,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         return;
       }
 
-      // Normal or React Magic: Put in Magic Zone (or Hell) and execute effect
+      // Normal or React Magic: Put in Magic Zone (or Hell) before resolving its effect.
       updatedMe.magicZone = [...updatedMe.magicZone, { ...handCard, isFaceUp: true }];
       nextState.players = { ...nextState.players, [meId]: updatedMe };
+
+      if (subtype !== 'React' && !parsed.needsTargetAvatar) {
+        const magicWindow = openReactionWindow(
+          nextState,
+          { type: 'MAGIC_PLAYED', actorId: meId, sourceCardName: handCard.card.name },
+          { type: 'RESOLVE_MAGIC', actorId: meId, sourceCard: handCard }
+        );
+        if (magicWindow !== nextState) {
+          setGameState(magicWindow);
+          showNotification(`ร่าย "${handCard.card.name}" — เปิด Reaction Window ก่อนออกผล`);
+          return;
+        }
+      }
 
       if (parsed.needsTargetAvatar) {
         setGameState(nextState);
@@ -611,6 +1037,53 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         showNotification('กรุณาเลือก Avatar ฝ่ายตรงข้ามเท่านั้น');
         return;
       }
+      if (pendingAbility.reaction) {
+        const window = gameState.reactionWindow;
+        if (!window) return;
+        if (link && !isHost) {
+          link.send({
+            type: 'REACTION_COMMAND',
+            command: {
+              kind: 'PLAY',
+              playerId: meId,
+              windowId: window.id,
+              cardInstanceId: pendingAbility.sourceCard.instanceId,
+              targetInstanceId: avatar.instanceId
+            }
+          });
+          setPendingAbility(null);
+          return;
+        }
+        let reactionState = gameState;
+        if (window.pendingReaction && window.pendingReaction.sourceCard.instanceId !== pendingAbility.sourceCard.instanceId) {
+          showNotification('การตอบโต้ที่เลือกไม่ตรงกับการ์ดที่กำลังแก้ไข');
+          setPendingAbility(null);
+          return;
+        }
+        if (!window.pendingReaction) {
+          const started = beginReactionCard(gameState, meId, pendingAbility.sourceCard.instanceId);
+          if ('reason' in started) {
+            showNotification(started.reason);
+            setPendingAbility(null);
+            return;
+          }
+          reactionState = started.state;
+        }
+        const resolved = resolveReactionCard(reactionState, avatar.instanceId);
+        if ('reason' in resolved) {
+          showNotification(resolved.reason);
+          return;
+        }
+        const nextState = appendLogs(
+          resolved.state,
+          [`${pendingAbility.sourceCard.card.name} ตอบโต้การกระทำ (${window.trigger.type})`, ...resolved.logs],
+          'REACTION',
+          meId
+        );
+        setPendingAbility(null);
+        finishDeferredReactionAction(nextState, resolved.pendingAction);
+        return;
+      }
 
       if (pendingAbility.triggerType === 'EQUIP_MODIFICATION') {
         let nextState = { ...gameState };
@@ -632,6 +1105,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         return;
       }
 
+      if (
+        pendingAbility.triggerType === 'MAGIC_CAST' &&
+        !isNormalMagicTreatedAsReact(pendingAbility.sourceCard.card) &&
+        pendingAbility.sourceCard.card.subtype !== 'React'
+      ) {
+        const magicWindow = openReactionWindow(
+          gameState,
+          {
+            type: 'MAGIC_PLAYED',
+            actorId: meId,
+            targetInstanceId: avatar.instanceId,
+            targetCardName: avatar.card.name,
+            sourceCardName: pendingAbility.sourceCard.card.name
+          },
+          {
+            type: 'RESOLVE_MAGIC',
+            actorId: meId,
+            sourceCard: pendingAbility.sourceCard,
+            targetAvatarId: avatar.instanceId
+          }
+        );
+        if (magicWindow !== gameState) {
+          setGameState(magicWindow);
+          setPendingAbility(null);
+          showNotification(`ร่าย "${pendingAbility.sourceCard.card.name}" — เปิด Reaction Window ก่อนออกผล`);
+          return;
+        }
+      }
+
       const res = executeCardAbility(
         gameState,
         meId,
@@ -643,6 +1145,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       setGameState(nextState);
       setPendingAbility(null);
       showNotification(res.logs[0] || 'เปิดใช้งานความสามารถสำเร็จ!');
+      return;
+    }
+
+    if (gameState.reactionWindow) {
+      setInspectedCard(avatar);
       return;
     }
 
@@ -695,8 +1202,25 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         return;
       }
 
+      const attackWindow = openReactionWindow(
+        gameState,
+        {
+          type: 'ATTACK_DECLARED',
+          actorId: meId,
+          targetInstanceId: avatar.instanceId,
+          targetCardName: avatar.card.name,
+          sourceCardName: avatar.card.name
+        },
+        { type: 'START_ATTACK', actorId: meId, sourceCard: avatar }
+      );
+      if (attackWindow !== gameState) {
+        setGameState(attackWindow);
+        showNotification(`ประกาศโจมตีด้วย "${avatar.card.name}" — เปิด Reaction Window`);
+        return;
+      }
+
       // Trigger "เมื่อโจมตี" (ON_ATTACK) when selected as attacker
-      let nextState = { ...gameState };
+      let nextState: GameState = { ...gameState };
       const parsed = parseCardAbility(avatar.card);
       if (parsed.hasOnAttack) {
         const res = executeCardAbility(nextState, meId, avatar, 'ON_ATTACK');
@@ -726,57 +1250,38 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
       return;
     }
 
-    const combatRes = resolveAvatarCombat(attacker, avatar);
-
-    const updatedMyAvatarZone = me.avatarZone
-      .map(c => (c.instanceId === attacker.instanceId ? { ...c, isRested: true } : c))
-      .filter(c => !(combatRes.attackerDestroyed && c.instanceId === attacker.instanceId));
-
-    const updatedOpponentAvatarZone = opponent.avatarZone.filter(
-      c => !(combatRes.defenderDestroyed && c.instanceId === avatar.instanceId)
-    );
-
-    const myHellAdditions = combatRes.attackerDestroyed ? [attacker, ...(attacker.attachedInstances || [])] : [];
-    const oppHellAdditions = combatRes.defenderDestroyed ? [avatar, ...(avatar.attachedInstances || [])] : [];
-
-    let nextState: GameState = {
-      ...gameState,
-      players: {
-        ...gameState.players,
-        [meId]: {
-          ...me,
-          avatarZone: updatedMyAvatarZone,
-          hell: [...me.hell, ...myHellAdditions]
-        },
-        [opponentId]: {
-          ...opponent,
-          avatarZone: updatedOpponentAvatarZone,
-          hell: [...opponent.hell, ...oppHellAdditions]
-        }
+    const targetWindow = openReactionWindow(
+      gameState,
+      {
+        type: 'AVATAR_TARGETED',
+        actorId: meId,
+        targetInstanceId: avatar.instanceId,
+        targetCardName: avatar.card.name,
+        sourceCardName: attacker.card.name
+      },
+      {
+        type: 'RESOLVE_COMBAT',
+        actorId: meId,
+        sourceCard: attacker,
+        targetPlayerId: opponentId,
+        targetAvatarId: avatar.instanceId
       }
-    };
-
-    nextState = appendLogs(nextState, combatRes.events, 'COMBAT');
-
-    // Trigger คำสั่งเสีย (Last Words) if destroyed
-    if (combatRes.attackerDestroyed && parseCardAbility(attacker.card).hasLastWords) {
-      const lwRes = executeCardAbility(nextState, meId, attacker, 'LAST_WORDS');
-      nextState = appendLogs(lwRes.state, lwRes.logs, 'LAST_WORDS');
-    }
-    if (combatRes.defenderDestroyed && parseCardAbility(avatar.card).hasLastWords) {
-      const lwRes = executeCardAbility(nextState, opponentId, avatar, 'LAST_WORDS');
-      nextState = appendLogs(lwRes.state, lwRes.logs, 'LAST_WORDS', opponentId);
+    );
+    if (targetWindow !== gameState) {
+      setGameState(targetWindow);
+      showNotification(`"${avatar.card.name}" เป็นเป้าหมายโจมตี — เปิด Reaction Window`);
+      return;
     }
 
-    nextState = recomputeContinuousAuras(nextState);
-    setGameState(nextState);
+    const combatResult = resolveCombatAction(gameState, meId, opponentId, attacker.instanceId, avatar.instanceId);
+    setGameState(combatResult.state);
     setSelectedAttackerId(null);
-    showNotification(combatRes.events[combatRes.events.length - 1]);
+    showNotification(combatResult.events[combatResult.events.length - 1] ?? 'การต่อสู้สิ้นสุดลง');
   };
 
   // Attack Opponent LIFE Zone Directly
   const handleAttackLifeZone = () => {
-    if (gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
+    if (gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
     if (!selectedAttackerId) {
       showNotification('กรุณาเลือก Avatar ของคุณที่จะโจมตีก่อน');
       return;
@@ -835,8 +1340,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
   // Toggle Construct Activation
   const handleConstructClick = (cons: CardInstance) => {
-    if (!isMyTurn || gameState.currentPhase !== 'MAIN') {
+    if (gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'MAIN') {
       setInspectedCard(cons);
+      return;
+    }
+    const abilityWindow = openReactionWindow(
+      gameState,
+      { type: 'ABILITY_USED', actorId: meId, sourceCardName: cons.card.name },
+      { type: 'RESOLVE_ABILITY', actorId: meId, sourceCard: cons, abilityTrigger: 'CONSTRUCT_ACTIVATE' }
+    );
+    if (abilityWindow !== gameState) {
+      setGameState(abilityWindow);
+      showNotification(`ใช้ความสามารถ "${cons.card.name}" — เปิด Reaction Window`);
       return;
     }
     const res = executeCardAbility(gameState, meId, cons, 'CONSTRUCT_ACTIVATE');
@@ -914,6 +1429,24 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
         </div>
       </header>
 
+      {gameState.reactionWindow && (
+        <section role="status" aria-live="polite" className="z-30 flex items-center justify-between gap-3 border-b border-amber-500/40 bg-amber-950/90 px-3 py-2 text-xs text-amber-100">
+          <span>
+            Reaction Window · {gameState.players[gameState.reactionWindow.priorityPlayerId]?.name ?? 'ผู้เล่น'} มีสิทธิ์ก่อน
+            {gameState.reactionWindow.pendingReaction ? ' · กำลังเลือกเป้าหมาย' : ` · ${getEligibleReactionCards(gameState, meId).length} การ์ดที่ใช้ได้`}
+          </span>
+          {gameState.reactionWindow.priorityPlayerId === meId && !gameState.reactionWindow.pendingReaction && (
+            <button
+              type="button"
+              onClick={handleReactionPass}
+              className="shrink-0 rounded-md border border-amber-300/60 bg-amber-400 px-3 py-1 font-bold text-slate-950 hover:bg-amber-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+            >
+              ผ่านสิทธิ์ตอบโต้
+            </button>
+          )}
+        </section>
+      )}
+
       {/* Pending Ability Target Banner */}
       {pendingAbility && (
         <div className="bg-amber-500 text-slate-950 font-bold text-xs px-4 py-1.5 flex items-center justify-between z-30 shadow-lg">
@@ -921,12 +1454,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
             <Sparkles className="w-4 h-4 animate-pulse" />
             <span>{pendingAbility.prompt}</span>
           </div>
-          <button
-            onClick={() => setPendingAbility(null)}
-            className="px-2 py-0.5 rounded bg-slate-950/20 hover:bg-slate-950/30 text-[11px]"
-          >
-            ข้าม/ยกเลิก
-          </button>
+          {(!pendingAbility.reaction || (link && !isHost)) && (
+            <button
+              onClick={() => setPendingAbility(null)}
+              className="px-2 py-0.5 rounded bg-slate-950/20 hover:bg-slate-950/30 text-[11px]"
+            >
+              ข้าม/ยกเลิก
+            </button>
+          )}
         </div>
       )}
 

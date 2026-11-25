@@ -339,6 +339,7 @@ export default function Home() {
       <Playmat
         initialState={initialGameState}
         currentUserId={onlineSession ? onlineSession.myPlayerId : 'player-1'}
+        isHost={!onlineSession || onlineSession.role === 'host'}
         link={onlineSession?.link}
       />
     );
