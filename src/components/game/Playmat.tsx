@@ -1,7 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { GameState, CardInstance, MagicSubtype } from '../../engine/types';
+import type { RoomLink } from '../../engine/multiplayer';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { executeDrawPhase } from '../../engine/turnEngine';
@@ -22,6 +23,8 @@ import {
 interface PlaymatProps {
   initialState: GameState;
   currentUserId: string;
+  /** When provided the match is played against a remote player instead of the built-in AI. */
+  link?: RoomLink;
 }
 
 interface PendingAbilityAction {
@@ -49,7 +52,7 @@ const KEYWORD_LEGEND = [
   { kw: 'แทงหลัง', color: 'bg-purple-600', desc: 'สามารถเลือกโจมตี Avatar ที่อยู่ในสภาพนอนได้โดยตรง' },
 ];
 
-export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId }) => {
+export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, link }) => {
   const [gameState, setGameState] = useState<GameState>(() => recomputeContinuousAuras(initialState));
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<CardInstance | null>(null);
@@ -59,6 +62,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId })
   const [showKeywordsModal, setShowKeywordsModal] = useState<boolean>(false);
   const [showHellModal, setShowHellModal] = useState<'ME' | 'OPPONENT' | null>(null);
   const [winnerName, setWinnerName] = useState<string | null>(null);
+  const [opponentLeft, setOpponentLeft] = useState<boolean>(false);
+  const isOnline = !!link;
+  // Last state that did not originate from a local action; it must not be echoed back to the peer.
+  const baselineStateRef = useRef<GameState | null>(null);
+  const initialGameStateRef = useRef<GameState>(gameState);
 
   const meId = currentUserId;
   const opponentId = gameState.playerOrder.find(id => id !== meId) || gameState.playerOrder[1];
@@ -66,6 +74,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId })
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
   const isMyTurn = gameState.playerOrder[gameState.currentTurnPlayerIndex] === meId;
+
+  useEffect(() => {
+    if (!link) return;
+    const offMessage = link.onMessage(msg => {
+      if (msg.type !== 'SYNC') return;
+      baselineStateRef.current = msg.state;
+      setGameState(msg.state);
+      setWinnerName(msg.winner);
+      setSelectedAttackerId(null);
+      setPendingAbility(null);
+      setPendingCost(null);
+    });
+    const offClose = link.onClose(() => setOpponentLeft(true));
+    return () => {
+      offMessage();
+      offClose();
+    };
+  }, [link]);
+
+  useEffect(() => {
+    if (!link) return;
+    if (gameState === initialGameStateRef.current || gameState === baselineStateRef.current) return;
+    link.send({ type: 'SYNC', state: gameState, winner: winnerName });
+  }, [gameState, winnerName, link]);
+
+  const leaveMatch = () => {
+    link?.close();
+    window.location.reload();
+  };
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -126,8 +163,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId })
       setGameState(nextState);
       showNotification(`ส่งเทิร์นให้ ${opponent.name}`);
 
-      // Execute simple AI Opponent turn automatically after short delay
-      setTimeout(() => runAiOpponentTurn(nextState), 900);
+      if (!isOnline) {
+        // Execute simple AI Opponent turn automatically after short delay
+        setTimeout(() => runAiOpponentTurn(nextState), 900);
+      }
     }
   };
 
@@ -1159,7 +1198,23 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId })
             <h2 className="text-2xl font-black text-amber-400">จบการประลอง!</h2>
             <p className="text-sm text-slate-200">ผู้ชนะคือ: <b className="text-emerald-400">{winnerName}</b></p>
             <button
-              onClick={() => window.location.reload()}
+              onClick={leaveMatch}
+              className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm"
+            >
+              กลับสู่หน้าหลัก
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Opponent Disconnected */}
+      {opponentLeft && !winnerName && (
+        <div role="alertdialog" aria-label="คู่แข่งหลุดการเชื่อมต่อ" className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-slate-900 border-2 border-red-500 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl">
+            <h2 className="text-xl font-black text-red-400">คู่แข่งหลุดการเชื่อมต่อ</h2>
+            <p className="text-sm text-slate-300">เพื่อนของคุณออกจากห้องหรือเครือข่ายขัดข้อง เกมนี้จึงไม่สามารถเล่นต่อได้</p>
+            <button
+              onClick={leaveMatch}
               className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm"
             >
               กลับสู่หน้าหลัก

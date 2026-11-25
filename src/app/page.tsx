@@ -5,7 +5,11 @@ import { Playmat } from '../components/game/Playmat';
 import { DeckBuilder } from '../components/deck/DeckBuilder';
 import { MatchmakingLobby } from '../components/lobby/MatchmakingLobby';
 import { AuthModal } from '../components/auth/AuthModal';
-import { GameState, CardInstance, Card } from '../engine/types';
+import { GameState, CardInstance, Card, PlayerState } from '../engine/types';
+import {
+  HOST_PLAYER_ID, GUEST_PLAYER_ID,
+  type MatchSession, type PlayerSetup
+} from '../engine/multiplayer';
 import {
   getCurrentUser, logoutUser, saveDeckForUser,
   deleteDeckForUser, UserAccount
@@ -30,10 +34,64 @@ function createCardInstance(card: Card, ownerId: string, instanceId: string, isF
   };
 }
 
+function resolveDecks(main: Card[] | undefined, life: Card[] | undefined) {
+  return {
+    main: main && main.length === 50 ? main : (starterDeckData.mainDeck as Card[]),
+    life: life && life.length === 5 ? life : (starterDeckData.lifeDeck as Card[])
+  };
+}
+
+function createOnlinePlayer(playerId: string, seat: number, setup: PlayerSetup): PlayerState {
+  const { main, life } = resolveDecks(setup.mainDeck, setup.lifeDeck);
+  const prefix = seat === 0 ? 'p1' : 'p2';
+  return {
+    id: playerId,
+    name: setup.name,
+    seat,
+    deck: main.slice(5).map((c, i) => createCardInstance(c, playerId, `${prefix}-deck-${i}`, false)),
+    hand: main.slice(0, 5).map((c, i) => createCardInstance(c, playerId, `${prefix}-hand-${i}`, true)),
+    lifeDeck: life.map((c, i) => createCardInstance(c, playerId, `${prefix}-life-${i}`, false)),
+    avatarZone: [],
+    constructZone: [],
+    magicZone: [],
+    hell: [],
+    darkDimension: [],
+    isCritical: false,
+    reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 },
+    usedMagicTypesThisTurn: new Set()
+  };
+}
+
+function buildOnlineState(host: PlayerSetup, guest: PlayerSetup): GameState {
+  return {
+    id: `online-${Date.now()}`,
+    mode: 'DUEL',
+    playerOrder: [HOST_PLAYER_ID, GUEST_PLAYER_ID],
+    currentTurnPlayerIndex: 0,
+    currentPhase: 'DRAW',
+    turnNumber: 1,
+    roundNumber: 1,
+    landMagicZone: null,
+    players: {
+      [HOST_PLAYER_ID]: createOnlinePlayer(HOST_PLAYER_ID, 0, host),
+      [GUEST_PLAYER_ID]: createOnlinePlayer(GUEST_PLAYER_ID, 1, guest)
+    },
+    eventLog: [
+      {
+        timestamp: Date.now(),
+        type: 'GAME_STARTED',
+        description: `${host.name} พบกับ ${guest.name} ในศึกออนไลน์! เริ่มเกมรอบแรก`,
+        actorId: 'system'
+      }
+    ]
+  };
+}
+
 export default function Home() {
   const [currentView, setCurrentView] = useState<'HOME' | 'DECK_BUILDER' | 'LOBBY' | 'GAME'>('HOME');
   const [gameMode, setGameMode] = useState<'DUEL' | 'AD_MUA'>('DUEL');
   const [initialGameState, setInitialGameState] = useState<GameState | null>(null);
+  const [onlineSession, setOnlineSession] = useState<MatchSession | null>(null);
 
   // Auth State
   const [user, setUser] = useState<UserAccount | null>(null);
@@ -159,6 +217,7 @@ export default function Home() {
     };
 
     setGameMode(mode);
+    setOnlineSession(null);
     setInitialGameState(initialGame);
     setCurrentView('GAME');
   };
@@ -176,18 +235,31 @@ export default function Home() {
   }
 
   if (currentView === 'LOBBY') {
+    const { main, life } = resolveDecks(customMainDeck, customLifeDeck);
     return (
       <MatchmakingLobby
         onBack={() => setCurrentView('HOME')}
-        onJoinRoom={(code, isHost, name) => {
-          startMatch(code.includes('AD_MUA') ? 'AD_MUA' : 'DUEL', `ห้อง: ${code} (${isHost ? 'โฮสต์' : 'ผู้เข้าร่วม'})`);
+        defaultPlayerName={user ? user.username : `ผู้เล่น-${Math.floor(100 + Math.random() * 900)}`}
+        localDeck={{ mainDeck: main, lifeDeck: life }}
+        buildState={buildOnlineState}
+        onMatchReady={(session) => {
+          setOnlineSession(session);
+          setGameMode('DUEL');
+          setInitialGameState(session.initialState);
+          setCurrentView('GAME');
         }}
       />
     );
   }
 
   if (currentView === 'GAME' && initialGameState) {
-    return <Playmat initialState={initialGameState} currentUserId="player-1" />;
+    return (
+      <Playmat
+        initialState={initialGameState}
+        currentUserId={onlineSession ? onlineSession.myPlayerId : 'player-1'}
+        link={onlineSession?.link}
+      />
+    );
   }
 
   return (
