@@ -179,30 +179,24 @@ export async function registerUser(
 }
 
 export async function loginUser(
-  email: string,
+  identifier: string,
   password: string,
 ): Promise<{ success: boolean; message: string; user?: UserAccount }> {
-  const supabase = createClient()
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: email.trim().toLowerCase(),
-    password,
+  const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ identifier, password }),
   })
+  const result = await response.json() as { success: boolean; message: string }
 
-  if (error || !data.user) {
-    const details = error?.message.toLowerCase() ?? ''
-    const message = details.includes('not confirmed')
-      ? 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ'
-      : error?.status === 429
-        ? 'ลองเข้าสู่ระบบบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่'
-        : details.includes('invalid login credentials')
-          ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง'
-          : 'ระบบบัญชีขัดข้องชั่วคราว กรุณาลองอีกครั้ง'
-    return { success: false, message }
+  if (!response.ok || !result.success) {
+    return { success: false, message: result.message ?? 'ระบบบัญชีขัดข้องชั่วคราว กรุณาลองอีกครั้ง' }
   }
 
   try {
-    const user = await loadAccount(data.user.id, data.user.email ?? '', data.user.user_metadata?.username)
-    return { success: true, message: 'เข้าสู่ระบบสำเร็จ!', user }
+    const user = await getCurrentUser()
+    if (!user) return { success: false, message: 'เข้าสู่ระบบแล้วแต่โหลดโปรไฟล์ไม่สำเร็จ กรุณาลองอีกครั้ง' }
+    return { success: true, message: result.message, user }
   } catch {
     return { success: false, message: 'โหลดโปรไฟล์ไม่สำเร็จ กรุณาลองอีกครั้ง' }
   }

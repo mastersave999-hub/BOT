@@ -12,7 +12,7 @@ interface AuthModalProps {
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const [isRegisterMode, setIsRegisterMode] = useState(false)
-  const [email, setEmail] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -36,8 +36,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
 
     try {
       const result = isRegisterMode
-        ? await registerUser(email, username, password)
-        : await loginUser(email, password)
+        ? await registerUser(identifier, username, password)
+        : await loginUser(identifier, password)
 
       if (!result.success) {
         setErrorMsg(result.message)
@@ -101,17 +101,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           )}
 
           <div className="space-y-1">
-            <label htmlFor="auth-email" className="text-xs font-semibold text-slate-300">อีเมล</label>
+            <label htmlFor="auth-identifier" className="text-xs font-semibold text-slate-300">
+              {isRegisterMode ? 'อีเมล' : 'ชื่อผู้ใช้หรืออีเมล'}
+            </label>
             <div className="relative">
-              <Mail aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              {isRegisterMode
+                ? <Mail aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+                : <User aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />}
               <input
-                id="auth-email"
-                type="email"
+                id="auth-identifier"
+                type={isRegisterMode ? 'email' : 'text'}
                 required
-                autoComplete="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
+                autoComplete={isRegisterMode ? 'email' : 'username'}
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                placeholder={isRegisterMode ? 'you@example.com' : 'ชื่อผู้ใช้หรืออีเมลที่สมัครไว้'}
                 className="w-full rounded-xl border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-600 focus:border-amber-500 focus:outline-none"
               />
             </div>
