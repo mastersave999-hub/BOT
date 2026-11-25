@@ -1,33 +1,50 @@
-# BATTLE OF TALINGCHAN - RULE GAPS & COMMUNITY MULTIPLAYER REPORT
+# Battle of Talingchan — Rule Gaps (Phase 1.5)
 
-## 1. OFFICIAL 2-PLAYER RULE AMBIGUITIES & ENGINE EDGE CASES
-| ID | Area / Subject | Specific Ambiguity / Conflict | Recommended Engine Handling |
+**Authority:** Battle of Talingchan Rule Book Version 3.2 (`rulebook_raw.txt`, 25 numbered pages).
+**Inspection baseline:** branch `v0/reaction-window-phase1`, commit `c92cd772715495d450eb1fe76441438e09cbe723`.
+**Scope:** This file is a concise index, not a substitute for source evidence. The full rule-to-engine matrix, test evidence, card statistics, ambiguities and Phase 2 dependency roadmap are in [`RULE_ENGINE_GAP_ANALYSIS.md`](RULE_ENGINE_GAP_ANALYSIS.md). The complete record-level card/effect mapping is in [`CARD_EFFECT_AUDIT.md`](CARD_EFFECT_AUDIT.md).
+
+## Status definitions
+
+- **Verified:** actual before/after Game State evidence for the named narrow behavior.
+- **Implemented but unverified:** source exists, adequate Game State test not found.
+- **Partial:** some rule path is implemented/tested, material behavior remains absent or unverified.
+- **Missing:** no implementation found.
+- **RULE_AMBIGUITY:** the Rule Book does not settle a specific precedence/interpretation.
+- **Unsupported / not official:** the Rule Book does not specify the requested multiplayer extension; do not infer a rule.
+
+Do not infer card correctness from parser/text matching. No catalog card is marked fully **Verified** in the effect inventory.
+
+## Confirmed high-priority gaps
+
+| Gap | Rule Book | Current source evidence | Status / impact |
 |---|---|---|---|
-| **GAP-01** | Simultaneous Trigger Ordering | When both players have simultaneous triggers (e.g., matching Last Words / คำสั่งเสีย), Page 23 notes turn player triggers first and resolves second (LIFO). Does this strictly follow Magic the Gathering APNAP (Active Player, Non-Active Player)? | Implement strict APNAP priority queue for trigger registration and resolution. |
-| **GAP-02** | Layer 4 to Layer 1 Relocation Timing | Page 16 notes Layer 4 combat modifiers move to Layer 1 or 2 after combat. How does this interact if the card was temporarily boosted "จนจบการต่อสู้" (until end of combat)? | Modifiers specifying "until end of combat" expire at Step 3 of Battle Phase. Only persistent modifiers migrate to Layer 1/2. |
-| **GAP-03** | LIFE Card Trigger Timing | Rule Book 3.2 p.22 says LIFE abilities revealed by an attack during the previous turn resolve immediately at the start of their owner's Main Phase; p.5 says LIFE abilities revealed by an ability do not trigger. | Implement the explicit p.22 timing. No immediate-trigger exception is specified in the supplied Rule Book; do not infer one. Multiple queued LIFE abilities resolve top-to-bottom (p.5). |
-| **GAP-04** | Discard Cost in Nullified Summons | In Page 6, Cost payment occurs before Avatar Summon. If a summon is intercepted/prevented, are discarded GEM cards already in Hell? | Rulebook Page 6 specifies cards in Cost Step are NOT in Hell until resolution finishes. If summon fails, cards transition to Hell upon resolution failure. |
-| **GAP-05** | Full React Card Effect Semantics | Rule Book 3.2 defines reaction timing, chain order and all-or-nothing resolution, but the text parser does not implement every printed card effect/cost/target predicate in the 2,014-card catalog. | Only effects executable by the existing ability engine are allowed into a chain. Unsupported effects (including prevention, attack cancellation, searches, scouting and unmodeled costs) are blocked instead of silently treated as successful. Complete coverage requires card-by-card effect implementations and official rulings. |
-| **GAP-06** | Trusted Multiplayer Authority | Current matches use PeerJS star topology with a browser host, not a trusted game server. | Host validates peer identity, reaction priority, window ID and revision; viewer projections redact opponent hand/deck and face-down LIFE identities. This cannot prevent a malicious host from changing state; production-grade anti-cheat needs a trusted server authority. |
-| **GAP-07** | Reconnect During a Match | Rule Book 3.2 does not specify how a player rejoins an interrupted match or how pending chain priority behaves on reconnect. | Active reconnect/resume is not implemented; current PeerJS disconnect behavior remains. No reconnect behavior is inferred. |
-| **GAP-08** | Ad-Mua Reaction Priority | The official book specifies the two-player priority case (p.18), while Ad-Mua uses 3–4 players and the rulebook does not define the expanded priority order. | Reaction windows are deliberately disabled for 3+ players until the publisher supplies an authoritative order; confirm before enabling Ad-Mua chains. |
+| Construct Zone capacity and names | p.2: max 3, unique names per player | `Playmat.tsx` blocks at 4; no duplicate-name check | **Partial / incorrect limit** |
+| Avatar + Token capacity and Token exit | pp.1, 19: up to 4 Avatar, 6 total; Token moves to zone then leaves game | State stores shared zone; no complete mixed-capacity or Token removal lifecycle | **Missing / partial** |
+| Magic subtype limit | pp.10–11: one use of each type per turn | `Playmat.tsx` exempts Modification from duplicate-use guard | **Partial / source discrepancy** |
+| End-of-battle modifiers | pp.7, 16, 21–22: attack-duration and Layer 4 rules | `clearEndOfTurnModifiers` clears only `END_OF_TURN`; Unity writes `END_OF_BATTLE` | **Partial / modifier can persist**; precise transfer/expiry interaction is **RULE_AMBIGUITY** |
+| First player’s first-turn Battle Phase | pp.21–22: skipped | Main→Battle UI transition is unconditional | **Missing** |
+| End Phase hand size | p.25: discard to 7 as final action | No discard-to-seven action found | **Missing** |
+| Full card-effect transaction | pp.12–13: all-or-nothing, cost only when effect is possible | Typed resolver stages and rolls back; text adapter does not form complete target/condition/cost plans | **Partial** |
+| Prevention and cancellation | pp.10, 15, 18, 24 | Prevention is blocked; cancellation only a narrow React-Magic pattern | **Missing / partial** |
+| Control change and owner routing | pp.6, 9, 18, 20 | Owner/controller fields exist; no typed control-change movement | **Missing** |
+| Continuous layers and duration | pp.15–17, 21 | POWER aura subset exists; full layer semantics, snapshot and end-of-battle expiration absent | **Partial** |
+| Trigger timing | pp.5, 7–8, 12, 22–24 | A small set of trigger labels and LIFE queue exist; no general event/timing queue | **Partial** |
+| Search, Scout and Mill | pp.3, 7, 13–14 | No typed private Deck operation, exact quoted-name semantics, or shuffle/search/scout/mill pipeline | **Missing** |
+| Combat / Construct combat | pp.22–25 | Avatar comparison helper and LIFE helper exist; no complete combat transaction or Construct combat | **Partial / missing** |
+| Multiplayer authority and 3+ priority | pp.18–19, official book describes two-player response priority | PeerJS host-authoritative client; 3+ reaction windows deliberately disabled | 3+ order is **Unsupported / not official**, not inferred; client host is not trusted authority |
 
----
+## Rule-book ambiguities (not invented rulings)
 
-## 2. AD-MUA (อัดมั่ว) 3-4 PLAYER MULTIPLAYER RULES
-> [!IMPORTANT]
-> Official Rulebook 3.2 is strictly written for 2-player Duel format. Ad-Mua rules are derived from community guidelines, tournament rules (Fanmeet 2025), and special Kudsan Deck cards (KD00 series).
+1. **RULE_AMBIGUITY — Layer 4 expiry versus transfer (pp.7, 16):** p.7 specifies distinct end points for Avatar combat versus Construct/LIFE attacks; p.16 says Layer 4 effects transfer to Layer 1/2 after combat but does not state how an explicitly temporary “until end of combat/attack” effect interacts with that transfer. See full analysis for the conservative implementation note.
+2. **Ad-Mua React order:** the supplied official text does not establish a priority order for three or more players. This is an absence of official rules, not a license to adopt community/APNAP ordering.
 
-### Verified Ad-Mua Rules:
-1. **Turn Direction**: Determined by highest dice roll, proceeds clockwise (to the left player).
-2. **First Turn Attack Restriction**: Attack declarations are forbidden until the **last player of round 1** takes their turn. (e.g. In a 4-player game A -> B -> C -> D, players A, B, and C cannot attack on Turn 1; player D is the first who may attack).
-3. **React Magic Budget in Multiplayer**:
-   - Each player has **1 React Magic per turn of their own**, and **1 React Magic across all opponents' turns combined** until the round returns to them.
-   - Example: Player A uses React in Player B's turn. Player A CANNOT use React during Player C's or Player D's turns.
-4. **Targeting Scope**:
-   - "เลือก Avatar 1 ใบ" -> Player must explicitly declare the target player and the target card.
-   - "ทำลาย Avatar ทุกใบของฝ่ายตรงข้าม" -> Affects ALL other players (global opponents).
-   - "ผู้เล่นทั้งสองฝ่าย" -> Affects the casting player and exactly ONE chosen opponent.
-5. **LIFE Elimination & Win Condition**:
-   - Last surviving player wins (Free-For-All), or special card win condition.
-   - When a player is eliminated, all of their cards on field, hand, deck, and Hell are removed from the game immediately. Any cards borrowed via control change return to original owners.
+The LIFE rules on p.5 and p.22 are compatible: reveal caused by an ability alone does not trigger LIFE; LIFE revealed by an attack is queued for its owner’s next Main Phase.
+
+## Ad-Mua note
+
+The repository has community multiplayer guidance in prior documentation, but it is not Rule Book 3.2 evidence. The engine implements some Ad-Mua elimination/turn-order behaviors; do not call community turn direction, React budgets, target scope or elimination details official unless backed by a separately identified authoritative source. Official Rule Book 3.2 does not define 3+ player Reaction priority, and the current engine correctly refuses to open those windows rather than guessing.
+
+## Test snapshot
+
+Baseline `npm test` on the inspected commit: **10 test files, 72 tests passed**. State-backed scenarios cover selected typed effect transactions/rollback, reaction/LIFO sequences, turn draw/LIFE queue, elimination, privacy projections and some ability transitions. Parser, deck validation, GEM payment, layer arithmetic and combat comparison include helper-level tests. See the detailed test audit in `RULE_ENGINE_GAP_ANALYSIS.md`; passing 72 tests does not mean 72 Rule Book rules or 1,833 effect texts are verified.

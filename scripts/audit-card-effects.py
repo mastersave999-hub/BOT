@@ -24,29 +24,28 @@ CATEGORIES = [
     ("Conditions / choice", r"หาก|ถ้า|เมื่อ|อัตโนมัติ|เลือกปฏิบัติ|สามารถ"),
 ]
 
-# This is intentionally conservative: anything beyond effects the current engine
-# can resolve atomically with its present state/choice model is not called working.
+# Text matching only generates investigation candidates. It never proves that a
+# card's actual Game State behavior is correct; only a per-card runtime test can.
 CORE = re.compile(r"จั่ว(?:การ์ด)?\s*\d+\s*ใบ|POWER\s*[+-]\s*\d+|ทำลาย Avatar|กลับขึ้นมือ|นำขึ้นมือ|กลับเป็น POWER ตั้งต้น|อัญเชิญ.*นรก|นำ.*นรก.*กลับเข้า Deck", re.I)
 UNSUPPORTED = re.compile(r"ค้นหา|สอดแนม|ธรณีสูบ|ทิ้ง|เซ่นไหว้|สังเวย|ยกเลิก|ป้องกัน|เปลี่ยนการควบคุม|เปลี่ยนชื่อ|เปลี่ยน Symbol|เปลี่ยนสี|เปลี่ยนสภาพ|เนรเทศ|มิติมืด|เลือกปฏิบัติ|สุ่ม|ดูการ์ด|แสดงการ์ด|สับ Deck|เทิร์นละครั้ง|ชื่อแตกต่าง|ค่า Cost|ได้รับความสามารถ|เพิ่มชื่อ|โล่มนุษย์|เตะไข่|แทงหลัง|สามัคคี|ลูกฮึด|ต่อเนื่อง|หาก|ถ้า", re.I)
+AMBIGUOUS = re.compile(r"ตัวอะไรสักอย่าง|ตามเงื่อนไขที่ไม่ระบุ|ไม่ชัดเจน", re.I)
 
 
 def classify(card):
     text = (card.get("mainEffect") or "").strip()
     categories = [name for name, pattern in CATEGORIES if re.search(pattern, text, re.I)]
     if not text:
-        return ["No printed effect"], "Working"
-    core = bool(CORE.search(text))
-    unsupported = bool(UNSUPPORTED.search(text))
-    if core and unsupported:
-        status = "Partially working"
-    elif core:
-        status = "Working"
-    elif re.search(r"ลูกฮึด", text):
-        status = "Partially working"
-    elif not categories or re.search(r"\?|ไม่ชัดเจน|ตามเงื่อนไขที่ไม่ระบุ", text):
-        status = "Unsupported/unclear"
+        return ["No printed effect"], "No printed effect"
+    has_candidate_operation = bool(CORE.search(text))
+    has_unmodeled_mechanics = bool(UNSUPPORTED.search(text))
+    if AMBIGUOUS.search(text):
+        status = "Ambiguous wording"
+    elif has_candidate_operation and has_unmodeled_mechanics:
+        status = "Partial — runtime unverified"
+    elif has_candidate_operation:
+        status = "Implemented candidate — unverified"
     else:
-        status = "Not implemented"
+        status = "Missing / unsupported"
     return categories or ["Unclassified text"], status
 
 
@@ -64,46 +63,69 @@ out = [
     "",
     "## Scope and method",
     "",
-    f"Audited every row in `cards_clean.json`: **{len(CARDS)} card records** ({len({c.get('printId') for c in CARDS})} distinct print IDs). Card text is taken verbatim from the checked-in catalog; Rule Book 3.2 (`rulebook_raw.txt`) is authoritative. This report uses a conservative, text-pattern audit against handlers currently present in `src/engine/abilityEngine.ts`, `combatEngine.ts`, and `reactionEngine.ts`. It is a triage/status inventory, not a claim of official card rulings or per-card runtime verification. A card marked Working means its obvious simple operation maps to an engine handler; it does not prove that the full effect works in game state or every context-specific ruling for that print.",
+    f"Audited all {len(CARDS)} catalog records from `cards_clean.json`: {len({c.get('printId') for c in CARDS})} unique printId values; {sum(bool((c.get('mainEffect') or '').strip()) for c in CARDS)} records have printed effect text. Rule Book 3.2 (`rulebook_raw.txt`) is the authority. This conservative text-pattern triage compares mechanics with `src/engine/abilityEngine.ts`, `effectResolver.ts`, `reactionEngine.ts`, `combatEngine.ts`, `layers.ts`, `turnEngine.ts`, and `multiplayer.ts`. Record count, unique printId count, repeated IDs and distinct card behaviors are different measures. `Implemented candidate — unverified` and `Partial — runtime unverified` are not card verification: no record is established as fully Verified in this report. One test exercises a narrow POWER change on catalog print SD01-001 but does not verify its full text. A named before/after Game State test for the exact print is required to establish card verification. No effect text is inferred from card name or image." ,
     "",
     "### Status totals",
     "",
     "| Status | Records |",
     "|---|---:|",
 ]
-for status in ("Working", "Partially working", "Not implemented", "Unsupported/unclear"):
-    out.append(f"| {status} | {status_counts[status]} |")
+for status in (
+    "Verified by per-card Game State test",
+    "Implemented candidate — unverified",
+    "Partial — runtime unverified",
+    "Missing / unsupported",
+    "Ambiguous wording",
+    "No printed effect",
+):
+    count = status_counts[status] if status != "Verified by per-card Game State test" else 0
+    out.append(f"| {status} | {count} |")
 out += ["", "### Effect category coverage (categories overlap)", "", "| Category | Records |", "|---|---:|"]
 for category, count in category_counts.most_common():
     out.append(f"| {category} | {count} |")
+record_counts = collections.Counter(card.get("printId", "") for card in CARDS)
+repeated_ids = sum(count > 1 for count in record_counts.values())
+extra_records = sum(count - 1 for count in record_counts.values() if count > 1)
+ambiguous_records = sum(status == "Ambiguous wording" for _, _, status in rows)
 out += [
     "",
-    "## Root causes confirmed in the engine",
+    "### Database row identity",
     "",
-    "- Ability text was reduced to a few global regex/substring flags. Most of the catalog's search, discard/payment, mill/scout, prevention/cancellation, control-change, zone movement, conditional, and choice effects have no resolvers.",
-    "- `executeCardAbility` previously ran draw, destruction, recovery, and targeting logic regardless of the supplied trigger. A Last Words or Life effect could therefore resolve at the wrong timing.",
-    "- Target resolution accepted any Avatar in any player zone without enforcing the parsed own/opponent scope; absent targets could result in a silent no-op or partial resolution.",
-    "- Multi-clause effects and costs cannot be modeled atomically with the existing API: it lacks a choice/payment/target plan and a resolution result that can refuse the entire effect. Rule Book 3.2 pp.12–13 requires all effects to be achievable before using an ability and costs must be paid before resolution.",
-    "- Continuous effects only interpret limited POWER text and a few symbol/name patterns; keyword, stat, zone and condition effects are not generally represented as layers.",
-    "- Reaction legality has a conservative supported-effect gate, but the shared resolver and card-by-card timing/cost/target vocabulary are still incomplete.",
-    "- Removing an Avatar from the field must also send its attached Modification Magic to Hell (Rule Book 3.2 p.18); the shared destroy and bounce operations now preserve those cards instead of dropping them.",
-    "- Status labels are text-pattern triage only, not per-card runtime verification. A Working label is not evidence that a card's full effect has passed a game-state test; no eligible-card completion total can be claimed from this audit." ,
+    f"- Repeated printId values: {repeated_ids}; additional records beyond one per ID: {extra_records}. Repeated IDs are not automatically called alternate printings; inspect the individual row fields before treating them as print variants.",
+    f"- Explicit wording marker matches from the conservative ambiguity regex: {ambiguous_records}. This is a flagged-text count, not a legal ruling that every other description is unambiguous.",
+    "- Parser errors: not measurable from the current parser API, because `parseCardAbility` returns default flags and has no parse-error result. Use `Missing / unsupported` for text with no candidate operation match; do not describe it as a parser failure.",
+    "- `tests/abilityEngine.test.ts` resolves the real catalog record SD01-001 against a Game State and checks POWER changes from 6 to 2. It does not verify all text details (notably duration); therefore the record is not marked Verified. Other tests use synthetic card fixtures, not individually audited catalog records.",
     "",
-    "## Ambiguity and unsupported card inventory",
+    "## Engine findings (current source, not prior report claims)",
     "",
-    "Rows below include all 2,014 records and verbatim effect text for review. `Unsupported/unclear` means the wording itself is insufficiently specific for a deterministic ruling; `Not implemented` means the intention is readable but no reliable handler exists; `Partially working` indicates at least one recognized operation mixed with an unsupported mechanic/condition.",
+    "- `parseCardAbility` uses Thai substring/regex flags. `getUnsupportedEffectReason` blocks several free-text patterns, but there is no grammar, complete target/cost choice model, or parse-error channel.",
+    "- `executeCardAbility` now has trigger guards and calls `resolveEffectPlan` for its supported operation subset. Its resolver preflights basic targets/counts and actor-owned explicit costs, stages a structured clone, and rolls back rejected/throwing handlers. Card text is not converted into complete cost/condition plans.",
+    "- Reaction chain entries and ordinary ability resolution both eventually call `executeCardAbility`, but React uses additional eligibility, timing, priority and payment paths. Existing tests do not establish parity for all operation types. `resolveReactionCard` and queued-chain resolution are separate code paths.",
+    "- `recomputeContinuousAuras` is limited POWER parsing and symbol/name heuristics; it is not a complete effect-layer engine for keywords, non-POWER changes, conditions, or all zones.",
+    "- Catalog category counts below are overlapping text-pattern matches. They are a workload map only, not supported-mechanics or successful-card counts.",
     "",
-    "| Print ID | Card | Categories | Status | Printed effect (verbatim) |",
-    "|---|---|---|---|---|",
+    "## Per-record effect-to-mechanics mapping",
+    "",
+    "One row per catalog record with printed effect text (repeated printId values remain separate rows). `Mechanics` are text markers/categories to investigate, not proof an effect is parsed or functions. The candidate labels are heuristic only. No card is marked Verified: SD01-001 has one Game State test for a POWER change but not its full printed semantics; the rest have no per-print Game State evidence identified.",
+    "",
+    "| DB row | Print ID | Card | Required mechanic categories (text-derived) | Triage status | Test evidence | Printed effect (verbatim) |",
+    "|---:|---|---|---|---|---|---|",
 ]
-for card, categories, status in rows:
+first_record_by_id = {}
+for record_index, (card, categories, status) in enumerate(rows, start=1):
+    first_record_by_id.setdefault(card.get("printId", ""), record_index)
     effect = (card.get("mainEffect") or "").replace("\r", "").replace("\n", "<br>").replace("|", "\\|")
     if not effect:
         effect = "—"
     cats = ", ".join(categories).replace("|", "\\|")
     name = (card.get("name") or "").replace("|", "\\|")
-    out.append(f"| {card.get('printId', '')} | {name} | {cats} | {status} | {effect} |")
+    evidence = "None found"
+    if card.get("printId") == "SD01-001" and first_record_by_id[card.get("printId", "")] == record_index:
+        evidence = "`tests/abilityEngine.test.ts`: catalog ability POWER change only; incomplete full-text proof"
+    if effect.strip() != "—":
+        out.append(f"| {record_index} | {card.get('printId', '')} | {name} | {cats} | {status} | {evidence} | {effect} |")
 out += [
+
     "",
     "## Rule Book 3.2 issues deliberately not guessed",
     "",
