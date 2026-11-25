@@ -69,6 +69,28 @@ interface PendingCostPayment {
   selectedDiscardIds: string[];
 }
 
+type CardAnimation = 'draw' | 'summon' | 'attack' | 'impact' | 'reveal' | 'destroy' | 'tap' | 'untap' | 'return';
+
+interface TrackedCard {
+  card: CardInstance;
+  zone: string;
+}
+
+function collectTrackedCards(state: GameState): Map<string, TrackedCard> {
+  const cards = new Map<string, TrackedCard>();
+  Object.values(state.players).forEach(player => {
+    [
+      ['deck', player.deck], ['hand', player.hand], ['life', player.lifeDeck],
+      ['avatar', player.avatarZone], ['construct', player.constructZone],
+      ['magic', player.magicZone], ['hell', player.hell], ['dark', player.darkDimension]
+    ].forEach(([zone, instances]) => {
+      (instances as CardInstance[]).forEach(card => cards.set(card.instanceId, { card, zone: zone as string }));
+    });
+  });
+  if (state.landMagicZone) cards.set(state.landMagicZone.instanceId, { card: state.landMagicZone, zone: 'land' });
+  return cards;
+}
+
 const PHASE_STEPS = [
   { phase: 'DRAW', label: 'DRAW', description: 'จั่ว' },
   { phase: 'MAIN', label: 'MAIN', description: 'หลัก' },
@@ -193,6 +215,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   const [winnerName, setWinnerName] = useState<string | null>(null);
   const [opponentLeft, setOpponentLeft] = useState<boolean>(false);
   const [showOpeningRoll, setShowOpeningRoll] = useState<boolean>(() => !!initialState.openingRolls);
+  const [cardAnimations, setCardAnimations] = useState<Record<string, { type: CardAnimation; token: number }>>({});
+  const [combatGhosts, setCombatGhosts] = useState<Array<{ card: CardInstance; type: 'destroy' | 'impact'; token: number }>>([]);
+  const previousAnimationStateRef = useRef<GameState>(gameState);
+  const animationTokenRef = useRef(0);
   const isOnline = !!link;
   // Last state that did not originate from a local action; it must not be echoed back to the peer.
   const baselineStateRef = useRef<GameState | null>(null);
@@ -215,6 +241,61 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
   }, []);
+
+  useEffect(() => {
+    const previous = previousAnimationStateRef.current;
+    previousAnimationStateRef.current = gameState;
+    const before = collectTrackedCards(previous);
+    const after = collectTrackedCards(gameState);
+    const combatEvent = gameState.eventLog.length > previous.eventLog.length
+      && gameState.eventLog.slice(previous.eventLog.length).some(event => event.type === 'COMBAT' || event.type === 'ATTACK_LIFE');
+    const animations: Array<[string, CardAnimation]> = [];
+
+    after.forEach(({ card, zone }, id) => {
+      const old = before.get(id);
+      if (!old) return;
+      if (old.zone !== zone) {
+        if (old.zone === 'deck' && zone === 'hand') animations.push([id, 'draw']);
+        else if (old.zone === 'hand' && ['avatar', 'construct', 'magic', 'land'].includes(zone)) animations.push([id, 'summon']);
+        else if (['avatar', 'construct', 'magic', 'land'].includes(old.zone) && zone === 'hand') animations.push([id, 'return']);
+        else if (zone === 'hell' || zone === 'dark') animations.push([id, 'destroy']);
+      } else if (old.card.isFaceUp !== card.isFaceUp && card.isFaceUp) {
+        animations.push([id, 'reveal']);
+      } else if (old.card.isRested !== card.isRested) {
+        animations.push([id, combatEvent && card.isRested ? 'attack' : card.isRested ? 'tap' : 'untap']);
+      }
+    });
+
+    if (combatEvent) {
+      before.forEach(({ zone }, id) => {
+        if (zone === 'avatar' && !after.has(id)) animations.push([id, 'impact']);
+      });
+    }
+    if (!animations.length) return;
+
+    const batch = Object.fromEntries(animations.map(([id, type]) => [id, { type, token: ++animationTokenRef.current }]));
+    setCardAnimations(current => ({ ...current, ...batch }));
+    const tokens = Object.values(batch).map(animation => animation.token);
+    window.setTimeout(() => {
+      setCardAnimations(current => Object.fromEntries(
+        Object.entries(current).filter(([, animation]) => !tokens.includes(animation.token))
+      ));
+    }, 760);
+
+    const destroyedCards = Array.from(before.entries()).flatMap(([id, tracked]) => {
+      const destination = after.get(id);
+      return tracked.zone === 'avatar' && destination && (destination.zone === 'hell' || destination.zone === 'dark')
+        ? [{ card: tracked.card, type: 'destroy' as const, token: ++animationTokenRef.current }]
+        : [];
+    });
+    if (destroyedCards.length) {
+      setCombatGhosts(current => [...current, ...destroyedCards]);
+      const ghostTokens = destroyedCards.map(effect => effect.token);
+      window.setTimeout(() => {
+        setCombatGhosts(current => current.filter(effect => !ghostTokens.includes(effect.token)));
+      }, 560);
+    }
+  }, [gameState]);
 
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
@@ -1001,52 +1082,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                   ) : (
                     opponent.avatarZone.map(avatar => (
                       <div key={avatar.instanceId} className="relative">
-                        <CardView
-                          cardInstance={avatar}
-                          size="sm"
-                          isRested={avatar.isRested}
-                          isOpponent
-                          onClick={() => handleAvatarClick(avatar, false)}
-                          onInspect={() => setInspectedCard(avatar)}
-                        />
+                        <CardView cardInstance={avatar} size="sm" animation={cardAnimations[avatar.instanceId]} isRested={avatar.isRested} isOpponent
+                          onClick={() => handleAvatarClick(avatar, false)} onInspect={() => setInspectedCard(avatar)} />
                         {(selectedAttackerId || pendingAbility) && (
-                          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[8px] px-1.5 py-0.5 rounded shadow pointer-events-none">
-                            เป้าหมาย
-                          </div>
+                          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[8px] px-1.5 py-0.5 rounded shadow pointer-events-none">เป้าหมาย</div>
                         )}
                       </div>
                     ))
                   )}
                 </div>
               </div>
-
-              {/* Right Col: Opponent Life Zone (2 cols) */}
-              <div
-                onClick={handleAttackLifeZone}
-                className={`col-span-2 bg-slate-950/90 border-2 rounded-xl p-1.5 flex flex-col items-center justify-center cursor-pointer transition ${
-                  selectedAttackerId
-                    ? 'border-red-500 bg-red-950/30 ring-2 ring-red-500/40 animate-pulse'
-                    : 'border-slate-800 hover:border-red-500/50'
-                }`}
-                title="คลิกเพื่อโจมตี LIFE คู่แข่ง"
-              >
-                <span className="text-[10px] font-bold text-red-400 mb-1 flex items-center gap-0.5">
-                  <Shield className="w-3 h-3" /> Life ({opponent.lifeDeck.filter(c => !c.isFaceUp).length}/5)
-                </span>
+              <div onClick={handleAttackLifeZone} className={`col-span-2 bg-slate-950/90 border-2 rounded-xl p-1.5 flex flex-col items-center justify-center cursor-pointer transition ${selectedAttackerId ? 'border-red-500 bg-red-950/30 ring-2 ring-red-500/40 animate-pulse' : 'border-slate-800 hover:border-red-500/50'}`} title="คลิกเพื่อโจมตี LIFE คู่แข่ง">
+                <span className="text-[10px] font-bold text-red-400 mb-1 flex items-center gap-0.5"><Shield className="w-3 h-3" /> Life ({opponent.lifeDeck.filter(c => !c.isFaceUp).length}/5)</span>
                 <div className="flex flex-wrap justify-center gap-1">
                   {opponent.lifeDeck.map((lifeCard, idx) => (
-                    <div
-                      key={lifeCard.instanceId || idx}
-                      onClick={event => {
-                        if (lifeCard.isFaceUp) event.stopPropagation();
-                      }}
-                    >
-                      <LifeCardTile
-                        card={lifeCard}
-                        index={idx}
-                        compact
-                        onInspect={() => setInspectedCard(lifeCard)}
-                      />
+                    <div key={lifeCard.instanceId || idx} onClick={event => { if (lifeCard.isFaceUp) event.stopPropagation(); }}>
+                      <LifeCardTile card={lifeCard} index={idx} compact onInspect={() => setInspectedCard(lifeCard)} />
                     </div>
                   ))}
                 </div>
@@ -1054,181 +1105,45 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
             </div>
           </div>
 
-          <PhaseTracker
-            currentPhase={gameState.currentPhase}
-            turnNumber={gameState.turnNumber}
-            activePlayerName={gameState.players[activePlayerId]?.name ?? ''}
-            isMyTurn={isMyTurn}
-          />
+          <PhaseTracker currentPhase={gameState.currentPhase} turnNumber={gameState.turnNumber} activePlayerName={gameState.players[activePlayerId]?.name ?? ''} isMyTurn={isMyTurn} />
 
-          {/* ==================== SHARED CENTER & MY TOP ROW (Matches Playmat Top Row!) ==================== */}
-          {/* Construct Zone (Left 37%) | Land Magic Zone (Center 26%) | Dark Dimension (Right 37%) */}
           <div className="grid grid-cols-12 gap-2 my-1.5 items-stretch">
-            {/* Construct Zone (Left ~37% -> 4.5 cols, use col-span-5) */}
             <div className="col-span-5 bg-slate-900/90 border-2 border-slate-700 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px]">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-slate-200">Construct Zone</span>
-                <span className="text-slate-400 text-[9px]">มี Construct บนสนามได้สูงสุด 4 ใบ ({me.constructZone.length}/4)</span>
-              </div>
-              <div className="flex items-center gap-1.5 mt-1 overflow-x-auto">
-                {me.constructZone.length === 0 ? (
-                  <span className="text-[10px] text-slate-600 italic">วาง Construct ที่นี่</span>
-                ) : (
-                  me.constructZone.map(cons => (
-                    <div
-                      key={cons.instanceId}
-                      onClick={() => handleConstructClick(cons)}
-                      className="px-2 py-1 rounded bg-slate-800 border border-amber-500/40 text-[10px] font-semibold text-amber-300 cursor-pointer hover:bg-slate-700 shrink-0"
-                    >
-                      {cons.card.name}
-                    </div>
-                  ))
-                )}
-              </div>
+              <div className="flex items-center justify-between text-[10px]"><span className="font-bold text-slate-200">Construct Zone</span><span className="text-slate-400 text-[9px]">มี Construct บนสนามได้สูงสุด 4 ใบ ({me.constructZone.length}/4)</span></div>
+              <div className="flex items-center gap-1.5 mt-1 overflow-x-auto">{me.constructZone.map(cons => <div key={cons.instanceId} onClick={() => handleConstructClick(cons)} className="px-2 py-1 rounded bg-slate-800 border border-amber-500/40 text-[10px] font-semibold text-amber-300 cursor-pointer hover:bg-slate-700 shrink-0">{cons.card.name}</div>)}</div>
             </div>
-
-            {/* Land Magic Zone (Center ~20% -> col-span-2) */}
-            <div
-              onClick={() => gameState.landMagicZone && setInspectedCard(gameState.landMagicZone)}
-              className="col-span-2 bg-slate-900/90 border-2 border-amber-500/50 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition"
-            >
-              <span className="text-[10px] font-bold text-amber-400 leading-tight">Land Magic Zone</span>
-              {gameState.landMagicZone ? (
-                <span className="text-[10px] text-white font-semibold mt-1 truncate max-w-full">
-                  {gameState.landMagicZone.card.name}
-                </span>
-              ) : (
-                <span className="text-[9px] text-slate-500 mt-0.5">ว่าง</span>
-              )}
+            <div onClick={() => gameState.landMagicZone && setInspectedCard(gameState.landMagicZone)} className="col-span-2 bg-slate-900/90 border-2 border-amber-500/50 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition">
+              <span className="text-[10px] font-bold text-amber-400 leading-tight">Land Magic Zone</span><span className="text-[10px] text-white font-semibold mt-1 truncate max-w-full">{gameState.landMagicZone?.card.name ?? 'ว่าง'}</span>
             </div>
-
-            {/* Right Zone (Opponent Construct / Dark Dimension) (col-span-5) */}
-            <div className="col-span-5 bg-slate-900/60 border-2 border-slate-800 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px]">
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-slate-400">มิติมืด (Dark Dimension) & Construct คู่แข่ง</span>
-                <span className="text-slate-500 text-[9px]">{me.darkDimension.length} ใบ</span>
-              </div>
-              <div className="text-[10px] text-slate-600 italic">
-                พื้นที่แยกส่วน / การ์ดที่ถูกส่งออกนอกเกม
-              </div>
-            </div>
+            <div className="col-span-5 bg-slate-900/60 border-2 border-slate-800 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px]"><span className="font-bold text-slate-400 text-[10px]">มิติมืด (Dark Dimension) & Construct คู่แข่ง</span><span className="text-slate-500 text-[9px]">{me.darkDimension.length} ใบ</span></div>
           </div>
 
-          {/* ==================== MY PLAYMAT HALF (EXACT OFFICIAL PROPORTIONS) ==================== */}
           <div className="bg-slate-900/80 border-2 border-slate-700 rounded-2xl p-2 shadow-2xl">
             <div className="grid grid-cols-12 gap-2 items-stretch">
-              {/* LEFT COLUMN: LIFE ZONE (Full Height spanning Avatar + Magic rows) */}
               <div className="col-span-2 bg-slate-950/90 border-2 border-slate-700 rounded-xl p-1.5 flex flex-col items-center justify-between">
-                <div className="text-center">
-                  <span className="text-xs sm:text-sm font-extrabold text-emerald-400 block">Life</span>
-                  <span className="text-[9px] text-slate-400">ที่วาง Life ({me.lifeDeck.filter(c => !c.isFaceUp).length}/5)</span>
-                </div>
-
-                <div className="flex flex-col gap-1 items-center my-auto py-1">
-                  {me.lifeDeck.map((lifeCard, idx) => (
-                    <LifeCardTile
-                      key={lifeCard.instanceId || idx}
-                      card={lifeCard}
-                      index={idx}
-                      onInspect={() => setInspectedCard(lifeCard)}
-                    />
-                  ))}
-                </div>
-
-                {me.isCritical && (
-                  <span className="bg-red-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded animate-pulse">
-                    สาหัส!
-                  </span>
-                )}
+                <div className="text-center"><span className="text-xs sm:text-sm font-extrabold text-emerald-400 block">Life</span><span className="text-[9px] text-slate-400">ที่วาง Life ({me.lifeDeck.filter(c => !c.isFaceUp).length}/5)</span></div>
+                <div className="flex flex-col gap-1 items-center my-auto py-1">{me.lifeDeck.map((lifeCard, idx) => <LifeCardTile key={lifeCard.instanceId || idx} card={lifeCard} index={idx} onInspect={() => setInspectedCard(lifeCard)} />)}</div>
+                {me.isCritical && <span className="bg-red-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded animate-pulse">สาหัส!</span>}
               </div>
-
-              {/* CENTER COLUMN: AVATAR ZONE (TOP) + MAGIC ZONE (BOTTOM) */}
               <div className="col-span-8 flex flex-col gap-2">
-                {/* AVATAR ZONE */}
                 <div className="min-h-[135px] sm:min-h-[155px] bg-slate-950/80 border-2 border-slate-700 rounded-xl p-2 flex flex-col justify-between relative">
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="font-bold text-slate-200 text-xs">Avatar Zone</span>
-                    <span>มี Avatar บนสนามได้สูงสุด 4 ใบ ({me.avatarZone.length}/4)</span>
-                  </div>
-
-                  <div className="flex-1 flex items-center justify-center gap-2 sm:gap-3 py-1">
-                    {me.avatarZone.length === 0 ? (
-                      <span className="text-xs text-slate-500">คลิกการ์ด Avatar บนมือด้านล่างเพื่ออัญเชิญลงสนาม</span>
-                    ) : (
-                      me.avatarZone.map(avatar => (
-                        <div key={avatar.instanceId} className="relative">
-                          <CardView
-                            cardInstance={avatar}
-                            size="sm"
-                            isRested={avatar.isRested}
-                            onClick={() => handleAvatarClick(avatar, true)}
-                            onInspect={() => setInspectedCard(avatar)}
-                            className={
-                              selectedAttackerId === avatar.instanceId
-                                ? 'ring-2 ring-amber-400 scale-105 shadow-lg shadow-amber-500/40'
-                                : ''
-                            }
-                          />
-                          {selectedAttackerId === avatar.instanceId && (
-                            <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-amber-500 text-slate-950 font-black text-[8px] px-1.5 py-0.5 rounded shadow">
-                              โจมตี!
-                            </div>
-                          )}
-                          {selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested && avatarHasKeyword(avatar, 'สามัคคี') && (
-                            <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-red-600 text-white font-bold text-[8px] px-1.5 py-0.5 rounded shadow animate-bounce">
-                              คลิกใช้สามัคคี
-                            </div>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400"><span className="font-bold text-slate-200 text-xs">Avatar Zone</span><span>มี Avatar บนสนามได้สูงสุด 4 ใบ ({me.avatarZone.length}/4)</span></div>
+                  <div className="flex-1 flex items-center justify-center gap-2 sm:gap-3 py-1">{me.avatarZone.length === 0 ? <span className="text-xs text-slate-500">คลิกการ์ด Avatar บนมือด้านล่างเพื่ออัญเชิญลงสนาม</span> : me.avatarZone.map(avatar => (
+                    <div key={avatar.instanceId} className="relative">
+                      <CardView cardInstance={avatar} size="sm" animation={cardAnimations[avatar.instanceId]} isRested={avatar.isRested} onClick={() => handleAvatarClick(avatar, true)} onInspect={() => setInspectedCard(avatar)} className={selectedAttackerId === avatar.instanceId ? 'ring-2 ring-amber-400 scale-105 shadow-lg shadow-amber-500/40' : ''} />
+                      {selectedAttackerId === avatar.instanceId && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-amber-500 text-slate-950 font-black text-[8px] px-1.5 py-0.5 rounded shadow">โจมตี!</div>}
+                      {selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested && avatarHasKeyword(avatar, 'สามัคคี') && <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-red-600 text-white font-bold text-[8px] px-1.5 py-0.5 rounded shadow animate-bounce">คลิกใช้สามัคคี</div>}
+                    </div>
+                  ))}</div>
                 </div>
-
-                {/* MAGIC ZONE */}
                 <div className="min-h-[85px] sm:min-h-[100px] bg-slate-950/80 border-2 border-slate-700 rounded-xl p-2 flex flex-col justify-between">
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="font-bold text-slate-200 text-xs">Magic Zone</span>
-                    <span>สามารถเล่น Magic ได้ประเภทละครั้ง ({me.magicZone.length} ใบในเทิร์น)</span>
-                  </div>
-
-                  <div className="flex items-center gap-2 overflow-x-auto py-1">
-                    {me.magicZone.length === 0 ? (
-                      <span className="text-[11px] text-slate-600 mx-auto">คลิกการ์ด Magic บนมือเพื่อร่ายเวทย์</span>
-                    ) : (
-                      me.magicZone.map(m => (
-                        <div
-                          key={m.instanceId}
-                          onClick={() => setInspectedCard(m)}
-                          className="px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 text-[10px] font-semibold cursor-pointer shrink-0"
-                        >
-                          {m.card.name} ({m.card.subtype})
-                        </div>
-                      ))
-                    )}
-                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400"><span className="font-bold text-slate-200 text-xs">Magic Zone</span><span>สามารถเล่น Magic ได้ประเภทละครั้ง ({me.magicZone.length} ใบในเทิร์น)</span></div>
+                  <div className="flex items-center gap-2 overflow-x-auto py-1">{me.magicZone.length === 0 ? <span className="text-[11px] text-slate-600 mx-auto">คลิกการ์ด Magic บนมือเพื่อร่ายเวทย์</span> : me.magicZone.map(m => <div key={m.instanceId} onClick={() => setInspectedCard(m)} className="px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 text-[10px] font-semibold cursor-pointer shrink-0">{m.card.name} ({m.card.subtype})</div>)}</div>
                 </div>
               </div>
-
-              {/* RIGHT COLUMN: HELL (TOP) + DECK (BOTTOM) */}
               <div className="col-span-2 flex flex-col gap-2">
-                {/* HELL ZONE */}
-                <div
-                  onClick={() => setShowHellModal('ME')}
-                  className="flex-1 bg-slate-950/90 border-2 border-slate-700 hover:border-red-500/60 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition"
-                  title="คลิกเพื่อดูการ์ดในนรก"
-                >
-                  <Skull className="w-4 h-4 text-red-400 mb-0.5" />
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Hell</span>
-                  <span className="text-[9px] text-slate-400">นรก ({me.hell.length})</span>
-                </div>
-
-                {/* DECK ZONE */}
-                <div className="flex-1 bg-slate-950/90 border-2 border-slate-700 rounded-xl p-1.5 flex flex-col items-center justify-center text-center">
-                  <Layers className="w-4 h-4 text-amber-400 mb-0.5" />
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck</span>
-                  <span className="text-[9px] text-slate-400">กองจั่ว ({me.deck.length})</span>
-                </div>
+                <div onClick={() => setShowHellModal('ME')} className="flex-1 bg-slate-950/90 border-2 border-slate-700 hover:border-red-500/60 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition" title="คลิกเพื่อดูการ์ดในนรก"><Skull className="w-4 h-4 text-red-400 mb-0.5" /><span className="text-xs sm:text-sm font-extrabold text-slate-200">Hell</span><span className="text-[9px] text-slate-400">นรก ({me.hell.length})</span></div>
+                <div className="flex-1 bg-slate-950/90 border-2 border-slate-700 rounded-xl p-1.5 flex flex-col items-center justify-center text-center"><Layers className="w-4 h-4 text-amber-400 mb-0.5" /><span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck</span><span className="text-[9px] text-slate-400">กองจั่ว ({me.deck.length})</span></div>
               </div>
             </div>
           </div>
@@ -1245,6 +1160,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                   key={handCard.instanceId}
                   cardInstance={handCard}
                   size="sm"
+                  animation={cardAnimations[handCard.instanceId]}
                   onClick={() => handleInitiatePlayCard(handCard)}
                   onInspect={() => setInspectedCard(handCard)}
                   className="shrink-0 hover:-translate-y-1.5"
@@ -1289,6 +1205,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
           </>
         )}
       </main>
+
+      {combatGhosts.length > 0 && (
+        <div aria-hidden="true" className="pointer-events-none fixed inset-0 z-[45] flex items-center justify-center">
+          {combatGhosts.map(effect => (
+            <div key={effect.token} className="combat-ghost relative h-28 w-20 overflow-hidden rounded-lg border-2 border-red-400/80 bg-slate-950 shadow-2xl">
+              {effect.card.card.imageUrl && <img src={effect.card.card.imageUrl} alt="" className="h-full w-full object-cover" crossOrigin="anonymous" referrerPolicy="no-referrer" />}
+              <span className="absolute inset-x-0 bottom-0 truncate bg-red-950/90 px-1 py-1 text-center text-[8px] font-bold text-white">{effect.card.card.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Notification Banner */}
       {notification && (

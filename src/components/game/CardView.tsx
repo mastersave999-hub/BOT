@@ -12,6 +12,7 @@ interface CardProps {
   onClick?: () => void;
   onInspect?: () => void;
   className?: string;
+  animation?: { type: 'draw' | 'summon' | 'attack' | 'impact' | 'reveal' | 'destroy' | 'tap' | 'untap' | 'return'; token: number };
   size?: 'sm' | 'md' | 'lg';
 }
 
@@ -22,6 +23,7 @@ export const CardView: React.FC<CardProps> = ({
   onClick,
   onInspect,
   className = '',
+  animation,
   size = 'md'
 }) => {
   const { card, isFaceUp } = cardInstance;
@@ -40,7 +42,9 @@ export const CardView: React.FC<CardProps> = ({
           e.preventDefault();
           onInspect?.();
         }}
-        className={`relative ${sizeClasses} rounded-lg border-2 border-slate-700 bg-gradient-to-br from-red-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center shadow-lg transition-transform hover:scale-105 cursor-pointer ${
+        data-card-animation={animation?.type}
+        style={{ animationDelay: animation ? `${animation.token % 2}ms` : undefined }}
+        className={`relative ${sizeClasses} rounded-lg border-2 border-slate-700 bg-gradient-to-br from-red-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center shadow-lg transition-transform hover:scale-105 cursor-pointer ${animation ? `card-motion-${animation.type}` : ''} ${
           isRested ? 'rotate-90 origin-center my-2' : ''
         } ${className}`}
       >
@@ -70,7 +74,9 @@ export const CardView: React.FC<CardProps> = ({
         e.preventDefault();
         onInspect?.();
       }}
-      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 shadow-md flex flex-col overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${
+      data-card-animation={animation?.type}
+      style={{ animationDelay: animation ? `${animation.token % 2}ms` : undefined }}
+      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 shadow-md flex flex-col overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${animation ? `card-motion-${animation.type}` : ''} ${
         isRested ? 'rotate-90 origin-center my-3' : ''
       } ${className}`}
       title={card.name}
