@@ -12,7 +12,7 @@ interface CardProps {
   onClick?: () => void;
   onInspect?: () => void;
   className?: string;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'sm' | 'md' | 'lg' | 'hand';
 }
 
 export const CardView: React.FC<CardProps> = ({
@@ -28,6 +28,7 @@ export const CardView: React.FC<CardProps> = ({
 
   const sizeClasses = {
     sm: 'w-16 h-24 text-[10px]',
+    hand: 'w-[4.5rem] h-[6.75rem] text-[11px] sm:w-20 sm:h-[7.5rem] sm:text-xs',
     md: 'w-24 h-36 text-xs',
     lg: 'w-32 h-48 text-sm'
   }[size];

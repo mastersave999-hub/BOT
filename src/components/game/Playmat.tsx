@@ -1244,7 +1244,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                 <CardView
                   key={handCard.instanceId}
                   cardInstance={handCard}
-                  size="sm"
+                  size="hand"
                   onClick={() => handleInitiatePlayCard(handCard)}
                   onInspect={() => setInspectedCard(handCard)}
                   className="shrink-0 hover:-translate-y-1.5"
