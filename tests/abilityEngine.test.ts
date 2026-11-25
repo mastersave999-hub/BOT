@@ -230,6 +230,9 @@ describe('Ability Engine', () => {
 
   it('moves targeted and global destruction/bounce effects in actual player zones', () => {
     const target = makeInstance(makeCard({ name: 'Target' }), 'p2', 'target');
+    target.attachedInstances = [makeInstance(makeCard({
+      name: 'Attached modification', type: 'Magic', subtype: 'Modification'
+    }), 'p2', 'attached-mod')];
     const source = makeInstance(makeCard({ mainEffect: 'จุติ : เลือก Avatar 1 ใบ ทำลาย Avatar ตัวนั้น' }), 'p1', 'destroy-source');
     const p1 = { id: 'p1', name: 'P1', seat: 0, deck: [], hand: [], lifeDeck: [], avatarZone: [source], constructZone: [], magicZone: [], hell: [], darkDimension: [], isCritical: false, reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }, usedMagicTypesThisTurn: new Set() };
     const p2 = { ...p1, id: 'p2', name: 'P2', seat: 1, avatarZone: [target] };
@@ -237,17 +240,19 @@ describe('Ability Engine', () => {
 
     const destroyed = executeCardAbility(state, 'p1', source, 'SUMMON_JUTI', 'target');
     expect(destroyed.state.players.p2.avatarZone).toHaveLength(0);
-    expect(destroyed.state.players.p2.hell.map(card => card.instanceId)).toContain('target');
+    expect(destroyed.state.players.p2.hell.map(card => card.instanceId)).toEqual(expect.arrayContaining(['target', 'attached-mod']));
 
     const bounceSource = makeInstance(makeCard({ mainEffect: 'จุติ : เลือก Avatar 1 ใบ นำ Avatar ตัวนั้นกลับขึ้นมือ' }), 'p1', 'bounce-source');
     const bounced = executeCardAbility(state, 'p1', bounceSource, 'SUMMON_JUTI', 'target');
     expect(bounced.state.players.p2.avatarZone).toHaveLength(0);
     expect(bounced.state.players.p2.hand.map(card => card.instanceId)).toContain('target');
+    expect(bounced.state.players.p2.hand.find(card => card.instanceId === 'target')?.attachedInstances).toHaveLength(0);
+    expect(bounced.state.players.p2.hell.map(card => card.instanceId)).toContain('attached-mod');
 
     const globalSource = makeInstance(makeCard({ mainEffect: 'จุติ : ทำลาย Avatar ทุกใบบนสนามฝ่ายตรงข้าม' }), 'p1', 'global-source');
     const globallyDestroyed = executeCardAbility(state, 'p1', globalSource, 'SUMMON_JUTI');
     expect(globallyDestroyed.state.players.p2.avatarZone).toHaveLength(0);
-    expect(globallyDestroyed.state.players.p2.hell.map(card => card.instanceId)).toContain('target');
+    expect(globallyDestroyed.state.players.p2.hell.map(card => card.instanceId)).toEqual(expect.arrayContaining(['target', 'attached-mod']));
   });
 
   it('refuses an unsupported conditional instead of partially drawing', () => {

@@ -354,7 +354,7 @@ export function executeCardAbility(
       const opp = { ...nextState.players[pid] };
       if (opp.avatarZone.length > 0) {
         const destroyedNames = opp.avatarZone.map(a => a.card.name).join(', ');
-        opp.hell = [...opp.hell, ...opp.avatarZone];
+        opp.hell = [...opp.hell, ...opp.avatarZone.flatMap(avatar => [avatar, ...avatar.attachedInstances])];
         opp.avatarZone = [];
         nextState.players[pid] = opp;
         logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar ฝ่ายตรงข้ามทั้งหมด (${destroyedNames})!`);
@@ -394,10 +394,11 @@ export function executeCardAbility(
 
         if (parsed.destroysTarget) {
           p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
-          p.hell = [...p.hell, targetAvatar, ...(targetAvatar.attachedInstances || [])];
+          p.hell = [...p.hell, targetAvatar, ...targetAvatar.attachedInstances];
           logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar "${targetAvatar.card.name}" ลงนรก!`);
         } else if (parsed.bouncesTarget) {
           p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
+          p.hell = [...p.hell, ...targetAvatar.attachedInstances];
           p.hand = [...p.hand, { ...targetAvatar, isRested: false, layerModifiers: [], attachedInstances: [] }];
           logs.push(`🌪️ "${sourceCard.card.name}" นำ "${targetAvatar.card.name}" กลับขึ้นมือ!`);
         } else if (parsed.resetsPower) {
