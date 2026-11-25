@@ -3,6 +3,7 @@
 import React from 'react';
 import { CardInstance } from '../../engine/types';
 import { calculateNetPower } from '../../engine/layers';
+import { Info } from 'lucide-react';
 
 interface CardProps {
   cardInstance: CardInstance;
@@ -110,6 +111,20 @@ export const CardView: React.FC<CardProps> = ({
           />
         ) : null}
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-80" />
+        {onInspect && (
+          <button
+            type="button"
+            aria-label={`ดูความสามารถ ${card.name}`}
+            title="ดูความสามารถการ์ด"
+            onClick={(e) => {
+              e.stopPropagation();
+              onInspect();
+            }}
+            className="absolute top-1 right-1 z-10 w-5 h-5 rounded-full bg-slate-950/90 border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950 transition"
+          >
+            <Info className="w-3 h-3" />
+          </button>
+        )}
       </div>
 
       {/* Card Footer: Power / Type */}

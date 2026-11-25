@@ -17,7 +17,7 @@ import {
 import { calculateNetPower } from '../../engine/layers';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
-  CheckCircle2, BookOpen, X, Sparkles, Skull, Layers
+  CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info
 } from 'lucide-react';
 
 interface PlaymatProps {
@@ -1112,7 +1112,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
           <div className="mt-1.5 bg-slate-900/95 border border-slate-700 rounded-xl p-2 flex flex-col shrink-0">
             <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
               <span className="font-bold text-amber-400">การ์ดบนมือของคุณ ({me.hand.length} ใบ) — คลิกเพื่อเล่นลงสนาม</span>
-              <span className="hidden sm:inline text-[10px]">คลิกขวาเพื่อดูรายละเอียดการ์ด</span>
+              <span className="text-[10px]">กดปุ่ม <b className="text-amber-300">i</b> บนการ์ดเพื่อดูความสามารถก่อนลง</span>
             </div>
             <div className="flex items-center gap-2 overflow-x-auto pb-1">
               {me.hand.map(handCard => (
@@ -1164,8 +1164,23 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                 <X className="w-4 h-4" />
               </button>
             </div>
+            <div className="rounded-lg bg-slate-950 border border-slate-800 p-2 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold text-slate-300">ความสามารถของการ์ดที่จะลง</span>
+                <button
+                  type="button"
+                  onClick={() => setInspectedCard(pendingCost.handCard)}
+                  className="text-[11px] text-amber-400 hover:text-amber-300 underline shrink-0"
+                >
+                  ดูการ์ดเต็ม
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed max-h-24 overflow-y-auto whitespace-pre-line">
+                {pendingCost.handCard.card.mainEffect || 'ไม่มีความสามารถพิเศษ (Normal Avatar)'}
+              </p>
+            </div>
             <p className="text-xs text-slate-400">
-              เลือกการ์ดจากบนมือเพื่อส่งลงนรกเป็นค่า Cost (หรือเลือก "จ่ายอัตโนมัติ" / "ใช้ฟรีด้วยเอฟเฟกต์"):
+              เลือกการ์ดจากบนมือเพื่อส่งลงนรกเป็นค่า Cost (กดปุ่ม i เพื่อดูความสามารถของการ์ดก่อนทิ้ง):
             </p>
             <div className="flex gap-2 overflow-x-auto py-2">
               {me.hand
@@ -1187,10 +1202,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                             : null
                         );
                       }}
-                      className={`p-1 rounded-lg border-2 cursor-pointer shrink-0 transition ${
+                      className={`relative p-1 pr-6 rounded-lg border-2 cursor-pointer shrink-0 transition ${
                         isSel ? 'border-amber-400 bg-amber-950/40' : 'border-slate-800 bg-slate-950'
                       }`}
                     >
+                      <button
+                        type="button"
+                        aria-label={`ดูความสามารถ ${c.card.name}`}
+                        onClick={e => {
+                          e.stopPropagation();
+                          setInspectedCard(c);
+                        }}
+                        className="absolute top-1 right-1 w-4 h-4 rounded-full border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950"
+                      >
+                        <Info className="w-2.5 h-2.5" />
+                      </button>
                       <div className="text-[10px] font-bold text-slate-200 w-20 truncate">{c.card.name}</div>
                       <div className="text-[9px] text-emerald-400">GEM: {c.card.gem ?? 0}</div>
                     </div>
