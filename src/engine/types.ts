@@ -17,7 +17,7 @@ export const CardSchema = z.object({
   soi: z.number().default(1),
   cost: z.number().default(0),
   gem: z.number().default(0),
-  gemColor: z.string().optional(),
+  gemColor: z.string().nullable().optional(),
   power: z.number().default(0),
   symbol: z.string().nullable().optional(),
   color: z.string().default('ไร้สี'),
