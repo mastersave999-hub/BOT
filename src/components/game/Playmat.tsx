@@ -5,6 +5,7 @@ import { GameState, CardInstance, MagicSubtype } from '../../engine/types';
 import type { RoomLink } from '../../engine/multiplayer';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
+import { OpeningDiceRoll } from './OpeningDiceRoll';
 import { executeDrawPhase, eliminatePlayer } from '../../engine/turnEngine';
 import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
 import {
@@ -63,6 +64,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
   const [showHellModal, setShowHellModal] = useState<'ME' | 'OPPONENT' | null>(null);
   const [winnerName, setWinnerName] = useState<string | null>(null);
   const [opponentLeft, setOpponentLeft] = useState<boolean>(false);
+  const [showOpeningRoll, setShowOpeningRoll] = useState<boolean>(() => !!initialState.openingRolls);
   const isOnline = !!link;
   // Last state that did not originate from a local action; it must not be echoed back to the peer.
   const baselineStateRef = useRef<GameState | null>(null);
@@ -1180,7 +1182,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
               </p>
             </div>
             <p className="text-xs text-slate-400">
-              เลือกการ์ดจากบนมือเพื่อส่งลงนรกเป็นค่า Cost (กดปุ่ม i เพื่อดูความสามารถของการ์ดก่อนทิ้ง):
+              เลือกการ์ดจากบนมือเพื่อส่งลงนรกเป็นค่า Cost (กด "ดูความสามารถ" ในแต่ละใบก่อนตัดสินใจทิ้ง):
             </p>
             <div className="flex gap-2 overflow-x-auto py-2">
               {me.hand
@@ -1202,23 +1204,27 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
                             : null
                         );
                       }}
-                      className={`relative p-1 pr-6 rounded-lg border-2 cursor-pointer shrink-0 transition ${
+                      className={`relative p-1.5 rounded-lg border-2 cursor-pointer shrink-0 w-36 transition ${
                         isSel ? 'border-amber-400 bg-amber-950/40' : 'border-slate-800 bg-slate-950'
                       }`}
                     >
+                      <div className="text-[11px] font-bold text-slate-200 truncate">{c.card.name}</div>
+                      <div className="text-[10px] text-emerald-400">GEM: {c.card.gem ?? 0}</div>
+                      <p className="mt-1 text-[10px] leading-snug text-slate-400 line-clamp-3 min-h-[3.1em]">
+                        {c.card.mainEffect || 'ไม่มีความสามารถพิเศษ'}
+                      </p>
                       <button
                         type="button"
-                        aria-label={`ดูความสามารถ ${c.card.name}`}
                         onClick={e => {
                           e.stopPropagation();
                           setInspectedCard(c);
                         }}
-                        className="absolute top-1 right-1 w-4 h-4 rounded-full border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950"
+                        className="mt-1 w-full flex items-center justify-center gap-1 rounded border border-amber-400/60 py-1 text-[10px] font-semibold text-amber-300 hover:bg-amber-500 hover:text-slate-950 transition"
                       >
-                        <Info className="w-2.5 h-2.5" />
+                        <Info className="w-3 h-3" aria-hidden="true" />
+                        ดูความสามารถ
+                        <span className="sr-only"> {c.card.name}</span>
                       </button>
-                      <div className="text-[10px] font-bold text-slate-200 w-20 truncate">{c.card.name}</div>
-                      <div className="text-[9px] text-emerald-400">GEM: {c.card.gem ?? 0}</div>
                     </div>
                   );
                 })}
@@ -1345,6 +1351,20 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, l
 
       {/* Card Detail Inspection Modal */}
       <CardDetailModal cardInstance={inspectedCard} onClose={() => setInspectedCard(null)} />
+
+      {showOpeningRoll && initialState.openingRolls && (
+        <OpeningDiceRoll
+          playerOrder={initialState.playerOrder}
+          rolls={initialState.openingRolls}
+          names={Object.fromEntries(
+            Object.values(initialState.players)
+              .sort((a, b) => a.seat - b.seat)
+              .map(player => [player.id, player.name])
+          )}
+          meId={meId}
+          onClose={() => setShowOpeningRoll(false)}
+        />
+      )}
     </div>
   );
 };

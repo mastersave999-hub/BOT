@@ -83,6 +83,8 @@ export interface GameState {
   roundNumber: number;
   players: Record<string, PlayerState>;
   landMagicZone: CardInstance | null; // 1 shared global slot
+  /** Opening dice roll (d6) per player id; present only when turn order was decided by dice. */
+  openingRolls?: Record<string, number>;
   battleContext?: {
     attackerInstanceId: string;
     targetType: 'AVATAR' | 'CONSTRUCT' | 'LIFE';

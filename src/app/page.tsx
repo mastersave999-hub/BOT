@@ -14,6 +14,7 @@ import {
   getCurrentUser, logoutUser, saveDeckForUser,
   deleteDeckForUser, UserAccount
 } from '../engine/authService';
+import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
 import {
@@ -75,6 +76,7 @@ function shuffled<T>(items: T[]): T[] {
 
 function buildOnlineState(mode: RoomMode, setups: PlayerSetup[]): GameState {
   const ids = setups.map((_, seat) => playerIdForSeat(seat));
+  const opening = rollOpeningOrder(ids);
   const players: Record<string, PlayerState> = {};
   setups.forEach((setup, seat) => {
     players[ids[seat]] = createOnlinePlayer(ids[seat], seat, setup);
@@ -83,8 +85,8 @@ function buildOnlineState(mode: RoomMode, setups: PlayerSetup[]): GameState {
   return {
     id: `online-${Date.now()}`,
     mode,
-    // Ad-Mua: turn order comes from a dice roll, so the first seat is random. Duel: host goes first.
-    playerOrder: mode === 'AD_MUA' ? shuffled(ids) : ids,
+    playerOrder: opening.order,
+    openingRolls: opening.rolls,
     currentTurnPlayerIndex: 0,
     currentPhase: 'DRAW',
     turnNumber: 1,
