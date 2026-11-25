@@ -17,6 +17,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   const [isRegisterMode, setIsRegisterMode] = useState(false)
   const [verificationFlow, setVerificationFlow] = useState<VerificationFlow>(null)
   const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
+  const [loginIdentifier, setLoginIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [verificationCode, setVerificationCode] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -35,6 +37,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   const completeAuthentication = () => {
     clearAttempt()
     setEmail('')
+    setUsername('')
+    setLoginIdentifier('')
     setPassword('')
     setIsRegisterMode(false)
     onClose()
@@ -47,7 +51,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
     try {
       if (isRegisterMode) {
-        const result = await signUp.password({ emailAddress: email.trim(), password })
+        const result = await signUp.password({
+          emailAddress: email.trim(),
+          username: username.trim(),
+          password,
+        })
         if (result.error) throw result.error
 
         if (signUp.status === 'complete') {
@@ -63,7 +71,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         return
       }
 
-      const result = await signIn.password({ emailAddress: email.trim(), password })
+      const result = await signIn.password({ identifier: loginIdentifier.trim(), password })
       if (result.error) throw result.error
 
       if (signIn.status === 'complete') {
@@ -86,7 +94,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
         return
       }
 
-      setMessage('เข้าสู่ระบบไม่สำเร็จ กรุณาตรวจสอบอีเมลและรหัสผ่าน')
+      setMessage('เข้าสู่ระบบไม่สำเร็จ กรุณาตรวจสอบชื่อผู้ใช้หรืออีเมล และรหัสผ่าน')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'ทำรายการไม่สำเร็จ กรุณาลองอีกครั้ง')
     } finally {
@@ -148,6 +156,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
 
   const handleModeChange = () => {
     clearAttempt()
+    setEmail('')
+    setUsername('')
+    setLoginIdentifier('')
+    setPassword('')
     setIsRegisterMode((current) => !current)
   }
 
@@ -173,7 +185,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           <p className="mt-1 text-xs text-slate-400">
             {verificationFlow
               ? `กรอกรหัสที่ส่งไปยัง ${email}`
-              : 'ใช้อีเมลและรหัสผ่านเพื่อบันทึกเด็คและโปรไฟล์'}
+              : isRegisterMode
+                ? 'ตั้งชื่อผู้ใช้สำหรับล็อกอิน และใช้อีเมลสำหรับยืนยันบัญชี'
+                : 'เข้าสู่ระบบด้วยชื่อผู้ใช้หรืออีเมลก็ได้'}
           </p>
         </div>
 
@@ -223,20 +237,52 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           </form>
         ) : (
           <form onSubmit={(event) => void handlePasswordSubmit(event)} className="space-y-3">
+            {isRegisterMode ? (
+              <>
+                <div>
+                  <label htmlFor="auth-username" className="mb-1.5 block text-xs font-semibold text-slate-300">ชื่อผู้ใช้</label>
+                  <input
+                    id="auth-username"
+                    type="text"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                    required
+                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="auth-email" className="mb-1.5 block text-xs font-semibold text-slate-300">อีเมลสำหรับยืนยันบัญชี</label>
+                  <input
+                    id="auth-email"
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    required
+                    className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-amber-500"
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label htmlFor="auth-identifier" className="mb-1.5 block text-xs font-semibold text-slate-300">ชื่อผู้ใช้หรืออีเมล</label>
+                <input
+                  id="auth-identifier"
+                  type="text"
+                  autoComplete="username"
+                  value={loginIdentifier}
+                  onChange={(event) => setLoginIdentifier(event.target.value)}
+                  required
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-amber-500"
+                />
+              </div>
+            )}
             <div>
-              <label htmlFor="auth-email" className="mb-1.5 block text-xs font-semibold text-slate-300">อีเมล</label>
-              <input
-                id="auth-email"
-                type="email"
-                autoComplete="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                required
-                className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-amber-500"
-              />
-            </div>
-            <div>
-              <label htmlFor="auth-password" className="mb-1.5 block text-xs font-semibold text-slate-300">รหัสผ่าน</label>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label htmlFor="auth-password" className="text-xs font-semibold text-slate-300">รหัสผ่าน</label>
+                {isRegisterMode && <span className="text-[11px] text-slate-500">อย่างน้อย 8 ตัวอักษร</span>}
+              </div>
               <input
                 id="auth-password"
                 type="password"
@@ -244,7 +290,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 required
-                minLength={8}
+                minLength={isRegisterMode ? 8 : undefined}
                 className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-amber-500"
               />
             </div>
