@@ -4,10 +4,12 @@ import { NextResponse, type NextRequest } from 'next/server'
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request })
 
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
-    {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+  if (!supabaseUrl || !supabaseKey) return response
+
+  try {
+    const supabase = createServerClient(supabaseUrl, supabaseKey, {
       cookies: {
         getAll() {
           return request.cookies.getAll()
@@ -20,10 +22,12 @@ export async function proxy(request: NextRequest) {
           )
         },
       },
-    },
-  )
+    })
 
-  await supabase.auth.getUser()
+    await supabase.auth.getUser()
+  } catch {
+    // Keep public pages available if Supabase auth is temporarily unreachable.
+  }
   return response
 }
 

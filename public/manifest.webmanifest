@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "Battle of Talingchan Online",
+  "short_name": "Battle of Talingchan",
+  "description": "ศึกตลิ่งชัน ออนไลน์ การ์ดเกมไทย",
+  "lang": "th",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    {
+      "src": "/icons/app-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
