@@ -1,115 +1,305 @@
-'use client';
+'use client'
+
+import type { Card } from './types'
+import { createClient } from '../lib/supabase/client'
+
+export interface SavedDeck {
+  id: string
+  name: string
+  createdAt: number
+  mainDeck: Card[]
+  lifeDeck: Card[]
+}
 
 export interface UserAccount {
-  username: string;
-  savedDecks: {
-    id: string;
-    name: string;
-    createdAt: number;
-    mainDeck: any[];
-    lifeDeck: any[];
-  }[];
+  id: string
+  email: string
+  username: string
+  avatarPath: string | null
+  avatarUrl: string | null
+  savedDecks: SavedDeck[]
 }
 
-const STORAGE_KEY_USER = 'bot_current_user';
-const STORAGE_KEY_USERS_DB = 'bot_users_db';
+type ProfileRow = {
+  username: string
+  avatar_path: string | null
+  saved_decks: SavedDeck[] | null
+}
 
-export function getStoredUsers(): Record<string, { password: string; account: UserAccount }> {
-  if (typeof window === 'undefined') return {};
+const AVATAR_BUCKET = 'avatars'
+const MAX_AVATAR_SIZE = 5 * 1024 * 1024
+const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+
+function migrateLegacyDecks(username: string): SavedDeck[] {
+  if (typeof window === 'undefined') return []
+
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_USERS_DB);
-    return raw ? JSON.parse(raw) : {};
+    const raw = localStorage.getItem('bot_users_db')
+    if (!raw) {
+      localStorage.removeItem('bot_current_user')
+      return []
+    }
+
+    const oldUsers = JSON.parse(raw) as Record<string, { password?: string; account?: { username?: string; savedDecks?: SavedDeck[] } }>
+    const matchingEntry = Object.entries(oldUsers).find(([key, value]) =>
+      key.toLowerCase() === username.toLowerCase() ||
+      value.account?.username?.toLowerCase() === username.toLowerCase(),
+    )
+    const legacyDecks = matchingEntry && Array.isArray(matchingEntry[1].account?.savedDecks)
+      ? matchingEntry[1].account.savedDecks
+      : []
+
+    const passwordFreeUsers = Object.fromEntries(
+      Object.entries(oldUsers).map(([key, value]) => [
+        key,
+        Object.fromEntries(Object.entries(value).filter(([field]) => field !== 'password')),
+      ]),
+    )
+    localStorage.setItem('bot_users_db', JSON.stringify(passwordFreeUsers))
+    localStorage.removeItem('bot_current_user')
+    return legacyDecks
   } catch {
-    return {};
+    localStorage.removeItem('bot_users_db')
+    localStorage.removeItem('bot_current_user')
+    return []
   }
 }
 
-export function getCurrentUser(): UserAccount | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_USER);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+async function loadAccount(userId: string, email: string, metadataUsername: unknown): Promise<UserAccount> {
+  const supabase = createClient()
+  const { data: existingProfile, error: readError } = await supabase
+    .from('profiles')
+    .select('username, avatar_path, saved_decks')
+    .eq('id', userId)
+    .maybeSingle()
+
+  if (readError) throw readError
+
+  let profile = existingProfile as ProfileRow | null
+  if (!profile) {
+    const candidate = typeof metadataUsername === 'string' ? metadataUsername.trim() : ''
+    const username = candidate.length >= 3 && candidate.length <= 24
+      ? candidate
+      : `player-${userId.slice(0, 8)}`
+    const { error: insertError } = await supabase.from('profiles').insert({ id: userId, username })
+    if (insertError) throw insertError
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('username, avatar_path, saved_decks')
+      .eq('id', userId)
+      .single()
+    if (error) throw error
+    profile = data as ProfileRow
+  }
+
+  const legacyDecks = migrateLegacyDecks(profile.username)
+  if (!profile.saved_decks?.length && legacyDecks.length > 0) {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ saved_decks: legacyDecks })
+      .eq('id', userId)
+    if (error) throw error
+    profile.saved_decks = legacyDecks
+  }
+
+  let avatarUrl: string | null = null
+  if (profile.avatar_path) {
+    const { data } = await supabase.storage.from(AVATAR_BUCKET).createSignedUrl(profile.avatar_path, 3600)
+    avatarUrl = data?.signedUrl ?? null
+  }
+
+  return {
+    id: userId,
+    email,
+    username: profile.username,
+    avatarPath: profile.avatar_path,
+    avatarUrl,
+    savedDecks: Array.isArray(profile.saved_decks) ? profile.saved_decks : [],
   }
 }
 
-export function registerUser(username: string, password: string): { success: boolean; message: string; user?: UserAccount } {
-  const cleanUser = username.trim();
-  if (!cleanUser || cleanUser.length < 3) {
-    return { success: false, message: 'ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร' };
+export async function getCurrentUser(): Promise<UserAccount | null> {
+  const supabase = createClient()
+  const { data, error } = await supabase.auth.getUser()
+  if (error || !data.user) return null
+
+  return loadAccount(data.user.id, data.user.email ?? '', data.user.user_metadata?.username)
+}
+
+export async function registerUser(
+  email: string,
+  username: string,
+  password: string,
+): Promise<{ success: boolean; message: string; user?: UserAccount }> {
+  const cleanEmail = email.trim().toLowerCase()
+  const cleanUsername = username.trim()
+  if (cleanUsername.length < 3 || cleanUsername.length > 24) {
+    return { success: false, message: 'ชื่อผู้ใช้ต้องมีความยาว 3–24 ตัวอักษร' }
   }
-  if (!password || password.length < 4) {
-    return { success: false, message: 'รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร' };
+  if (password.length < 8) {
+    return { success: false, message: 'รหัสผ่านต้องมีอย่างน้อย 8 ตัวอักษร' }
   }
 
-  const users = getStoredUsers();
-  if (users[cleanUser.toLowerCase()]) {
-    return { success: false, message: 'ชื่อผู้ใช้นี้มีคนใช้แล้ว กรุณาเลือกชื่ออื่น' };
-  }
-
-  const newAccount: UserAccount = {
-    username: cleanUser,
-    savedDecks: []
-  };
-
-  users[cleanUser.toLowerCase()] = {
+  const supabase = createClient()
+  const { data, error } = await supabase.auth.signUp({
+    email: cleanEmail,
     password,
-    account: newAccount
-  };
+    options: {
+      data: { username: cleanUsername },
+      emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL ??
+        `${window.location.origin}/auth/callback`,
+    },
+  })
 
-  localStorage.setItem(STORAGE_KEY_USERS_DB, JSON.stringify(users));
-  localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(newAccount));
-  return { success: true, message: 'สมัครสมาชิกสำเร็จ!', user: newAccount };
-}
-
-export function loginUser(username: string, password: string): { success: boolean; message: string; user?: UserAccount } {
-  const cleanUser = username.trim().toLowerCase();
-  const users = getStoredUsers();
-
-  const found = users[cleanUser];
-  if (!found || found.password !== password) {
-    return { success: false, message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' };
+  if (error) {
+    const details = error.message.toLowerCase()
+    if (error.status === 429) {
+      return { success: false, message: 'มีการสมัครบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่' }
+    }
+    if (details.includes('password') && (details.includes('weak') || details.includes('short'))) {
+      return { success: false, message: 'รหัสผ่านยังไม่ปลอดภัยพอ กรุณาใช้รหัสผ่านที่ยาวและคาดเดายากขึ้น' }
+    }
+    if (details.includes('invalid email')) {
+      return { success: false, message: 'รูปแบบอีเมลไม่ถูกต้อง กรุณาตรวจสอบอีกครั้ง' }
+    }
+    return { success: false, message: 'สมัครบัญชีไม่สำเร็จ กรุณาตรวจสอบข้อมูลแล้วลองอีกครั้ง' }
   }
 
-  localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(found.account));
-  return { success: true, message: 'เข้าสู่ระบบสำเร็จ!', user: found.account };
-}
+  if (!data.session || !data.user) {
+    return { success: true, message: 'ส่งลิงก์ยืนยันไปยังอีเมลของคุณแล้ว กรุณายืนยันก่อนเข้าสู่ระบบ' }
+  }
 
-export function logoutUser(): void {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem(STORAGE_KEY_USER);
+  try {
+    const user = await loadAccount(data.user.id, data.user.email ?? cleanEmail, cleanUsername)
+    return { success: true, message: 'สมัครสมาชิกสำเร็จ!', user }
+  } catch {
+    return { success: false, message: 'สร้างโปรไฟล์ไม่สำเร็จ กรุณาลองเข้าสู่ระบบอีกครั้ง' }
   }
 }
 
-export function saveDeckForUser(username: string, deckName: string, mainDeck: any[], lifeDeck: any[]): UserAccount | null {
-  if (typeof window === 'undefined') return null;
-  const users = getStoredUsers();
-  const key = username.trim().toLowerCase();
-  if (!users[key]) return null;
+export async function loginUser(
+  email: string,
+  password: string,
+): Promise<{ success: boolean; message: string; user?: UserAccount }> {
+  const supabase = createClient()
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: email.trim().toLowerCase(),
+    password,
+  })
 
-  const newDeck = {
-    id: `deck-${Date.now()}`,
-    name: deckName.trim() || `เด็คใหม่ ${users[key].account.savedDecks.length + 1}`,
+  if (error || !data.user) {
+    const details = error?.message.toLowerCase() ?? ''
+    const message = details.includes('not confirmed')
+      ? 'กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ'
+      : error?.status === 429
+        ? 'ลองเข้าสู่ระบบบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่'
+        : details.includes('invalid login credentials')
+          ? 'อีเมลหรือรหัสผ่านไม่ถูกต้อง'
+          : 'ระบบบัญชีขัดข้องชั่วคราว กรุณาลองอีกครั้ง'
+    return { success: false, message }
+  }
+
+  try {
+    const user = await loadAccount(data.user.id, data.user.email ?? '', data.user.user_metadata?.username)
+    return { success: true, message: 'เข้าสู่ระบบสำเร็จ!', user }
+  } catch {
+    return { success: false, message: 'โหลดโปรไฟล์ไม่สำเร็จ กรุณาลองอีกครั้ง' }
+  }
+}
+
+export async function logoutUser(): Promise<void> {
+  const supabase = createClient()
+  await supabase.auth.signOut()
+}
+
+export async function saveDeckForUser(
+  user: UserAccount,
+  deckName: string,
+  mainDeck: Card[],
+  lifeDeck: Card[],
+): Promise<UserAccount | null> {
+  const newDeck: SavedDeck = {
+    id: crypto.randomUUID(),
+    name: deckName.trim() || `เด็คใหม่ ${user.savedDecks.length + 1}`,
     createdAt: Date.now(),
     mainDeck,
-    lifeDeck
-  };
+    lifeDeck,
+  }
+  const savedDecks = [newDeck, ...user.savedDecks]
+  const supabase = createClient()
+  const { error } = await supabase
+    .from('profiles')
+    .update({ saved_decks: savedDecks, updated_at: new Date().toISOString() })
+    .eq('id', user.id)
 
-  users[key].account.savedDecks.unshift(newDeck);
-  localStorage.setItem(STORAGE_KEY_USERS_DB, JSON.stringify(users));
-  localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(users[key].account));
-  return users[key].account;
+  if (error) throw error
+  return { ...user, savedDecks }
 }
 
-export function deleteDeckForUser(username: string, deckId: string): UserAccount | null {
-  if (typeof window === 'undefined') return null;
-  const users = getStoredUsers();
-  const key = username.trim().toLowerCase();
-  if (!users[key]) return null;
+export async function deleteDeckForUser(user: UserAccount, deckId: string): Promise<UserAccount | null> {
+  const savedDecks = user.savedDecks.filter((deck) => deck.id !== deckId)
+  const supabase = createClient()
+  const { error } = await supabase
+    .from('profiles')
+    .update({ saved_decks: savedDecks, updated_at: new Date().toISOString() })
+    .eq('id', user.id)
 
-  users[key].account.savedDecks = users[key].account.savedDecks.filter(d => d.id !== deckId);
-  localStorage.setItem(STORAGE_KEY_USERS_DB, JSON.stringify(users));
-  localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(users[key].account));
-  return users[key].account;
+  if (error) throw error
+  return { ...user, savedDecks }
+}
+
+export async function uploadAvatar(user: UserAccount, file: File): Promise<UserAccount> {
+  if (!ALLOWED_AVATAR_TYPES.has(file.type)) {
+    throw new Error('รองรับเฉพาะไฟล์ JPG, PNG และ WebP')
+  }
+  if (file.size > MAX_AVATAR_SIZE) {
+    throw new Error('รูปภาพต้องมีขนาดไม่เกิน 5 MB')
+  }
+
+  const supabase = createClient()
+  const extension = file.type === 'image/jpeg' ? 'jpg' : file.type.split('/')[1]
+  const avatarPath = `${user.id}/${crypto.randomUUID()}.${extension}`
+  const { error: uploadError } = await supabase.storage.from(AVATAR_BUCKET).upload(avatarPath, file, {
+    contentType: file.type,
+    cacheControl: '3600',
+    upsert: false,
+  })
+  if (uploadError) throw uploadError
+
+  const { error: updateError } = await supabase
+    .from('profiles')
+    .update({ avatar_path: avatarPath, updated_at: new Date().toISOString() })
+    .eq('id', user.id)
+
+  if (updateError) {
+    await supabase.storage.from(AVATAR_BUCKET).remove([avatarPath])
+    throw updateError
+  }
+
+  if (user.avatarPath) {
+    await supabase.storage.from(AVATAR_BUCKET).remove([user.avatarPath])
+  }
+
+  const { data, error: signedUrlError } = await supabase.storage
+    .from(AVATAR_BUCKET)
+    .createSignedUrl(avatarPath, 3600)
+  if (signedUrlError) throw signedUrlError
+
+  return { ...user, avatarPath, avatarUrl: data.signedUrl }
+}
+
+export async function removeAvatar(user: UserAccount): Promise<UserAccount> {
+  const supabase = createClient()
+  const { error } = await supabase
+    .from('profiles')
+    .update({ avatar_path: null, updated_at: new Date().toISOString() })
+    .eq('id', user.id)
+  if (error) throw error
+
+  if (user.avatarPath) {
+    await supabase.storage.from(AVATAR_BUCKET).remove([user.avatarPath])
+  }
+
+  return { ...user, avatarPath: null, avatarUrl: null }
 }

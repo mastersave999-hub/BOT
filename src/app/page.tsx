@@ -1,10 +1,12 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import useSWR from 'swr';
 import { Playmat } from '../components/game/Playmat';
 import { DeckBuilder } from '../components/deck/DeckBuilder';
 import { MatchmakingLobby } from '../components/lobby/MatchmakingLobby';
 import { AuthModal } from '../components/auth/AuthModal';
+import { ProfileMenu } from '../components/auth/ProfileMenu';
 import { GameState, CardInstance, Card, PlayerState } from '../engine/types';
 import {
   playerIdForSeat,
@@ -12,15 +14,12 @@ import {
 } from '../engine/multiplayer';
 import {
   getCurrentUser, logoutUser, saveDeckForUser,
-  deleteDeckForUser, UserAccount
+  deleteDeckForUser, type UserAccount
 } from '../engine/authService';
 import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
-import {
-  Swords, Users, Play, Library, Globe, User, LogOut,
-  FolderOpen, Trash2, CheckCircle2, PlusCircle
-} from 'lucide-react';
+import { Swords, Users, Play, Library, Globe, User } from 'lucide-react';
 
 function createCardInstance(card: Card, ownerId: string, instanceId: string, isFaceUp = true): CardInstance {
   return {
@@ -110,9 +109,10 @@ export default function Home() {
   const [initialGameState, setInitialGameState] = useState<GameState | null>(null);
   const [onlineSession, setOnlineSession] = useState<MatchSession | null>(null);
 
-  // Auth State
-  const [user, setUser] = useState<UserAccount | null>(null);
-  const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
+  const { data: user = null, mutate: mutateUser } = useSWR<UserAccount | null>('current-user', getCurrentUser);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [accountMessage, setAccountMessage] = useState<string | null>(null);
+  const loadedDeckUserId = useRef<string | null>(null);
 
   // Custom User Decks
   const [activeDeckName, setActiveDeckName] = useState<string>('เด็คเริ่มต้นทางการ');
@@ -120,32 +120,35 @@ export default function Home() {
   const [customLifeDeck, setCustomLifeDeck] = useState<Card[]>(starterDeckData.lifeDeck as Card[]);
 
   useEffect(() => {
-    const cur = getCurrentUser();
-    if (cur) {
-      setUser(cur);
-      // Auto load first saved deck if any
-      if (cur.savedDecks && cur.savedDecks.length > 0) {
-        setActiveDeckName(cur.savedDecks[0].name);
-        setCustomMainDeck(cur.savedDecks[0].mainDeck);
-        setCustomLifeDeck(cur.savedDecks[0].lifeDeck);
-      }
+    if (!user || loadedDeckUserId.current === user.id) return;
+    loadedDeckUserId.current = user.id;
+    const firstDeck = user.savedDecks[0];
+    if (firstDeck) {
+      setActiveDeckName(firstDeck.name);
+      setCustomMainDeck(firstDeck.mainDeck);
+      setCustomLifeDeck(firstDeck.lifeDeck);
     }
-  }, []);
+  }, [user]);
 
-  const handleLogout = () => {
-    logoutUser();
-    setUser(null);
+  const handleLogout = async () => {
+    await logoutUser();
+    loadedDeckUserId.current = null;
+    await mutateUser(null, { revalidate: false });
   };
 
-  const handleSaveDeck = (main: Card[], life: Card[], deckName: string) => {
+  const handleSaveDeck = async (main: Card[], life: Card[], deckName: string) => {
     setCustomMainDeck(main);
     setCustomLifeDeck(life);
     setActiveDeckName(deckName);
+    setAccountMessage(null);
 
-    // If logged in, persist to user account
     if (user) {
-      const updatedUser = saveDeckForUser(user.username, deckName, main, life);
-      if (updatedUser) setUser(updatedUser);
+      try {
+        const updatedUser = await saveDeckForUser(user, deckName, main, life);
+        if (updatedUser) await mutateUser(updatedUser, { revalidate: false });
+      } catch {
+        setAccountMessage('บันทึกเด็คออนไลน์ไม่สำเร็จ กรุณาลองอีกครั้ง');
+      }
     }
     setCurrentView('HOME');
   };
@@ -156,10 +159,14 @@ export default function Home() {
     setCustomLifeDeck(deck.lifeDeck);
   };
 
-  const handleDeleteSavedDeck = (deckId: string) => {
+  const handleDeleteSavedDeck = async (deckId: string) => {
     if (!user) return;
-    const updated = deleteDeckForUser(user.username, deckId);
-    if (updated) setUser(updated);
+    try {
+      const updated = await deleteDeckForUser(user, deckId);
+      if (updated) await mutateUser(updated, { revalidate: false });
+    } catch {
+      setAccountMessage('ลบเด็คไม่สำเร็จ กรุณาลองอีกครั้ง');
+    }
   };
 
   const startMatch = (mode: 'DUEL' | 'AD_MUA', opponentName = 'ผู้เล่นฝ่ายตรงข้าม (AI Opponent)') => {
@@ -329,19 +336,11 @@ export default function Home() {
 
           {/* User Account Button */}
           {user ? (
-            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700 px-2.5 py-1 rounded-lg">
-              <span className="text-amber-400 font-semibold text-xs flex items-center gap-1">
-                <User className="w-3.5 h-3.5" />
-                {user.username}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="p-1 rounded text-slate-500 hover:text-red-400 transition"
-                title="ออกจากระบบ"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <ProfileMenu
+              user={user}
+              onUserUpdate={(updatedUser) => void mutateUser(updatedUser, { revalidate: false })}
+              onLogout={() => void handleLogout()}
+            />
           ) : (
             <button
               onClick={() => setIsAuthOpen(true)}
@@ -359,6 +358,7 @@ export default function Home() {
         {/* Active Deck Selector Bar */}
         <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
+            {accountMessage && <span role="status" className="text-red-300">{accountMessage}</span>}
             <span className="text-slate-400">เด็คที่เลือกใช้:</span>
             <span className="font-bold text-amber-400">{activeDeckName}</span>
             <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded">
@@ -468,7 +468,7 @@ export default function Home() {
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
-        onSuccess={(u) => setUser(u)}
+        onSuccess={(account) => void mutateUser(account, { revalidate: false })}
       />
     </div>
   );
