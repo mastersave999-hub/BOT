@@ -246,6 +246,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       controllerId: destinationPlayerId,
       ...(sourceZone === 'magicZone' ? { isFaceUp: true, isRested: false, layerModifiers: [] } : {})
     } : {}),
+    ...(sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && card.duoWithInstanceId ? { duoWithInstanceId: undefined, controlChangeImmune: false } : {}),
     ...(attachmentsLeaveWithAvatar && card.attachedInstances.length > 0 ? { attachedInstances: [] } : {})
   };
   if (sourcePlayerId && sourceZone) {
@@ -288,6 +289,14 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     if (!owner) return { ok: false, state, reason: 'Attached card owner does not exist' };
     if (request.destination !== 'removedFromGame') {
       players[owner.id] = { ...owner, hell: [...owner.hell, attached] };
+    }
+  }
+  if (sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && card.duoWithInstanceId) {
+    for (const playerId of Object.keys(players)) {
+      const player = players[playerId];
+      players[playerId] = { ...player, avatarZone: player.avatarZone.map(avatar => avatar.instanceId === card!.duoWithInstanceId
+        ? { ...avatar, duoWithInstanceId: undefined, controlChangeImmune: false }
+        : avatar) };
     }
   }
   const next = recomputeContinuousEffects({ ...state, players, landMagicZone });

@@ -107,12 +107,37 @@ export function preventDestruction(
   const found = findTarget(state, targetId);
   if (!found) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
   const shield = [...(found.card.preventionShields ?? [])]
-    .filter(item => item.kind === 'DESTRUCTION' && item.usesRemaining !== 0 && matchesCause(item, cause))
+    .filter(item => item.kind === 'DESTRUCTION' && (item.mode ?? 'AUTOMATIC') === 'AUTOMATIC' && item.usesRemaining !== 0 && matchesCause(item, cause))
     .sort((left, right) => left.id.localeCompare(right.id))[0];
   if (!shield) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
   return {
     prevented: true, preventedAmount: 1, remainingAmount: 0,
     state: updateCardShield(state, targetId, shield.id, actorId, 'DESTRUCTION', found.playerId, 1)
+  };
+}
+
+export function preventDestructionByReaction(
+  state: GameState,
+  actorId: string,
+  targetId: string,
+  exitEventId: string,
+  shieldId: string,
+  cause: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' = 'EFFECT'
+): PreventionResult {
+  const found = findTarget(state, targetId);
+  if (!found || !state.reactionWindow || !exitEventId) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const attemptKey = `${exitEventId}:${targetId}`;
+  if (state.preventionAttempts?.includes(attemptKey)) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const automatic = preventDestruction(state, actorId, targetId, cause);
+  if (automatic.prevented) return automatic;
+  const shield = (found.card.preventionShields ?? []).find(item => item.id === shieldId && item.kind === 'DESTRUCTION' && item.mode === 'ACTIVATED' && item.usesRemaining !== 0 && matchesCause(item, cause));
+  if (!shield || shieldController(state, shield, found.card.controllerId) !== actorId) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const consumed = updateCardShield(state, targetId, shield.id, actorId, 'DESTRUCTION', found.playerId, 1);
+  return {
+    prevented: true,
+    preventedAmount: 1,
+    remainingAmount: 0,
+    state: { ...consumed, preventionAttempts: [...(consumed.preventionAttempts ?? []), attemptKey] }
   };
 }
 

@@ -50,6 +50,8 @@ export interface ContinuousPowerEffect {
 export interface PreventionShield {
   id: string;
   kind: 'DAMAGE' | 'DESTRUCTION' | 'TARGETING';
+  /** Destruction protections resolve automatically first, or as a chosen React/activated response. */
+  mode?: 'AUTOMATIC' | 'ACTIVATED';
   sourceInstanceId?: string;
   sourceControllerId?: string;
   /** DAMAGE shields prevent this many points per use; omission prevents all damage. */
@@ -75,6 +77,8 @@ export interface CardInstance {
   attachedInstances: CardInstance[];
   continuousEffects?: ContinuousPowerEffect[];
   preventionShields?: PreventionShield[];
+  /** Explicit typed event abilities; never inferred from printed card text. */
+  triggerAbilities?: import('./triggerEngine').TriggerAbility[];
   layerModifiers: {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
@@ -258,4 +262,10 @@ export interface GameState {
     actorId: string;
   }>;
   gameEvents?: Array<{ sequence: number; event: import('./gameEvents').GameEvent }>;
+  /** Turn-scoped keys for structured once-per-turn triggered abilities. */
+  triggerUsage?: string[];
+  /** Event ids already fully dispatched to triggers, preventing duplicate/reentrant loops. */
+  processedTriggerEventIds?: string[];
+  /** Activated protection attempts already used for a particular leaving-card event. */
+  preventionAttempts?: string[];
 }
