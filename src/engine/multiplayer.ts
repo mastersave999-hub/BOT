@@ -64,6 +64,10 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
     ? new Set(state.pendingDeckChoice.candidateInstanceIds)
     : new Set<string>();
   const gameEvents = state.gameEvents?.map(({ sequence, event }) => {
+    if (event.type === 'CARD_DRAWN' && event.playerId !== viewerId) {
+      const { instanceId: _privateInstanceId, ...publicEvent } = event;
+      return { sequence, event: publicEvent };
+    }
     if (event.type === 'DECK_SCOUTED' && event.viewerId !== viewerId) {
       return { sequence, event: { ...event, cardInstanceIds: [] } };
     }
@@ -160,7 +164,7 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
   const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
-  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification) return false;
+  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification || previous.pendingExitPrevention) return false;
   const outgoingPlayer = previous.players[activePlayerId];
   const incomingOutgoingPlayer = incoming.players[activePlayerId];
   const completedDrawPhase = previous.currentPhase === 'DRAW' && incoming.currentPhase === 'MAIN' &&
@@ -243,6 +247,29 @@ export interface EndPhaseDiscardCommand {
   selectedInstanceIds: string[];
 }
 
+export interface ExitPreventionCommand {
+  kind: 'USE_EXIT_PREVENTION' | 'DECLINE_EXIT_PREVENTION';
+  playerId: string;
+  commandId: string;
+  expectedRevision: number;
+  sourceCardId?: string;
+}
+
+export function isExitPreventionCommandCurrent(
+  state: GameState,
+  command: ExitPreventionCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const pending = state.pendingExitPrevention;
+  return !!pending && command.playerId === authenticatedPlayerId && command.playerId === pending.preventionPlayerId &&
+    command.commandId.length > 0 && command.commandId.length <= 128 && Number.isSafeInteger(command.expectedRevision) &&
+    command.expectedRevision === state.stateRevision && command.expectedRevision === pending.expectedRevision &&
+    !(state.processedCommandIds ?? []).includes(command.commandId) &&
+    (command.kind === 'DECLINE_EXIT_PREVENTION'
+      ? !pending.usedActivatedPrevention && command.sourceCardId === undefined
+      : command.kind === 'USE_EXIT_PREVENTION' && !pending.usedActivatedPrevention && typeof command.sourceCardId === 'string' && command.sourceCardId.length > 0);
+}
+
 export function isEndPhaseDiscardCommandCurrent(
   state: GameState,
   command: EndPhaseDiscardCommand,
@@ -281,6 +308,7 @@ export type NetMessage =
   | { type: 'SYNC'; state: GameState; winner: string | null }
   | { type: 'REACTION_COMMAND'; command: ReactionCommand }
   | { type: 'END_PHASE_DISCARD'; command: EndPhaseDiscardCommand }
+  | { type: 'EXIT_PREVENTION_COMMAND'; command: ExitPreventionCommand }
   | { type: 'PING' }
   | { type: 'LEAVE' };
 
@@ -376,6 +404,17 @@ export function decodeNetMessage(raw: unknown): NetMessage | null {
       if (typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
         !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 || !Array.isArray(command.selectedInstanceIds) ||
         !command.selectedInstanceIds.every(id => typeof id === 'string') || new Set(command.selectedInstanceIds).size !== command.selectedInstanceIds.length) return null;
+      return decoded as NetMessage;
+    }
+    if (message.type === 'EXIT_PREVENTION_COMMAND') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if ((command.kind !== 'USE_EXIT_PREVENTION' && command.kind !== 'DECLINE_EXIT_PREVENTION') ||
+        typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
+        !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 ||
+        (command.sourceCardId !== undefined && typeof command.sourceCardId !== 'string') ||
+        (command.kind === 'USE_EXIT_PREVENTION' && (typeof command.sourceCardId !== 'string' || command.sourceCardId.length === 0)) ||
+        (command.kind === 'DECLINE_EXIT_PREVENTION' && command.sourceCardId !== undefined)) return null;
       return decoded as NetMessage;
     }
     const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];

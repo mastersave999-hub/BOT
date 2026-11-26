@@ -313,7 +313,10 @@ describe('Phase 2.2 core rules and infrastructure', () => {
     expect(nextTurn.currentTurnPlayerIndex).toBe(1);
     expect(nextTurn.currentPhase).toBe('DRAW');
     expect(nextTurn.turnNumber).toBe(2);
-    expect(nextTurn.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED', 'CARD_MOVED', 'TURN_ENDED', 'TURN_STARTED']);
+    expect(nextTurn.gameEvents?.map(item => item.event.type)).toEqual([
+      'CARD_MOVED', 'CARD_DISCARDED', 'CARD_MOVED', 'CARD_DISCARDED',
+      'PHASE_ENDED', 'TURN_ENDED', 'TURN_STARTED', 'PHASE_STARTED'
+    ]);
   });
 
   it('accepts only the active player’s current revisioned multiplayer discard command', () => {

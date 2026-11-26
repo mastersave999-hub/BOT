@@ -1,4 +1,4 @@
-import type { CardInstance, GameState, PlayerState } from './types';
+import type { CardInstance, GameState, PendingExitPrevention, PlayerState } from './types';
 import { appendGameEvents, type GameEvent } from './gameEvents';
 import { recomputeContinuousEffects } from './continuousEffects';
 import { preventDestruction } from './prevention';
@@ -32,6 +32,7 @@ export function validateMagicPlay(state: GameState, playerId: string, subtype: N
   if (!player) return 'Player does not exist';
   if (state.playerOrder[state.currentTurnPlayerIndex] !== playerId) return 'Only the active player may play a Magic card';
   if (state.pendingEndPhaseDiscardPlayerId) return 'End Phase discard selection is pending';
+  if (state.pendingExitPrevention) return 'Exit-prevention choice is pending';
   if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return 'A Deck operation choice is pending';
   if (subtype === 'React') {
     if (convertedNormalToReact && (state.currentPhase !== 'BATTLE' || state.reactionWindow)) return 'Converted Normal Magic may only use React timing during your Battle Phase';
@@ -97,7 +98,18 @@ export function validateGameState(state: GameState): string | null {
       pending.push(...current.attachedInstances);
     }
   }
-  if ([state.pendingDeckChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if ([state.pendingDeckChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId, state.pendingExitPrevention].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if (state.pendingExitPrevention) {
+    const pending = state.pendingExitPrevention;
+    const targetOnField = Object.values(state.players).some(player =>
+      [...player.avatarZone, ...player.constructZone].some(card => card.instanceId === pending.targetCardId));
+    if (!targetOnField || !state.players[pending.actorId] || !Number.isSafeInteger(pending.expectedRevision) ||
+      pending.expectedRevision !== state.stateRevision || (pending.usedActivatedPrevention && !state.reactionWindow?.chain?.some(entry =>
+        entry.entryType === 'ACTIVATED_ABILITY' && entry.exitPreventionTargetId === pending.targetCardId
+      ))) {
+      return 'Invalid pending exit-prevention state';
+    }
+  }
   if (state.pendingDeckSearchVerification) {
     const pending = state.pendingDeckSearchVerification;
     if (!state.players[pending.deckOwnerId] || !state.players[pending.searcherId] || !Array.isArray(pending.verifierPlayerIds) ||
@@ -144,6 +156,10 @@ export interface ZoneMoveRequest {
   /** Ability-authorized Deck ordering; ordinary player reordering remains forbidden. */
   deckPosition?: 'top' | 'bottom';
   cause?: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' | 'OTHER';
+  /** Explicit Rule Book p.10 player-choice removal bypasses all exit protection. */
+  playerMandated?: boolean;
+  /** Internal continuation after an exit window has already been resolved. */
+  skipExitPrevention?: boolean;
 }
 
 export interface ZoneMoveResult { ok: boolean; state: GameState; reason?: string }
@@ -191,6 +207,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   const invalid = validateGameState(state);
   if (invalid) return { ok: false, state, reason: invalid };
   if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
+  if (state.pendingExitPrevention && !request.skipExitPrevention) return { ok: false, state, reason: 'Exit-prevention choice is pending' };
   let card: CardInstance | undefined;
   let sourcePlayerId: string | undefined;
   let sourceZone: PlayerZone | undefined;
@@ -216,9 +233,28 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   if (request.destination === 'deck' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter the Main Deck' };
   if (request.destination === 'hand' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter a hand' };
   if (request.destination === 'magicZone' && card.card.type !== 'Magic' && card.card.type !== 'Avatar') return { ok: false, state, reason: 'Only Magic cards or relocated Avatars may enter Magic Zone' };
-  if (request.cause === 'EFFECT' || request.cause === 'COMBAT' || request.cause === 'PLAYER_ACTION') {
-    const prevention = preventDestruction(state, request.actorId, card.instanceId, request.cause);
-    if (prevention.prevented) return { ok: true, state: prevention.state, reason: 'Destruction was prevented' };
+  // Effect-driven field exits use the same protection pipeline even when a producer omits a destruction cause.
+  const exitCause = request.cause ?? (request.effectMove ? 'EFFECT' : undefined);
+  // Rule Book 3.2 p.10: an effect-mandated player choice bypasses every exit shield.
+  if (!request.playerMandated && (exitCause === 'EFFECT' || exitCause === 'COMBAT')) {
+    const prevention = preventDestruction(state, request.actorId, card.instanceId, exitCause);
+    if (prevention.prevented) return { ok: true, state: prevention.state, reason: 'Destruction was prevented automatically' };
+    if (!request.skipExitPrevention && (sourceZone === 'avatarZone' || sourceZone === 'constructZone') &&
+      (card.card.type === 'Avatar' || card.card.type === 'Construct')) {
+      const activatedShield = (card.preventionShields ?? []).find(shield => shield.kind === 'DESTRUCTION' &&
+        shield.mode === 'ACTIVATED' && shield.usesRemaining !== 0 &&
+        (shield.sourceControllerId ?? card!.controllerId) === card!.controllerId);
+      if (activatedShield) {
+        const revision = (state.stateRevision ?? 0) + 1;
+        const pending: PendingExitPrevention = {
+          targetCardId: card.instanceId, destination: request.destination, destinationPlayerId: request.destinationPlayerId,
+          actorId: request.actorId, preventionPlayerId: activatedShield.sourceControllerId ?? card.controllerId,
+          effectMove: request.effectMove, deckPosition: request.deckPosition, cause: exitCause,
+          expectedRevision: revision, usedActivatedPrevention: false
+        };
+        return { ok: true, state: { ...state, stateRevision: revision, pendingExitPrevention: pending }, reason: 'Exit-prevention choice is pending' };
+      }
+    }
   }
   const originalOwnerId = getOriginalOwnerId(card);
   const destinationPlayerId = request.destinationPlayerId ?? originalOwnerId;
@@ -246,6 +282,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       controllerId: destinationPlayerId,
       ...(sourceZone === 'magicZone' ? { isFaceUp: true, isRested: false, layerModifiers: [] } : {})
     } : {}),
+    ...(sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && card.duoWithInstanceId ? { duoWithInstanceId: undefined, controlChangeImmune: false } : {}),
     ...(attachmentsLeaveWithAvatar && card.attachedInstances.length > 0 ? { attachedInstances: [] } : {})
   };
   if (sourcePlayerId && sourceZone) {
@@ -290,6 +327,14 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       players[owner.id] = { ...owner, hell: [...owner.hell, attached] };
     }
   }
+  if (sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && card.duoWithInstanceId) {
+    for (const playerId of Object.keys(players)) {
+      const player = players[playerId];
+      players[playerId] = { ...player, avatarZone: player.avatarZone.map(avatar => avatar.instanceId === card!.duoWithInstanceId
+        ? { ...avatar, duoWithInstanceId: undefined, controlChangeImmune: false }
+        : avatar) };
+    }
+  }
   const next = recomputeContinuousEffects({ ...state, players, landMagicZone });
   const error = validateGameState(next);
   if (error) return { ok: false, state, reason: error };
@@ -307,13 +352,20 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     actorId: request.actorId,
     eventId: `${state.id}:${(state.gameEvents?.length ?? 0) + events.length}:CARD_MOVED:${exposeIdentity ? card.instanceId : 'hidden'}:${sourcePlayerId ?? 'shared'}:${sourceZone ?? 'landMagicZone'}:${destinationPlayerId ?? 'shared'}:${request.destination}:${request.actorId}`
   });
-  detachedAttachments.forEach((attached, index) => events.push({
-    type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId: attached.ownerId,
-    controllerId: attached.controllerId, from: `${sourcePlayerId}:attached`,
-    to: request.destination === 'removedFromGame' ? 'removedFromGame' : `${getOriginalOwnerId(attached)}:hell`,
-    actorId: request.actorId,
-    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached:${index}:${attached.instanceId}:${request.destination}:${request.actorId}`
-  }));
+  detachedAttachments.forEach((attached, index) => {
+    events.push({
+      type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId: attached.ownerId,
+      controllerId: attached.controllerId, from: `${sourcePlayerId}:attached`,
+      to: request.destination === 'removedFromGame' ? 'removedFromGame' : `${getOriginalOwnerId(attached)}:hell`,
+      actorId: request.actorId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached:${index}:${attached.instanceId}:${request.destination}:${request.actorId}`
+    });
+    events.push({
+      type: 'CARD_LEFT_FIELD', instanceId: attached.instanceId, ownerId: getOriginalOwnerId(attached),
+      controllerId: attached.controllerId, actorId: request.actorId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached-left-field:${index}:${attached.instanceId}:${request.destination}`
+    });
+  });
   if (sourceZone === 'constructZone' && sourcePlayerId) events.push({
     type: 'CONSTRUCT_LEFT', instanceId: card.instanceId, name: card.card.name, playerId: sourcePlayerId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:construct-left:${card.instanceId}:${sourcePlayerId}`
@@ -322,7 +374,134 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     type: 'CONSTRUCT_ENTERED', instanceId: card.instanceId, name: card.card.name, playerId: destinationPlayerId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:construct-entered:${card.instanceId}:${destinationPlayerId}`
   });
+  if (request.destination === 'avatarZone' && card.card.type === 'Avatar') events.push({
+    type: 'AVATAR_SUMMONED', instanceId: card.instanceId, playerId: destinationPlayerId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:avatar-summoned:${card.instanceId}:${destinationPlayerId}`
+  });
+  if (request.destination === 'avatarZone' && card.card.type === 'Token') events.push({
+    type: 'TOKEN_CREATED', instanceId: card.instanceId, playerId: destinationPlayerId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:token-created:${card.instanceId}:${destinationPlayerId}`
+  });
+  if (sourceZone === 'deck' && request.destination === 'hand') events.push({
+    type: 'CARD_DRAWN', instanceId: card.instanceId, playerId: destinationPlayerId, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-drawn:${card.instanceId}:${request.actorId}`
+  });
+  if (sourceZone === 'hand' && request.destination === 'hell') events.push({
+    type: 'CARD_DISCARDED', instanceId: card.instanceId, playerId: sourcePlayerId!, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-discarded:${card.instanceId}:${request.actorId}`
+  });
+  if (card.card.type === 'Magic' && card.card.subtype && sourceZone === 'hand' && request.destination === 'magicZone') events.push({
+    type: 'MAGIC_PLAYED', instanceId: card.instanceId, subtype: card.card.subtype, playerId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:magic-played:${card.instanceId}:${request.actorId}`
+  });
+  const leavesAvatarField = sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && request.destination !== 'magicZone';
+  const leavesOtherFieldZone = (sourceZone === 'constructZone' || sourceZone === 'magicZone') && request.destination !== sourceZone;
+  if (leavesAvatarField || leavesOtherFieldZone) events.push({
+    type: 'CARD_LEFT_FIELD', instanceId: card.instanceId, ownerId: originalOwnerId,
+    controllerId: card.controllerId, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-left-field:${card.instanceId}:${request.destination}`
+  });
+  if (sourceZone === 'avatarZone' && card.card.type === 'Token' && request.destination === 'removedFromGame') events.push({
+    type: 'TOKEN_DESTROYED', instanceId: card.instanceId, playerId: sourcePlayerId!,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:token-destroyed:${card.instanceId}`
+  });
   return { ok: true, state: appendGameEvents(next, events) };
+}
+
+export function resolveExitPreventionChainEntry(state: GameState, targetCardId: string, prevented: boolean): ZoneMoveResult {
+  const pending = state.pendingExitPrevention;
+  if (!pending || pending.targetCardId !== targetCardId || !pending.usedActivatedPrevention) {
+    return { ok: false, state, reason: 'No matching exit-prevention chain entry' };
+  }
+  if (prevented) {
+    const attemptKey = `${state.id}:${pending.expectedRevision}:${pending.targetCardId}`;
+    const { pendingExitPrevention: _pending, ...cleared } = state;
+    return { ok: true, state: {
+      ...cleared,
+      stateRevision: pending.expectedRevision + 1,
+      preventionAttempts: [...(state.preventionAttempts ?? []), attemptKey]
+    } };
+  }
+  const { pendingExitPrevention: _pending, ...cleared } = state;
+  const moved = moveCardBetweenZones({ ...cleared, stateRevision: pending.expectedRevision }, {
+    instanceId: pending.targetCardId, actorId: pending.actorId, destination: pending.destination,
+    destinationPlayerId: pending.destinationPlayerId, effectMove: pending.effectMove,
+    deckPosition: pending.deckPosition, cause: pending.cause, skipExitPrevention: true
+  });
+  return moved.ok ? { ...moved, state: { ...moved.state, stateRevision: pending.expectedRevision + 1 } } : moved;
+}
+
+export function declineExitPrevention(state: GameState, playerId: string, expectedRevision = state.stateRevision): ZoneMoveResult {
+  const pending = state.pendingExitPrevention;
+  if (!pending || pending.preventionPlayerId !== playerId || pending.usedActivatedPrevention ||
+    expectedRevision !== state.stateRevision || pending.expectedRevision !== expectedRevision) {
+    return { ok: false, state, reason: 'No current exit-prevention choice for this player' };
+  }
+  const { pendingExitPrevention: _pending, ...cleared } = state;
+  return moveCardBetweenZones({ ...cleared, stateRevision: pending.expectedRevision }, {
+    instanceId: pending.targetCardId, actorId: pending.actorId, destination: pending.destination,
+    destinationPlayerId: pending.destinationPlayerId, effectMove: pending.effectMove,
+    deckPosition: pending.deckPosition, cause: pending.cause, skipExitPrevention: true
+  });
+}
+
+export function useExitPrevention(state: GameState, playerId: string, sourceCardId: string): ZoneMoveResult {
+  const pending = state.pendingExitPrevention;
+  if (!pending || pending.preventionPlayerId !== playerId || pending.usedActivatedPrevention ||
+    pending.expectedRevision !== state.stateRevision || state.reactionWindow) return { ok: false, state, reason: 'No current exit-prevention choice for this player' };
+  const targetPlayer = Object.values(state.players).find(player =>
+    player.avatarZone.some(card => card.instanceId === pending.targetCardId) ||
+    player.constructZone.some(card => card.instanceId === pending.targetCardId));
+  const target = targetPlayer && [...targetPlayer.avatarZone, ...targetPlayer.constructZone].find(card => card.instanceId === pending.targetCardId);
+  const shield = target?.preventionShields?.find(item => item.id === sourceCardId && item.kind === 'DESTRUCTION' && item.mode === 'ACTIVATED' && item.usesRemaining !== 0);
+  if (!target || !shield || (shield.sourceControllerId ?? target.controllerId) !== playerId) {
+    return { ok: false, state, reason: 'No eligible activated exit-prevention ability' };
+  }
+  const shields = target.preventionShields ?? [];
+  const nextShields = shield.usesRemaining === undefined ? shields
+    : shield.usesRemaining <= 1 ? shields.filter(item => item.id !== shield.id)
+      : shields.map(item => item.id === shield.id ? { ...item, usesRemaining: item.usesRemaining - 1 } : item);
+  const ownerEntry = Object.entries(state.players).find(([, player]) =>
+    player.avatarZone.some(card => card.instanceId === target.instanceId) || player.constructZone.some(card => card.instanceId === target.instanceId));
+  if (!ownerEntry) return { ok: false, state, reason: 'Exit target left the field' };
+  const [ownerId, owner] = ownerEntry;
+  const zone = owner.avatarZone.some(card => card.instanceId === target.instanceId) ? 'avatarZone' : 'constructZone';
+  const nextPlayers = { ...state.players, [ownerId]: { ...owner, [zone]: owner[zone].map(card =>
+    card.instanceId === target.instanceId ? { ...card, preventionShields: nextShields } : card) } };
+  const activePlayerId = state.playerOrder[state.currentTurnPlayerIndex];
+  const opponentPlayerId = state.playerOrder.find(id => id !== activePlayerId);
+  if (!activePlayerId || !opponentPlayerId) return { ok: false, state, reason: 'Exit prevention requires a supported Duel Reaction Window' };
+  const sequence = (state.reactionSequence ?? 0) + 1;
+  const trigger = { type: 'ABILITY_USED' as const, actorId: playerId, targetInstanceId: sourceCardId, sourceInstanceId: sourceCardId };
+  const chainEntry = {
+    entryType: 'ACTIVATED_ABILITY' as const,
+    sourceCardId,
+    controllerId: playerId,
+    triggerId: `exit-prevention:${pending.targetCardId}:${sourceCardId}`,
+    effects: [],
+    cancelled: false,
+    eventId: `${state.id}:${pending.expectedRevision}:exit-prevention:${pending.targetCardId}`,
+    respondedTo: trigger,
+    exitPreventionTargetId: pending.targetCardId
+  };
+  const nextRevision = pending.expectedRevision + 1;
+  return { ok: true, state: {
+    ...state,
+    players: nextPlayers,
+    stateRevision: nextRevision,
+    pendingExitPrevention: { ...pending, expectedRevision: nextRevision, usedActivatedPrevention: true },
+    reactionSequence: sequence,
+    reactionWindow: {
+      id: `${state.id}:${sequence}:ABILITY_USED`,
+      trigger,
+      turnOwnerId: activePlayerId,
+      priorityPlayerId: opponentPlayerId,
+      passedPlayerIds: [],
+      priorityOrder: [opponentPlayerId, activePlayerId],
+      chain: [chainEntry],
+      revision: 0
+    }
+  } };
 }
 
 export function beginEndPhaseDiscard(state: GameState, playerId: string): ZoneMoveResult {

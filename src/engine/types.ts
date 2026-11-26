@@ -50,6 +50,8 @@ export interface ContinuousPowerEffect {
 export interface PreventionShield {
   id: string;
   kind: 'DAMAGE' | 'DESTRUCTION' | 'TARGETING';
+  /** Destruction protections resolve automatically first, or as a chosen React/activated response. */
+  mode?: 'AUTOMATIC' | 'ACTIVATED';
   sourceInstanceId?: string;
   sourceControllerId?: string;
   /** DAMAGE shields prevent this many points per use; omission prevents all damage. */
@@ -75,10 +77,14 @@ export interface CardInstance {
   attachedInstances: CardInstance[];
   continuousEffects?: ContinuousPowerEffect[];
   preventionShields?: PreventionShield[];
+  /** Explicit typed event abilities; never inferred from printed card text. */
+  triggerAbilities?: import('./triggerEngine').TriggerAbility[];
   layerModifiers: {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
     sourceCardId: string;
+    /** Layer 4 combat status moves to this layer when the attack/combat ends (Rule Book 3.2 p.16). */
+    transferToLayer?: 1 | 2;
     expiresAt?: EffectDuration;
   }[];
 }
@@ -149,10 +155,33 @@ export interface PendingReactionCard {
   treatedAsReact: boolean;
 }
 
-export interface ReactionChainEntry extends PendingReactionCard {
-  targetAvatarId?: string;
-  respondedTo: ReactionTrigger;
-}
+export type ReactionChainEntry =
+  | (PendingReactionCard & {
+      entryType: 'REACT_MAGIC';
+      targetAvatarId?: string;
+      respondedTo: ReactionTrigger;
+    })
+  | {
+      entryType: 'TRIGGER_ABILITY';
+      sourceCardId: string;
+      controllerId: string;
+      triggerId: string;
+      effects: import('./effectResolver').EffectDefinition[];
+      cancelled: boolean;
+      eventId: string;
+      respondedTo: ReactionTrigger;
+    }
+  | {
+      entryType: 'ACTIVATED_ABILITY';
+      sourceCardId: string;
+      controllerId: string;
+      triggerId: string;
+      effects: import('./effectResolver').EffectDefinition[];
+      cancelled: boolean;
+      eventId: string;
+      respondedTo: ReactionTrigger;
+      exitPreventionTargetId?: string;
+    };
 
 export interface ReactionWindow {
   id: string;
@@ -193,6 +222,19 @@ export interface PlayerState {
   preventionShields?: PreventionShield[];
 }
 
+export interface PendingExitPrevention {
+  targetCardId: string;
+  destination: 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension' | 'landMagicZone' | 'removedFromGame';
+  destinationPlayerId?: string;
+  actorId: string;
+  preventionPlayerId: string;
+  effectMove?: boolean;
+  deckPosition?: 'top' | 'bottom';
+  cause: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' | 'OTHER';
+  expectedRevision: number;
+  usedActivatedPrevention: boolean;
+}
+
 export interface PendingDeckSearchVerification {
   deckOwnerId: string;
   searcherId: string;
@@ -231,6 +273,7 @@ export interface GameState {
   pendingEndPhaseDiscardPlayerId?: string;
   /** Revision captured when End Phase discard selection opens; commands must match it. */
   pendingEndPhaseDiscardRevision?: number;
+  pendingExitPrevention?: PendingExitPrevention;
   /** Private Deck operation choice; card identities are projected only to authorized viewers. */
   pendingDeckChoice?: PendingDeckChoice;
   /** Public confirmation required by Rule Book 3.2 p.3 when a Deck Search finds no target. */
@@ -258,4 +301,12 @@ export interface GameState {
     actorId: string;
   }>;
   gameEvents?: Array<{ sequence: number; event: import('./gameEvents').GameEvent }>;
+  /** Turn-scoped keys for structured once-per-turn triggered abilities. */
+  triggerUsage?: string[];
+  /** Per-turn execution caps prevent EACH_EVENT triggers from creating unbounded loops. */
+  triggerLoopCounts?: Record<string, number>;
+  /** Event ids already fully dispatched to triggers, preventing duplicate/reentrant loops. */
+  processedTriggerEventIds?: string[];
+  /** Activated protection attempts already used for a particular leaving-card event. */
+  preventionAttempts?: string[];
 }

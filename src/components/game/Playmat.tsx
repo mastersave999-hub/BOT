@@ -5,6 +5,7 @@ import { GameState, CardInstance, MagicSubtype, DeferredReactionAction } from '.
 import {
   isReactionCommandCurrent,
   isEndPhaseDiscardCommandCurrent,
+  isExitPreventionCommandCurrent,
   isGameStateValidForSync,
   isLegalGameStateSync,
   redactLifeCardsForViewer,
@@ -24,8 +25,9 @@ import {
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
-import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain } from '../../engine/turnEngine';
-import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
+import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain, transitionGamePhase } from '../../engine/turnEngine';
+import { declareCombatAttack, payCombatKeyword, resolveDeclaredBattle } from '../../engine/combatKeywords';
+import { resolveAvatarCombat } from '../../engine/combatEngine';
 import {
   parseCardAbility,
   avatarHasKeyword,
@@ -35,7 +37,7 @@ import {
   expireModifiersAt
 } from '../../engine/abilityEngine';
 import { calculateNetPower } from '../../engine/layers';
-import { beginEndPhaseDiscard, discardToHandLimit, moveCardBetweenZones, validateAvatarZone, validateMagicPlay } from '../../engine/gameRules';
+import { beginEndPhaseDiscard, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateAvatarZone, validateMagicPlay } from '../../engine/gameRules';
 import {
   getGemPaymentCardUnavailableReason,
   getSelectedGemTotal,
@@ -279,6 +281,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         setGameState(finishEndPhaseTurn(discarded.state));
         return;
       }
+      if (msg.type === 'EXIT_PREVENTION_COMMAND') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
+          !isExitPreventionCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        const result = msg.command.kind === 'USE_EXIT_PREVENTION'
+          ? useExitPrevention(gameState, senderPlayerId, msg.command.sourceCardId!)
+          : declineExitPrevention(gameState, senderPlayerId, msg.command.expectedRevision);
+        if (!result.ok) return;
+        setGameState({ ...result.state, processedCommandIds: [...(gameState.processedCommandIds ?? []), msg.command.commandId].slice(-128) });
+        return;
+      }
       if (msg.type === 'REACTION_COMMAND') {
         if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId || msg.command.playerId === meId) return;
         const currentWindow = gameState.reactionWindow;
@@ -417,103 +429,51 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const resolveCombatAction = (
     state: GameState,
     attackerPlayerId: string,
-  targetPlayerId: string,
-  attackerInstanceId: string,
-  targetAvatarId: string,
-  checkedAvatarIds: string[] = []
+    targetPlayerId: string,
+    attackerInstanceId: string,
+    targetAvatarId: string,
+    checkedAvatarIds: string[] = []
   ): { state: GameState; events: string[] } => {
-    const attackerPlayer = state.players[attackerPlayerId];
-    const targetPlayer = state.players[targetPlayerId];
-    const attacker = attackerPlayer?.avatarZone.find(card => card.instanceId === attackerInstanceId);
-    const target = targetPlayer?.avatarZone.find(card => card.instanceId === targetAvatarId);
-    if (!attackerPlayer || !attacker) return { state, events: [] };
-    if (!targetPlayer || !target) {
-      const restedAttacker = { ...attacker, isRested: true };
-      return {
-        state: {
-          ...state,
-          players: {
-            ...state.players,
-            [attackerPlayerId]: {
-              ...attackerPlayer,
-              avatarZone: attackerPlayer.avatarZone.map(card =>
-                card.instanceId === attackerInstanceId ? restedAttacker : card
-              )
-            }
-          }
-        },
-        events: [`${attacker.card.name} — เป้าหมายไม่อยู่บนสนาม การโจมตีสิ้นสุดลง`]
-      };
-    }
-
-    const combat = resolveAvatarCombat(attacker, target);
-    const destroyedAvatars = [
-      combat.defenderDestroyed ? target : null,
-      combat.attackerDestroyed ? attacker : null
-    ].filter((avatar): avatar is CardInstance => avatar !== null);
-    // Phase 1 has a single-target pending action; simultaneous destruction target ordering remains unresolved.
-    if (destroyedAvatars.length === 1 && !checkedAvatarIds.includes(destroyedAvatars[0].instanceId)) {
-      const avatar = destroyedAvatars[0];
-      const reactionState = openReactionWindow(
-        state,
-        {
-          type: 'AVATAR_WOULD_BE_DESTROYED',
-          actorId: attackerPlayerId,
-          targetInstanceId: avatar.instanceId,
-          targetCardName: avatar.card.name,
-          sourceCardName: attacker.card.name
-        },
-        {
-          type: 'RESOLVE_COMBAT',
-          actorId: attackerPlayerId,
-          sourceCard: attacker,
-          targetPlayerId,
-          targetAvatarId,
-          checkedAvatarIds: [...checkedAvatarIds, avatar.instanceId]
-        }
+    const attacker = state.players[attackerPlayerId]?.avatarZone.find(card => card.instanceId === attackerInstanceId);
+    const target = state.players[targetPlayerId]?.avatarZone.find(card => card.instanceId === targetAvatarId);
+    if (!attacker || !target) return { state, events: [`${attacker?.card.name ?? 'Avatar'} — เป้าหมายไม่อยู่บนสนาม การโจมตีสิ้นสุดลง`] };
+    const declared = declareCombatAttack(state, attackerInstanceId, { type: 'AVATAR', playerId: targetPlayerId, instanceId: targetAvatarId });
+    if (!declared) return { state, events: [] };
+    const layerFourPower = attacker.layerModifiers
+      .filter(modifier => modifier.layer === 4)
+      .reduce((total, modifier) => total + modifier.powerMod, 0);
+    const preview = resolveAvatarCombat(attacker, target, declared.battleContext!.snapshotPower + layerFourPower);
+    const leavingAvatars = [
+      ...(preview.attackerDestroyed ? [attacker] : []),
+      ...(preview.defenderDestroyed ? [target] : [])
+    ].sort((left, right) => Number(left.controllerId !== attackerPlayerId) - Number(right.controllerId !== attackerPlayerId));
+    for (const leaving of leavingAvatars) {
+      const automaticShield = leaving.preventionShields?.some(shield =>
+        shield.kind === 'DESTRUCTION' && (shield.mode ?? 'AUTOMATIC') === 'AUTOMATIC' && shield.usesRemaining !== 0
       );
+      if (checkedAvatarIds.includes(leaving.instanceId) || automaticShield) continue;
+      const reactionState = openReactionWindow(state, {
+        type: 'AVATAR_WOULD_BE_DESTROYED',
+        actorId: attackerPlayerId,
+        targetInstanceId: leaving.instanceId,
+        targetCardName: leaving.card.name,
+        sourceCardName: attacker.card.name
+      }, {
+        type: 'RESOLVE_COMBAT',
+        actorId: attackerPlayerId,
+        sourceCard: attacker,
+        targetPlayerId,
+        targetAvatarId,
+        checkedAvatarIds: [...checkedAvatarIds, leaving.instanceId]
+      });
       if (reactionState !== state) {
-        return { state: reactionState, events: [`${avatar.card.name} กำลังจะถูกทำลาย — เปิด Reaction Window`] };
+        return { state: reactionState, events: [`${leaving.card.name} กำลังจะออกจากสนาม — เปิด Reaction Window`] };
       }
     }
-
-    const updatedAttackerZone = attackerPlayer.avatarZone
-      .map(card => card.instanceId === attacker.instanceId ? { ...card, isRested: true } : card)
-      .filter(card => !(combat.attackerDestroyed && card.instanceId === attacker.instanceId));
-    const updatedTargetZone = targetPlayer.avatarZone.filter(
-      card => !(combat.defenderDestroyed && card.instanceId === target.instanceId)
-    );
-    let nextState: GameState = {
-      ...state,
-      players: {
-        ...state.players,
-        [attackerPlayerId]: {
-          ...attackerPlayer,
-          avatarZone: updatedAttackerZone,
-          hell: combat.attackerDestroyed
-            ? [...attackerPlayer.hell, attacker, ...(attacker.attachedInstances || [])]
-            : attackerPlayer.hell
-        },
-        [targetPlayerId]: {
-          ...targetPlayer,
-          avatarZone: updatedTargetZone,
-          hell: combat.defenderDestroyed
-            ? [...targetPlayer.hell, target, ...(target.attachedInstances || [])]
-            : targetPlayer.hell
-        }
-      }
-    };
-
-    nextState = appendLogs(nextState, combat.events, 'COMBAT', attackerPlayerId);
-    if (combat.attackerDestroyed && parseCardAbility(attacker.card).hasLastWords) {
-      const result = executeCardAbility(nextState, attackerPlayerId, attacker, 'LAST_WORDS');
-      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', attackerPlayerId);
-    }
-    if (combat.defenderDestroyed && parseCardAbility(target.card).hasLastWords) {
-      const result = executeCardAbility(nextState, targetPlayerId, target, 'LAST_WORDS');
-      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', targetPlayerId);
-    }
-    return { state: expireModifiersAt(recomputeContinuousAuras(nextState), 'END_OF_BATTLE'), events: combat.events };
+    const result = resolveDeclaredBattle(declared);
+    if (!result.ok) return { state, events: [result.reason ?? 'การต่อสู้ไม่สำเร็จ'] };
+    const nextState = appendLogs(result.state, result.events, 'COMBAT', attackerPlayerId);
+    return { state: nextState, events: result.events };
   };
 
   const finishDeferredReactionAction = (state: GameState, action?: DeferredReactionAction) => {
@@ -574,7 +534,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const actorName = nextState.players[action.actorId]?.name ?? 'ผู้เล่น';
       if (action.nextPhase === 'BATTLE' || action.nextPhase === 'END') {
         nextState = appendLogs(
-          { ...nextState, currentPhase: action.nextPhase },
+          transitionGamePhase(nextState, action.actorId, action.nextPhase),
           [`${actorName} เข้าสู่ ${action.nextPhase === 'BATTLE' ? 'Battle' : 'End'} Phase`],
           'PHASE_CHANGE',
           action.actorId
@@ -604,7 +564,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const handleReactionPass = () => {
-    if (gameState.pendingEndPhaseDiscardPlayerId) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention)) return;
     const window = gameState.reactionWindow;
     if (!window || window.priorityPlayerId !== meId) return;
     if (link && !isHost) {
@@ -631,7 +591,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const handleReactionCard = (handCard: CardInstance) => {
-    if (gameState.pendingEndPhaseDiscardPlayerId) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention)) return;
     const eligibility = getReactionEligibility(gameState, meId, handCard.card);
     if (!eligibility.eligible) {
       showNotification(eligibility.reason ?? 'การ์ดนี้ไม่สามารถตอบโต้การกระทำดังกล่าวได้');
@@ -692,7 +652,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Phase 1: Draw Phase Action
   const handleDrawPhase = () => {
-    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
     let nextState = recomputeContinuousAuras(executeDrawPhase(gameState));
     if (nextState.players[meId].deck.length === 0 && gameState.players[meId].deck.length === 0) {
       if (gameState.mode === 'AD_MUA') {
@@ -734,9 +694,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
   };
 
+  const resolveExitChoice = (sourceCardId?: string) => {
+    const pending = gameState.pendingExitPrevention;
+    if (!pending || pending.preventionPlayerId !== meId || pending.usedActivatedPrevention) return;
+    if (link && !isHost) {
+      link.send({
+        type: 'EXIT_PREVENTION_COMMAND',
+        command: {
+          kind: sourceCardId ? 'USE_EXIT_PREVENTION' : 'DECLINE_EXIT_PREVENTION',
+          playerId: meId,
+          commandId: globalThis.crypto.randomUUID(),
+          expectedRevision: pending.expectedRevision,
+          ...(sourceCardId ? { sourceCardId } : {})
+        }
+      });
+      return;
+    }
+    const result = sourceCardId
+      ? useExitPrevention(gameState, meId, sourceCardId)
+      : declineExitPrevention(gameState, meId, pending.expectedRevision);
+    if (!result.ok) {
+      showNotification(result.reason ?? 'ไม่สามารถดำเนินการป้องกันได้');
+      return;
+    }
+    setGameState(result.state);
+  };
+
   // Advance Phases & AI Opponent Turn
   const handleNextPhase = () => {
-    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || winnerName) return;
     const nextPhase = gameState.currentPhase === 'MAIN'
       ? nextPhaseAfterMain(gameState, meId)
       : gameState.currentPhase === 'BATTLE'
@@ -773,14 +759,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const firstPlayerSkipsBattle = gameState.turnNumber === 1 && gameState.currentTurnPlayerIndex === 0;
       const phase = firstPlayerSkipsBattle ? 'END' : 'BATTLE';
       setGameState(prev => appendLogs(
-        { ...prev, currentPhase: phase },
+        transitionGamePhase(prev, meId, phase),
         [firstPlayerSkipsBattle ? `${me.name} ข้าม Battle Phase ในเทิร์นแรก` : `${me.name} เข้าสู่ Battle Phase`],
         'PHASE_CHANGE'
       ));
       showNotification(firstPlayerSkipsBattle ? 'เทิร์นแรกของผู้เล่นคนแรก — ข้าม Battle Phase เข้าสู่ End Phase' : 'เข้าสู่ Battle Phase!');
     } else if (gameState.currentPhase === 'BATTLE') {
       setSelectedAttackerId(null);
-      setGameState(prev => appendLogs({ ...prev, currentPhase: 'END' }, [`${me.name} เข้าสู่ End Phase`], 'PHASE_CHANGE'));
+      setGameState(prev => appendLogs(transitionGamePhase(prev, meId, 'END'), [`${me.name} เข้าสู่ End Phase`], 'PHASE_CHANGE'));
       showNotification('เข้าสู่ End Phase!');
     } else if (gameState.currentPhase === 'END') {
       const nextState = finishEndPhaseTurn(gameState);
@@ -839,34 +825,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     const ai = state.players[opponentId];
 
-    // AI Battle: Attack player's LIFE if player has no Avatars, or attack weaker Avatar
     const readyAiAvatar = state.players[opponentId].avatarZone.find(a => !a.isRested && calculateNetPower(a) > 0);
     if (readyAiAvatar) {
       const targetPlayerAvatars = state.players[meId].avatarZone;
-      if (targetPlayerAvatars.length === 0) {
-        const lifeRes = attackLifeZone(readyAiAvatar, state.players[meId]);
-        logs.push(`🤖 ${lifeRes.event}`);
-        if (lifeRes.isGameOver) {
-          setWinnerName(ai.name);
-        }
-        state.players[opponentId].avatarZone = state.players[opponentId].avatarZone.map(a =>
-          a.instanceId === readyAiAvatar.instanceId ? { ...a, isRested: true } : a
-        );
-      } else {
-        // Check if AI has stronger Avatar
-        const aiPwr = calculateNetPower(readyAiAvatar);
-        const weakestTarget = targetPlayerAvatars[0];
-        if (aiPwr >= calculateNetPower(weakestTarget)) {
-          const combatRes = resolveAvatarCombat(readyAiAvatar, weakestTarget);
-          logs.push(...combatRes.events.map(e => `🤖 ${e}`));
-          state.players[opponentId].avatarZone = state.players[opponentId].avatarZone
-            .map(a => (a.instanceId === readyAiAvatar.instanceId ? { ...a, isRested: true } : a))
-            .filter(a => !(combatRes.attackerDestroyed && a.instanceId === readyAiAvatar.instanceId));
-          state.players[meId].avatarZone = state.players[meId].avatarZone.filter(
-            a => !(combatRes.defenderDestroyed && a.instanceId === weakestTarget.instanceId)
-          );
-          if (combatRes.attackerDestroyed) state.players[opponentId].hell.push(readyAiAvatar);
-          if (combatRes.defenderDestroyed) state.players[meId].hell.push(weakestTarget);
+      const target = targetPlayerAvatars.length === 0
+        ? { type: 'LIFE' as const, playerId: meId }
+        : targetPlayerAvatars[0] && calculateNetPower(readyAiAvatar) >= calculateNetPower(targetPlayerAvatars[0])
+          ? { type: 'AVATAR' as const, playerId: meId, instanceId: targetPlayerAvatars[0].instanceId }
+          : null;
+      if (target) {
+        const declared = declareCombatAttack(state, readyAiAvatar.instanceId, target);
+        const battle = declared ? resolveDeclaredBattle(declared) : null;
+        if (battle?.ok) {
+          state = battle.state;
+          logs.push(...battle.events.map(event => `🤖 ${event}`));
+          if (battle.events.some(event => event.includes('lost the game'))) setWinnerName(ai.name);
         }
       }
     }
@@ -964,7 +937,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Finalize playing a card only after its Cost Step has been successfully completed.
   const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean, playAsReact = false) => {
-    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || winnerName) return;
     const isReactPlay = handCard.card.type === 'Magic' && (playAsReact || handCard.card.subtype === 'React');
     if (gameState.currentPhase !== 'MAIN' && !isReactPlay) {
       showNotification('การ์ดนี้เล่นได้เฉพาะใน Main Phase');
@@ -1174,7 +1147,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Handle clicking an Avatar on the field (for Ability Target OR Combat)
   const handleAvatarClick = (avatar: CardInstance, isMyAvatar: boolean) => {
-    if (gameState.pendingEndPhaseDiscardPlayerId) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention)) return;
     // 1. Resolve Pending Ability / Modification Equip Target
     if (pendingAbility) {
       if (pendingAbility.targetScope === 'OWN_AVATAR' && !isMyAvatar) {
@@ -1301,34 +1274,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     // 3. Battle Phase: Click own Avatar
     if (isMyAvatar) {
-      // Check if we already have an attacker selected and this ally has สามัคคี (Unite)!
-      if (selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested && avatarHasKeyword(avatar, 'สามัคคี')) {
-        const unitePower = calculateNetPower(avatar);
-        let nextState = { ...gameState };
-        const updatedMyAvatars = me.avatarZone.map(a => {
-          if (a.instanceId === avatar.instanceId) {
-            return { ...a, isRested: true };
-          }
-          if (a.instanceId === selectedAttackerId) {
-            return {
-              ...a,
-              layerModifiers: [
-                ...a.layerModifiers,
-                {
-                  layer: 4 as const,
-                  powerMod: unitePower,
-                  sourceCardId: `unite-${avatar.instanceId}-${Date.now()}`,
-                  expiresAt: 'END_OF_BATTLE' as const
-                }
-              ]
-            };
-          }
-          return a;
-        });
-        nextState.players = { ...nextState.players, [meId]: { ...me, avatarZone: updatedMyAvatars } };
-        nextState = appendLogs(nextState, [`🤝 "${avatar.card.name}" ใช้ สามัคคี! นอนตัวและเพิ่ม +${unitePower} POWER`], 'ABILITY');
-        setGameState(nextState);
-        showNotification(`สามัคคี! +${unitePower} POWER ให้ตัวโจมตี`);
+      if (selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested &&
+        (avatarHasKeyword(avatar, 'สามัคคี') || avatarHasKeyword(avatar, 'แทงหลัง'))) {
+        const keyword = avatarHasKeyword(avatar, 'สามัคคี') ? 'สามัคคี' : 'แทงหลัง';
+        const nextState = payCombatKeyword(gameState, selectedAttackerId, avatar.instanceId, keyword);
+        if (!nextState) {
+          showNotification('ไม่สามารถใช้ความสามารถสนับสนุนการโจมตีนี้ได้');
+          return;
+        }
+        const bonus = nextState.players[meId].avatarZone.find(card => card.instanceId === selectedAttackerId)
+          ?.layerModifiers.at(-1)?.powerMod ?? 0;
+        setGameState(appendLogs(nextState, [`"${avatar.card.name}" ใช้ ${keyword} และเพิ่ม POWER ${bonus >= 0 ? '+' : ''}${bonus}`], 'ABILITY'));
+        showNotification(`${keyword}: POWER ${bonus >= 0 ? '+' : ''}${bonus} ให้ตัวโจมตี`);
         return;
       }
 
@@ -1421,7 +1378,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Attack Opponent LIFE Zone Directly
   const handleAttackLifeZone = () => {
-    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
     if (!selectedAttackerId) {
       showNotification('กรุณาเลือก Avatar ของคุณที่จะโจมตีก่อน');
       return;
@@ -1438,31 +1395,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const oppClone: typeof opponent = {
-      ...opponent,
-      lifeDeck: opponent.lifeDeck.map(l => ({ ...l }))
-    };
-    const lifeRes = attackLifeZone(attacker, oppClone);
-    const newlyFlippedCard = lifeRes.revealedCardId
-      ? oppClone.lifeDeck.find(card => card.instanceId === lifeRes.revealedCardId)
-      : undefined;
-
-    const updatedMyAvatarZone = me.avatarZone.map(c =>
-      c.instanceId === attacker.instanceId ? { ...c, isRested: true } : c
-    );
-
-    let nextState: GameState = {
-      ...gameState,
-      players: {
-        ...gameState.players,
-        [meId]: { ...me, avatarZone: updatedMyAvatarZone },
-        [opponentId]: newlyFlippedCard
-          ? { ...oppClone, pendingLifeEffects: [...(oppClone.pendingLifeEffects ?? []), newlyFlippedCard.instanceId] }
-          : oppClone
-      }
-    };
-    nextState = appendLogs(nextState, [lifeRes.event], 'ATTACK_LIFE');
-    nextState = expireModifiersAt(nextState, 'END_OF_BATTLE', meId);
+    const declared = declareCombatAttack(gameState, attacker.instanceId, { type: 'LIFE', playerId: opponentId });
+    if (!declared) {
+      showNotification('การโจมตี LIFE ไม่ถูกต้อง');
+      return;
+    }
+    const battle = resolveDeclaredBattle(declared);
+    if (!battle.ok) {
+      showNotification(battle.reason ?? 'การโจมตี LIFE ไม่สำเร็จ');
+      return;
+    }
+    let nextState = appendLogs(battle.state, battle.events, 'ATTACK_LIFE');
+    const lifeRes = { isGameOver: battle.events.some(event => event.includes('lost the game')) };
 
     if (lifeRes.isGameOver) {
       if (gameState.mode === 'AD_MUA') {
@@ -1476,12 +1420,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     setGameState(nextState);
     setSelectedAttackerId(null);
-    showNotification(lifeRes.event);
+    showNotification(battle.events.join(' '));
   };
 
   // Toggle Construct Activation
   const handleConstructClick = (cons: CardInstance) => {
-    if (gameState.pendingEndPhaseDiscardPlayerId) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention)) return;
     if (gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'MAIN') {
       setInspectedCard(cons);
       return;
@@ -1572,6 +1516,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         </div>
       </header>
 
+      {gameState.pendingExitPrevention?.preventionPlayerId === meId && !gameState.pendingExitPrevention.usedActivatedPrevention && (() => {
+        const pending = gameState.pendingExitPrevention;
+        const target = Object.values(gameState.players).flatMap(player => [...player.avatarZone, ...player.constructZone])
+          .find(card => card.instanceId === pending.targetCardId);
+        const abilities = target?.preventionShields?.filter(shield => shield.kind === 'DESTRUCTION' && shield.mode === 'ACTIVATED') ?? [];
+        return <section aria-label="Exit prevention choice" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-sky-400/40 bg-sky-950/95 px-3 py-2 text-xs text-sky-100">
+          <p className="mr-auto">{target?.card.name ?? 'การ์ด'} กำลังจะออกจากสนาม — ใช้การป้องกันแบบสั่งใช้ได้หนึ่งครั้ง</p>
+          {abilities.map(ability => <button key={ability.id} type="button" onClick={() => resolveExitChoice(ability.id)} className="rounded bg-sky-300 px-3 py-1.5 font-bold text-slate-950">ใช้การป้องกัน</button>)}
+          <button type="button" onClick={() => resolveExitChoice()} className="rounded border border-sky-200 px-3 py-1.5">ไม่ใช้ / ดำเนินการต่อ</button>
+        </section>;
+      })()}
+
       {gameState.pendingEndPhaseDiscardPlayerId === meId && pendingEndPhaseDiscards !== null && (
         <section aria-label="End Phase hand discard" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-amber-400/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100">
           <p className="mr-auto">เลือก {Math.max(0, me.hand.length - 7)} ใบเพื่อทิ้งลงนรก ({pendingEndPhaseDiscards.length} เลือกแล้ว){isSubmittingEndPhaseDiscard ? ' — กำลังรอการยืนยันจากเจ้าของห้อง' : ''}</p>
@@ -1592,11 +1548,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <li className="shrink-0 rounded border border-slate-500/60 bg-slate-900 px-2 py-1 text-[10px] text-slate-200">
                 0 · การกระทำเดิม
               </li>
-              {(gameState.reactionWindow.chain ?? []).map((entry, index) => (
-                <li key={`${entry.sourceCard.instanceId}-${index}`} className="shrink-0 rounded border border-amber-300/50 bg-amber-900/70 px-2 py-1 text-[10px] font-semibold">
-                  {index + 1} · {entry.sourceCard.card.name}
-                </li>
-              ))}
+              {(gameState.reactionWindow.chain ?? []).map((entry, index) => {
+                const isReact = entry.entryType === 'REACT_MAGIC';
+                const label = isReact ? entry.sourceCard.card.name : `${entry.entryType === 'TRIGGER_ABILITY' ? 'Trigger' : 'Ability'} · ${entry.triggerId}`;
+                const entryId = isReact ? entry.sourceCard.instanceId : entry.triggerId;
+                return (
+                  <li key={`${entryId}-${index}`} className="shrink-0 rounded border border-amber-300/50 bg-amber-900/70 px-2 py-1 text-[10px] font-semibold">
+                    {index + 1} · {label}{!isReact && entry.cancelled ? ' · ยกเลิกแล้ว' : ''}
+                  </li>
+                );
+              })}
             </ol>
           </div>
           {gameState.reactionWindow.priorityPlayerId === meId && !gameState.reactionWindow.pendingReaction && (

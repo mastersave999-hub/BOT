@@ -106,13 +106,42 @@ export function preventDestruction(
 ): PreventionResult {
   const found = findTarget(state, targetId);
   if (!found) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
-  const shield = [...(found.card.preventionShields ?? [])]
-    .filter(item => item.kind === 'DESTRUCTION' && item.usesRemaining !== 0 && matchesCause(item, cause))
-    .sort((left, right) => left.id.localeCompare(right.id))[0];
-  if (!shield) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const shields = [...(found.card.preventionShields ?? [])]
+    .filter(item => item.kind === 'DESTRUCTION' && (item.mode ?? 'AUTOMATIC') === 'AUTOMATIC' && item.usesRemaining !== 0 && matchesCause(item, cause))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (shields.length === 0) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  let next = state;
+  for (const shield of shields) {
+    const current = findTarget(next, targetId);
+    if (current?.card.preventionShields?.some(item => item.id === shield.id)) {
+      next = updateCardShield(next, targetId, shield.id, actorId, 'DESTRUCTION', current.playerId, 1);
+    }
+  }
+  return { prevented: true, preventedAmount: 1, remainingAmount: 0, state: next };
+}
+
+export function preventDestructionByReaction(
+  state: GameState,
+  actorId: string,
+  targetId: string,
+  exitEventId: string,
+  shieldId: string,
+  cause: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' = 'EFFECT'
+): PreventionResult {
+  const found = findTarget(state, targetId);
+  if (!found || !state.reactionWindow || !exitEventId) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const attemptKey = `${exitEventId}:${targetId}`;
+  if (state.preventionAttempts?.includes(attemptKey)) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const automatic = preventDestruction(state, actorId, targetId, cause);
+  if (automatic.prevented) return automatic;
+  const shield = (found.card.preventionShields ?? []).find(item => item.id === shieldId && item.kind === 'DESTRUCTION' && item.mode === 'ACTIVATED' && item.usesRemaining !== 0 && matchesCause(item, cause));
+  if (!shield || shieldController(state, shield, found.card.controllerId) !== actorId) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  const consumed = updateCardShield(state, targetId, shield.id, actorId, 'DESTRUCTION', found.playerId, 1);
   return {
-    prevented: true, preventedAmount: 1, remainingAmount: 0,
-    state: updateCardShield(state, targetId, shield.id, actorId, 'DESTRUCTION', found.playerId, 1)
+    prevented: true,
+    preventedAmount: 1,
+    remainingAmount: 0,
+    state: { ...consumed, preventionAttempts: [...(consumed.preventionAttempts ?? []), attemptKey] }
   };
 }
 
