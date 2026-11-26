@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { executeDrawPhase, eliminatePlayer, isFirstPlayerFirstTurn, nextPhaseAfterMain } from '../src/engine/turnEngine.js';
 import { GameState, PlayerState, CardInstance } from '../src/engine/types.js';
 
-function createMockCard(id: string): CardInstance {
+function createMockCard(id: string, ownerId = 'p1'): CardInstance {
   return {
     instanceId: id,
-    ownerId: 'player-1',
-    controllerId: 'player-1',
+    ownerId,
+    controllerId: ownerId,
     isRested: true,
     isFaceUp: true,
     attachedInstances: [],
@@ -213,10 +213,10 @@ describe('eliminatePlayer', () => {
     id,
     name: id,
     seat: 0,
-    deck: [createMockCard(`${id}-d`)],
-    hand: [createMockCard(`${id}-h`)],
-    lifeDeck: [createMockCard(`${id}-l`)],
-    avatarZone: [createMockCard(`${id}-a`)],
+    deck: [createMockCard(`${id}-d`, id)],
+    hand: [createMockCard(`${id}-h`, id)],
+    lifeDeck: [createMockCard(`${id}-l`, id)],
+    avatarZone: [createMockCard(`${id}-a`, id)],
     constructZone: [],
     magicZone: [],
     hell: [],

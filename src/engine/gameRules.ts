@@ -141,6 +141,18 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   }
   const players = { ...state.players };
   const events: GameEvent[] = [];
+  const attachmentsLeaveWithAvatar = sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && request.destination !== 'magicZone';
+  const detachedAttachments: CardInstance[] = [];
+  const collectAttachments = (attachments: CardInstance[]) => {
+    for (const attached of attachments) {
+      detachedAttachments.push({ ...attached, attachedInstances: [] });
+      collectAttachments(attached.attachedInstances);
+    }
+  };
+  if (attachmentsLeaveWithAvatar) collectAttachments(card.attachedInstances);
+  const destinationCard = attachmentsLeaveWithAvatar && card.attachedInstances.length > 0
+    ? { ...card, attachedInstances: [] }
+    : card;
   if (sourcePlayerId && sourceZone) {
     players[sourcePlayerId] = { ...players[sourcePlayerId], [sourceZone]: players[sourcePlayerId][sourceZone].filter(item => item.instanceId !== card!.instanceId) };
   }
@@ -159,15 +171,22 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     landMagicZone = null;
   }
   if (request.destination === 'landMagicZone') {
-    landMagicZone = card;
+    landMagicZone = destinationCard;
   } else if (request.destination !== 'removedFromGame') {
     const destinationPlayer = players[destinationPlayerId];
     const currentZone = destinationPlayer[request.destination];
     if (request.destination === 'constructZone') {
-      const err = validateConstructZone({ constructZone: [...currentZone, card] });
+      const err = validateConstructZone({ constructZone: [...currentZone, destinationCard] });
       if (err) return { ok: false, state, reason: err };
     }
-    players[destinationPlayerId] = { ...destinationPlayer, [request.destination]: [...currentZone, card] };
+    players[destinationPlayerId] = { ...destinationPlayer, [request.destination]: [...currentZone, destinationCard] };
+  }
+  for (const attached of detachedAttachments) {
+    const owner = players[attached.ownerId];
+    if (!owner) return { ok: false, state, reason: 'Attached card owner does not exist' };
+    if (request.destination !== 'removedFromGame') {
+      players[owner.id] = { ...owner, hell: [...owner.hell, attached] };
+    }
   }
   const next = { ...state, players, landMagicZone };
   const error = validateGameState(next);
@@ -186,6 +205,13 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     actorId: request.actorId,
     eventId: `${state.id}:${(state.gameEvents?.length ?? 0) + events.length}:CARD_MOVED:${exposeIdentity ? card.instanceId : 'hidden'}:${sourcePlayerId ?? 'shared'}:${sourceZone ?? 'landMagicZone'}:${destinationPlayerId ?? 'shared'}:${request.destination}:${request.actorId}`
   });
+  detachedAttachments.forEach((attached, index) => events.push({
+    type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId: attached.ownerId,
+    controllerId: attached.controllerId, from: `${sourcePlayerId}:attached`,
+    to: request.destination === 'removedFromGame' ? 'removedFromGame' : `${attached.ownerId}:hell`,
+    actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached:${index}:${attached.instanceId}:${request.destination}:${request.actorId}`
+  }));
   if (sourceZone === 'constructZone' && sourcePlayerId) events.push({
     type: 'CONSTRUCT_LEFT', instanceId: card.instanceId, name: card.card.name, playerId: sourcePlayerId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:construct-left:${card.instanceId}:${sourcePlayerId}`

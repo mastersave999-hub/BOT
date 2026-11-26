@@ -76,16 +76,7 @@ function applyCost(state: GameState, cost: EffectCost): GameState | null {
     instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: avatar.ownerId, effectMove: true
   });
   if (!moved.ok) return null;
-  let next = moved.state;
-  for (const attached of avatar.attachedInstances) {
-    const owner = next.players[attached.ownerId];
-    if (!owner) return null;
-    next = { ...next, players: { ...next.players, [owner.id]: { ...owner, hell: [...owner.hell, attached] } } };
-  }
-  const owner = next.players[avatar.ownerId];
-  if (!owner) return null;
-  next.players = { ...next.players, [owner.id]: { ...owner, hell: owner.hell.map(item => item.instanceId === avatar.instanceId ? { ...item, attachedInstances: [] } : item) } };
-  return next;
+  return moved.state;
 }
 
 const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
@@ -144,16 +135,7 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       destinationPlayerId: found.avatar.ownerId, effectMove: true
     });
     if (!movement.ok) return null;
-    let next = movement.state;
-    for (const attached of found.avatar.attachedInstances) {
-      const owner = next.players[attached.ownerId];
-      if (!owner) return null;
-      next = { ...next, players: { ...next.players, [owner.id]: { ...owner, hell: [...owner.hell, attached] } } };
-    }
-    const owner = next.players[found.avatar.ownerId];
-    if (!owner) return null;
-    next.players = { ...next.players, [owner.id]: { ...owner, hell: owner.hell.map(item => item.instanceId === found.avatar.instanceId ? { ...item, attachedInstances: [] } : item) } };
-    return next;
+    return movement.state;
   },
   bounce_avatar: ({ state, plan, effect }) => {
     if (effect.kind !== 'bounce_avatar') return null;
@@ -164,16 +146,14 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       destinationPlayerId: found.avatar.ownerId, effectMove: true
     });
     if (!movement.ok) return null;
-    let next = movement.state;
-    for (const attached of found.avatar.attachedInstances) {
-      const owner = next.players[attached.ownerId];
-      if (!owner) return null;
-      next = { ...next, players: { ...next.players, [owner.id]: { ...owner, hell: [...owner.hell, attached] } } };
-    }
-    const owner = next.players[found.avatar.ownerId];
+    const owner = movement.state.players[found.avatar.ownerId];
     if (!owner) return null;
-    next.players = { ...next.players, [owner.id]: { ...owner, hand: owner.hand.map(item => item.instanceId === found.avatar.instanceId ? { ...item, isRested: false, layerModifiers: [], attachedInstances: [] } : item) } };
-    return next;
+    return { ...movement.state, players: { ...movement.state.players, [owner.id]: {
+      ...owner,
+      hand: owner.hand.map(item => item.instanceId === found.avatar.instanceId
+        ? { ...item, isRested: false, layerModifiers: [], attachedInstances: [] }
+        : item)
+    } } };
   },
   destroy_opponent_avatars: ({ state, plan, effect }) => {
     if (effect.kind !== 'destroy_opponent_avatars' || effect.actorId !== plan.actorId) return null;
@@ -188,14 +168,6 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
         });
         if (!moved.ok) return null;
         next = moved.state;
-        for (const attached of avatar.attachedInstances) {
-          const owner = next.players[attached.ownerId];
-          if (!owner) return null;
-          next = { ...next, players: { ...next.players, [owner.id]: { ...owner, hell: [...owner.hell, attached] } } };
-        }
-        const owner = next.players[avatar.ownerId];
-        if (!owner) return null;
-        next.players = { ...next.players, [owner.id]: { ...owner, hell: owner.hell.map(item => item.instanceId === avatar.instanceId ? { ...item, attachedInstances: [] } : item) } };
       }
     }
     return next;

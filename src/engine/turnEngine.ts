@@ -1,6 +1,7 @@
 import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
 import { executeCardAbility, expireModifiersAt, clearEndOfTurnModifiers } from './abilityEngine';
-import { appendGameEvents } from './gameEvents';
+import { moveCardBetweenZones } from './gameRules';
+import { runGameTransaction } from './gameTransaction';
 
 export function isFirstPlayerFirstTurn(state: GameState, playerId: string): boolean {
   return state.turnNumber === 1 && state.playerOrder[0] === playerId && state.playerOrder[state.currentTurnPlayerIndex] === playerId;
@@ -12,113 +13,95 @@ export function nextPhaseAfterMain(state: GameState, playerId: string): 'BATTLE'
 
 export function executeDrawPhase(inputState: GameState): GameState {
   const currentTurnPlayerId = inputState.playerOrder[inputState.currentTurnPlayerIndex];
-  const expiredState = expireModifiersAt(inputState, 'DRAW_PHASE', currentTurnPlayerId);
-  const state: GameState = {
-    ...expiredState,
-    players: Object.fromEntries(Object.entries(expiredState.players).map(([playerId, player]) => [playerId, {
-      ...player,
-      usedMagicTypesThisTurn: new Set<MagicSubtype>(),
-      reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }
-    }]))
-  };
-  const player = state.players[currentTurnPlayerId];
+  if (!currentTurnPlayerId || !inputState.players[currentTurnPlayerId]) throw new Error('Player not found');
 
-  if (!player) throw new Error('Player not found');
+  const transaction = runGameTransaction(inputState, draft => {
+    const expiredState = expireModifiersAt(draft, 'DRAW_PHASE', currentTurnPlayerId);
+    const state: GameState = {
+      ...expiredState,
+      players: Object.fromEntries(Object.entries(expiredState.players).map(([playerId, player]) => [playerId, {
+        ...player,
+        usedMagicTypesThisTurn: new Set<MagicSubtype>(),
+        reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }
+      }]))
+    };
+    const player = state.players[currentTurnPlayerId];
+    if (!player) return null;
 
-  // RuleBook p.21: Simultaneously awaken rested Avatars and draw cards
-  const updatedAvatarZone = player.avatarZone.map(avatar => ({
-    ...avatar,
-    isRested: false
-  }));
+    let drawCount = 1;
+    if (state.turnNumber === 1 && state.currentTurnPlayerIndex === 0) drawCount = 2;
+    else if (player.hand.length < 3) drawCount = 3 - player.hand.length;
 
-  // Reset per-turn magic restrictions
-  const updatedMagicTypes = new Set<MagicSubtype>();
-  const updatedBudget = {
-    ownTurnRemaining: 1,
-    opponentTurnRemaining: 1
-  };
-
-  // RuleBook p.21 Draw calculation:
-  // - First turn player on Turn 1 draws 2 cards
-  // - Otherwise: If hand < 3, draw to 3. If hand >= 3, draw 1 card.
-  let drawCount = 1;
-  if (state.turnNumber === 1 && state.currentTurnPlayerIndex === 0) {
-    drawCount = 2;
-  } else if (player.hand.length < 3) {
-    drawCount = 3 - player.hand.length;
-  } else {
-    drawCount = 1;
-  }
-
-  // LIFE cards are a separate zone and must never enter normal deck drawing.
-  const mainDeck = player.deck.filter(card => card.card.type !== 'Life');
-  const cardsDrawn = mainDeck.slice(0, drawCount).map(c => ({
-    ...c,
-    isFaceUp: true
-  }));
-  const remainingDeck = mainDeck.slice(drawCount);
-
-  // Win/Loss Condition: Main Deck reaches 0 immediately [RuleBook p.21].
-  const deckOutEvents = mainDeck.length < drawCount ? [{
-    timestamp: Date.now(),
-    type: 'PLAYER_DECK_OUT',
-    description: `${player.name} ran out of cards in deck and lost the game.`,
-    actorId: player.id
-  }] : [];
-
-  const updatedHand = [...player.hand, ...cardsDrawn];
-
-  const updatedPlayer: PlayerState = {
-    ...player,
-    avatarZone: updatedAvatarZone,
-    deck: remainingDeck,
-    hand: updatedHand,
-    pendingLifeEffects: [],
-    usedMagicTypesThisTurn: updatedMagicTypes,
-    reactMagicBudget: updatedBudget
-  };
-
-  let nextState: GameState = {
-    ...state,
-    currentPhase: 'MAIN',
-    players: {
-      ...state.players,
-      [currentTurnPlayerId]: updatedPlayer
-    },
-    eventLog: [
-      ...state.eventLog,
-      ...deckOutEvents,
-      {
-        timestamp: Date.now(),
-        type: 'DRAW_PHASE_COMPLETE',
-        description: `${player.name} drew ${cardsDrawn.length} card(s) and awakened avatars. Transitioned to Main Phase.`,
-        actorId: player.id
-      }
-    ]
-  };
-
-  // Rule Book 3.2 p.22: resolve LIFE abilities revealed by attacks last turn
-  // immediately as this player's Main Phase begins, in queued (top-to-bottom) order.
-  for (const lifeCardId of player.pendingLifeEffects ?? []) {
-    const lifeCard = updatedPlayer.lifeDeck.find(card => card.instanceId === lifeCardId);
-    if (!lifeCard?.isFaceUp) continue;
-
-    const result = executeCardAbility(nextState, currentTurnPlayerId, lifeCard, 'LIFE_FLIP');
-    nextState = result.state;
-    if (result.logs.length > 0) {
-      nextState.eventLog = [
-        ...nextState.eventLog,
-        ...result.logs.map(description => ({
-          timestamp: Date.now(),
-          type: 'LIFE_FLIP',
-          description,
-          actorId: currentTurnPlayerId
-        }))
-      ];
+    let nextState = state;
+    const misplacedLifeIds = player.deck.filter(card => card.card.type === 'Life').map(card => card.instanceId);
+    for (const instanceId of misplacedLifeIds) {
+      const movement = moveCardBetweenZones(nextState, {
+        instanceId, actorId: currentTurnPlayerId, destination: 'lifeDeck', destinationPlayerId: currentTurnPlayerId
+      });
+      if (!movement.ok) return null;
+      nextState = movement.state;
     }
-  }
 
-  return nextState;
+    const drawIds = nextState.players[currentTurnPlayerId].deck.slice(0, drawCount).map(card => card.instanceId);
+    for (const instanceId of drawIds) {
+      const movement = moveCardBetweenZones(nextState, {
+        instanceId, actorId: currentTurnPlayerId, destination: 'hand', destinationPlayerId: currentTurnPlayerId
+      });
+      if (!movement.ok) return null;
+      const movedPlayer = movement.state.players[currentTurnPlayerId];
+      nextState = {
+        ...movement.state,
+        players: { ...movement.state.players, [currentTurnPlayerId]: {
+          ...movedPlayer,
+          hand: movedPlayer.hand.map(card => card.instanceId === instanceId ? { ...card, isFaceUp: true } : card)
+        } }
+      };
+    }
+
+    const updatedPlayer = nextState.players[currentTurnPlayerId];
+    const deckOutEvents = player.deck.filter(card => card.card.type !== 'Life').length < drawCount ? [{
+      timestamp: Date.now(),
+      type: 'PLAYER_DECK_OUT',
+      description: `${player.name} ran out of cards in deck and lost the game.`,
+      actorId: player.id
+    }] : [];
+    nextState = {
+      ...nextState,
+      currentPhase: 'MAIN',
+      players: { ...nextState.players, [currentTurnPlayerId]: {
+        ...updatedPlayer,
+        avatarZone: updatedPlayer.avatarZone.map(avatar => ({ ...avatar, isRested: false })),
+        pendingLifeEffects: []
+      } },
+      eventLog: [
+        ...nextState.eventLog,
+        ...deckOutEvents,
+        {
+          timestamp: Date.now(),
+          type: 'DRAW_PHASE_COMPLETE',
+          description: `${player.name} drew ${drawIds.length} card(s) and awakened avatars. Transitioned to Main Phase.`,
+          actorId: player.id
+        }
+      ]
+    };
+
+    for (const lifeCardId of player.pendingLifeEffects ?? []) {
+      const lifeCard = updatedPlayer.lifeDeck.find(card => card.instanceId === lifeCardId);
+      if (!lifeCard?.isFaceUp) continue;
+      const result = executeCardAbility(nextState, currentTurnPlayerId, lifeCard, 'LIFE_FLIP');
+      nextState = result.state;
+      if (result.logs.length > 0) nextState = {
+        ...nextState,
+        eventLog: [...nextState.eventLog, ...result.logs.map(description => ({
+          timestamp: Date.now(), type: 'LIFE_FLIP', description, actorId: currentTurnPlayerId
+        }))]
+      };
+    }
+    return nextState;
+  });
+
+  if (transaction.ok === false) throw new Error(`Draw Phase transaction failed: ${transaction.reason}`);
+  return transaction.state;
 }
 
 /** Final End Phase transition shared by offline and multiplayer discard commands. */
@@ -128,25 +111,27 @@ export function finishEndPhaseTurn(state: GameState): GameState {
     (state.players[activePlayerId]?.hand.length ?? 0) > 7) return state;
   const turnNumber = state.turnNumber + 1;
   const nextIndex = (state.currentTurnPlayerIndex + 1) % state.playerOrder.length;
-  let nextState = clearEndOfTurnModifiers(state);
-  nextState = {
-    ...nextState,
-    currentTurnPlayerIndex: nextIndex,
-    currentPhase: 'DRAW',
-    turnNumber,
-    stateRevision: (state.stateRevision ?? 0) + 1
-  };
-  const nextPlayerId = nextState.playerOrder[nextIndex];
-  const nextPlayer = nextState.players[nextPlayerId];
-  nextState.eventLog = [
-    ...nextState.eventLog,
-    { timestamp: Date.now(), type: 'TURN_ENDED', description: `${state.players[activePlayerId]?.name ?? activePlayerId} ended the turn.`, actorId: activePlayerId },
-    { timestamp: Date.now(), type: 'TURN_STARTED', description: `${nextPlayer?.name ?? nextPlayerId} started turn ${turnNumber}.`, actorId: nextPlayerId }
-  ];
-  return appendGameEvents(nextState, [
+  const nextPlayerId = state.playerOrder[nextIndex];
+  const transaction = runGameTransaction(state, draft => {
+    const nextState = clearEndOfTurnModifiers(draft);
+    const nextPlayer = nextState.players[nextPlayerId];
+    return {
+      ...nextState,
+      currentTurnPlayerIndex: nextIndex,
+      currentPhase: 'DRAW',
+      turnNumber,
+      stateRevision: (state.stateRevision ?? 0) + 1,
+      eventLog: [
+        ...nextState.eventLog,
+        { timestamp: Date.now(), type: 'TURN_ENDED', description: `${state.players[activePlayerId]?.name ?? activePlayerId} ended the turn.`, actorId: activePlayerId },
+        { timestamp: Date.now(), type: 'TURN_STARTED', description: `${nextPlayer?.name ?? nextPlayerId} started turn ${turnNumber}.`, actorId: nextPlayerId }
+      ]
+    };
+  }, [
     { type: 'TURN_ENDED', playerId: activePlayerId, turnNumber: state.turnNumber, eventId: `${state.id}:turn-ended:${state.turnNumber}:${activePlayerId}` },
     { type: 'TURN_STARTED', playerId: nextPlayerId, turnNumber, eventId: `${state.id}:turn-started:${turnNumber}:${nextPlayerId}` }
   ]);
+  return transaction.ok ? transaction.state : state;
 }
 
 /**
@@ -169,36 +154,40 @@ export function eliminatePlayer(
   if (playerOrder.length > 0) currentTurnPlayerIndex %= playerOrder.length;
 
   const eliminated = state.players[playerId];
-  const clearedPlayer: PlayerState = {
-    ...eliminated,
-    deck: [],
-    hand: [],
-    lifeDeck: [],
-    avatarZone: [],
-    constructZone: [],
-    magicZone: [],
-    hell: [],
-    darkDimension: []
-  };
+  if (!eliminated) return { state, winnerId: null };
 
-  const nextState: GameState = {
-    ...state,
-    playerOrder,
-    currentTurnPlayerIndex,
-    currentPhase: wasActive ? 'DRAW' : state.currentPhase,
-    turnNumber: wasActive ? state.turnNumber + 1 : state.turnNumber,
-    landMagicZone: state.landMagicZone?.ownerId === playerId ? null : state.landMagicZone,
-    players: { ...state.players, [playerId]: clearedPlayer },
-    eventLog: [
-      ...state.eventLog,
-      {
+  const transaction = runGameTransaction(state, draft => {
+    let nextState = draft;
+    const zoneNames = ['deck', 'hand', 'lifeDeck', 'avatarZone', 'constructZone', 'magicZone', 'hell', 'darkDimension'] as const;
+    const cardIds = zoneNames.flatMap(zone => eliminated[zone].map(card => card.instanceId));
+    if (draft.landMagicZone?.ownerId === playerId) cardIds.push(draft.landMagicZone.instanceId);
+    for (const instanceId of cardIds) {
+      const movement = moveCardBetweenZones(nextState, {
+        instanceId, actorId: playerId, destination: 'removedFromGame', effectMove: true
+      });
+      if (!movement.ok) return null;
+      nextState = movement.state;
+    }
+
+    const clearedPlayer: PlayerState = {
+      ...nextState.players[playerId],
+      deck: [], hand: [], lifeDeck: [], avatarZone: [], constructZone: [], magicZone: [], hell: [], darkDimension: []
+    };
+    return {
+      ...nextState,
+      playerOrder,
+      currentTurnPlayerIndex,
+      currentPhase: wasActive ? 'DRAW' : nextState.currentPhase,
+      turnNumber: wasActive ? nextState.turnNumber + 1 : nextState.turnNumber,
+      players: { ...nextState.players, [playerId]: clearedPlayer },
+      eventLog: [...nextState.eventLog, {
         timestamp: Date.now(),
         type: 'PLAYER_ELIMINATED',
-        description: `${eliminated?.name ?? playerId} ${reason}`,
+        description: `${eliminated.name} ${reason}`,
         actorId: playerId
-      }
-    ]
-  };
-
-  return { state: nextState, winnerId: playerOrder.length === 1 ? playerOrder[0] : null };
+      }]
+    };
+  });
+  if (!transaction.ok) return { state, winnerId: null };
+  return { state: transaction.state, winnerId: playerOrder.length === 1 ? playerOrder[0] : null };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { appendGameEvents, dispatchGameEvents } from '../src/engine/gameEvents';
+import { isReactionWindowStructurallyValid, openReactionWindow } from '../src/engine/reactionEngine';
 import { expireModifiersAt } from '../src/engine/abilityEngine';
 import { calculateNetPower } from '../src/engine/layers';
 import {
@@ -10,11 +11,15 @@ import {
   validateMagicPlay
 } from '../src/engine/gameRules';
 import { runGameTransaction } from '../src/engine/gameTransaction';
+import { resolveEffectPlan } from '../src/engine/effectResolver';
 import {
   decodeNetMessage,
   encodeNetMessage,
   isEndPhaseDiscardCommandCurrent,
-  isLegalGameStateSync
+  isGameStateValidForSync,
+  isLegalGameStateSync,
+  redactLifeCardsForViewer,
+  restoreHiddenZonesFromCanonical
 } from '../src/engine/multiplayer';
 import { executeDrawPhase, finishEndPhaseTurn, isFirstPlayerFirstTurn, nextPhaseAfterMain } from '../src/engine/turnEngine';
 import type { Card, CardInstance, GameState, MagicSubtype, PlayerState } from '../src/engine/types';
@@ -264,6 +269,48 @@ describe('Phase 2.2 core rules and infrastructure', () => {
     expect(decodeNetMessage(JSON.stringify({ type: 'END_PHASE_DISCARD', command: { ...command, selectedInstanceIds: ['sync-0', 'sync-0'] } }))).toBeNull();
   });
 
+  it('round-trips full-state reconnect snapshots during pending discard and Reaction Windows', () => {
+    const hiddenDeckCard = makeInstance('reconnect-deck', 'Magic', 'p1', 'Private deck card', 'Normal');
+    const hand = Array.from({ length: 8 }, (_, index) => makeInstance(`reconnect-hand-${index}`, 'Magic', 'p1', `Private hand ${index}`, 'Normal'));
+    const canonical = makeState(makePlayer('p1', { deck: [hiddenDeckCard], hand }), makePlayer('p2'));
+    canonical.currentPhase = 'END';
+    const pendingDiscard = beginEndPhaseDiscard(canonical, 'p1');
+    expect(pendingDiscard.ok).toBe(true);
+    if (!pendingDiscard.ok) return;
+    expect(isLegalGameStateSync(canonical, pendingDiscard.state, 'p1')).toBe(true);
+
+    const encodedDiscardSync = encodeNetMessage({ type: 'SYNC', state: redactLifeCardsForViewer(pendingDiscard.state, 'p2'), winner: null });
+    const decodedDiscardSync = decodeNetMessage(encodedDiscardSync);
+    expect(decodedDiscardSync?.type).toBe('SYNC');
+    if (decodedDiscardSync?.type !== 'SYNC') return;
+    const restoredDiscardState = restoreHiddenZonesFromCanonical(decodedDiscardSync.state, pendingDiscard.state, 'p2');
+    expect(isGameStateValidForSync(restoredDiscardState)).toBe(true);
+    expect(restoredDiscardState.pendingEndPhaseDiscardPlayerId).toBe('p1');
+    expect(restoredDiscardState.pendingEndPhaseDiscardRevision).toBe(pendingDiscard.state.stateRevision);
+    expect(restoredDiscardState.players.p1.hand.map(card => card.instanceId)).toEqual(hand.map(card => card.instanceId));
+    expect(restoredDiscardState.players.p1.deck[0].card.name).toBe('Private deck card');
+
+    const reactCard = makeInstance('reconnect-react', 'Magic', 'p2', 'Cancel', 'React');
+    reactCard.card.mainEffect = 'ยกเลิกการใช้ Magic Card';
+    const reactionBase = makeState(makePlayer('p1'), makePlayer('p2', { hand: [reactCard] }));
+    const activeWindow = openReactionWindow(reactionBase, {
+      type: 'MAGIC_PLAYED', actorId: 'p1', sourceInstanceId: 'pending-magic'
+    });
+    expect(activeWindow.reactionWindow).toBeDefined();
+    expect(isReactionWindowStructurallyValid(activeWindow)).toBe(true);
+    expect(isLegalGameStateSync(reactionBase, activeWindow, 'p1')).toBe(true);
+
+    const encodedReactionSync = encodeNetMessage({ type: 'SYNC', state: redactLifeCardsForViewer(activeWindow, 'p2'), winner: null });
+    const decodedReactionSync = decodeNetMessage(encodedReactionSync);
+    expect(decodedReactionSync?.type).toBe('SYNC');
+    if (decodedReactionSync?.type !== 'SYNC') return;
+    const restoredReactionState = restoreHiddenZonesFromCanonical(decodedReactionSync.state, activeWindow, 'p2');
+    expect(isGameStateValidForSync(restoredReactionState)).toBe(true);
+    expect(restoredReactionState.reactionWindow).toEqual(activeWindow.reactionWindow);
+    expect(isReactionWindowStructurallyValid(restoredReactionState)).toBe(true);
+    expect(restoredReactionState.players.p2.hand[0].card.name).toBe('Cancel');
+  });
+
   it('keeps private deck identities out of movement metadata while preserving public ownership', () => {
     const hiddenCard = makeInstance('private-card-identity', 'Magic', 'p1', 'Secret draw', 'Normal');
     const start = makeState(makePlayer('p1', { deck: [hiddenCard] }), makePlayer('p2'));
@@ -287,6 +334,21 @@ describe('Phase 2.2 core rules and infrastructure', () => {
     expect(result.state.players.p2.hell[0]).toMatchObject({ ownerId: 'p2', controllerId: 'p2' });
   });
 
+  it('routes an Avatar and its attached cards through shared movement events on field exit', () => {
+    const attached = makeInstance('equipped-mod', 'Magic', 'p1', 'Equipped Modification', 'Modification', 'p2');
+    const target = makeInstance('attached-target', 'Avatar', 'p2', 'Target');
+    target.attachedInstances = [attached];
+    const start = makeState(makePlayer('p1'), makePlayer('p2', { avatarZone: [target] }));
+    const result = resolveEffectPlan(start, { actorId: 'p1', effects: [{ kind: 'destroy_avatar', targetId: target.instanceId }] });
+    expect(result.ok).toBe(true);
+    expect(result.state.players.p2.hell.map(card => card.instanceId)).toEqual(['attached-target']);
+    expect(result.state.players.p1.hell.map(card => card.instanceId)).toEqual(['equipped-mod']);
+    expect(result.state.players.p2.hell[0].attachedInstances).toEqual([]);
+    expect(result.state.gameEvents?.filter(item => item.event.type === 'CARD_MOVED').map(item => item.event.instanceId)).toEqual([
+      'attached-target', 'equipped-mod'
+    ]);
+  });
+
   it('prevents duplicate explicit events and reentrant event recursion', () => {
     const base = makeState();
     const event = { type: 'MAGIC_RESOLVED' as const, instanceId: 'magic-1', playerId: 'p1', eventId: 'event-once' };
@@ -301,18 +363,42 @@ describe('Phase 2.2 core rules and infrastructure', () => {
     };
     dispatchGameEvents([event], [handler]);
     expect(dispatchCount).toBe(1);
+
+    let deepDispatchCount = 0;
+    const deepHandler = (received: typeof event) => {
+      deepDispatchCount += 1;
+      dispatchGameEvents([{ ...received, eventId: `deep-${deepDispatchCount}` }], [deepHandler]);
+    };
+    const stateBeforeDeepDispatch = makeState();
+    dispatchGameEvents([{ ...event, eventId: 'deep-root' }], [deepHandler]);
+    expect(deepDispatchCount).toBe(32);
+    expect(stateBeforeDeepDispatch).toEqual(makeState());
+    dispatchGameEvents([{ ...event, eventId: 'deep-after-limit' }], [() => { deepDispatchCount += 1; }]);
+    expect(deepDispatchCount).toBe(33);
   });
 
-  it('rolls back nested state and emits no event after transaction rejection or exception', () => {
+  it('rolls back nested transactions on rejection or throw with no partial mutations or leaked events', () => {
     const initial = makeState(makePlayer('p1', { hand: [makeInstance('transaction-card', 'Magic', 'p1', 'Txn', 'Normal')] }));
     const event = { type: 'MAGIC_RESOLVED' as const, instanceId: 'transaction-card', playerId: 'p1', eventId: 'failed-txn' };
     const rejected = runGameTransaction(initial, draft => {
-      draft.players.p1.hand[0].attachedInstances.push(makeInstance('nested-card'));
+      const nested = runGameTransaction(draft, child => {
+        child.players.p1.hand[0].attachedInstances.push(makeInstance('rejected-nested-card'));
+        child.players.p1.hand.splice(0);
+        return null;
+      }, [event]);
+      expect(nested.ok).toBe(false);
+      expect(nested.state).toBe(draft);
       return null;
     }, [event]);
     const thrown = runGameTransaction(initial, draft => {
-      draft.players.p1.hand.splice(0);
-      throw new Error('rollback');
+      const nested = runGameTransaction(draft, child => {
+        child.players.p1.hand[0].attachedInstances.push(makeInstance('thrown-nested-card'));
+        return child;
+      }, [event]);
+      if (!nested.ok) throw new Error('nested transaction unexpectedly rejected');
+      draft.players = nested.state.players;
+      draft.gameEvents = nested.state.gameEvents;
+      throw new Error('outer rollback');
     }, [event]);
     expect(rejected.ok).toBe(false);
     expect(thrown.ok).toBe(false);
