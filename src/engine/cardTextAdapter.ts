@@ -17,7 +17,7 @@ export type CardTextEffect =
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
   | { kind: 'return_to_deck'; target: 'selected_card'; count: number; position: 'shuffle' | 'top' | 'bottom' }
   | { kind: 'sacrifice_avatar'; target: 'selected_avatar' }
-  | { kind: 'scout_cards'; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom' }
+  | { kind: 'scout_cards'; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom'; selectionMin?: number; selectionMax?: number; selectionSelector?: CardTextSelector; unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle' }
   | { kind: 'mill_self'; count: number }
   | { kind: 'cancel_pending_magic' };
 export type CardTextKeywordSpec = {
@@ -166,15 +166,22 @@ export function matchesCardName(cardName: string, reference: NameReference, alia
   if (reference.kind === 'exact-name') return candidateNames.some(name => name.trim() === reference.value);
   const escape = reference.value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
   const matcher = new RegExp(`(?:^|[\\s\\p{P}])${escape}(?=$|[\\s\\p{P}])`, 'u');
-  return candidateNames.some(name => matcher.test(name));
+  return candidateNames.some(name => matcher.test(name) || (reference.value.length >= 5 && name.includes(reference.value)));
+}
+
+function parseEffectSelector(source: string): CardTextSelector | undefined {
+  const selected = source.match(/(?:เลือก|หยิบ|นำ)\s*((?:Avatar|Construct|Magic|LIFE Card)[^:\n]{0,140}?\d+\s*ใบ)/);
+  const targetText = selected?.[1] ?? source;
+  return parseSelector(targetText);
 }
 
 function parseSelector(source: string): CardTextSelector | undefined {
   const cardTypes = ['Avatar', 'Construct', 'Magic', 'LIFE Card'].filter(type => source.includes(type));
   const zones: CardTextZone[] = (['บนสนาม', 'ในนรก', 'จาก Deck', 'บนมือ', 'LIFE'] as CardTextZone[]).filter(zone => source.includes(zone));
+  if (/Avatar Zone|Construct Zone|Magic Zone/.test(source) && !zones.includes('บนสนาม')) zones.push('บนสนาม');
   const quoted = source.match(/"([^\"]+)"/);
   const exact = source.match(/ชื่อ\s+([^\"“”{},:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/);
-  const symbol = source.match(/\{\s*symbol\s+([^}]+)\}/i);
+  const symbol = source.match(/\{\s*symbol\s+([^}]+)\}/i) ?? source.match(/\bSymbol\s+(?!เดียวกับ|ที่|ของ)([^,\s}]+)/i);
   const cost = source.match(/Cost\s+(\d+)\s*(หรือต่ำกว่า|หรือสูงกว่า)/i);
   const controller = /ฝ่ายตรงข้าม|ของอีกฝ่าย|ฝ่ายอื่น/.test(source) ? 'opponent' : /ฝ่ายเรา|ของเรา|เรา/.test(source) ? 'self' : 'either';
   if (!cardTypes.length && !zones.length && !quoted && !exact && !symbol && !cost && controller === 'either') return undefined;
@@ -362,8 +369,25 @@ function parseClause(source: string): ParsedCardTextClause {
       count: 1, rested: hellSummon[4] === 'นอน' });
     else if (sacrificeEffect && /Avatar/.test(part)) effects.push({ kind: 'sacrifice_avatar', target: 'selected_avatar' });
     else if (cancelsPlayedMagic) effects.push({ kind: 'cancel_pending_magic' });
-    else if (scout) effects.push({ kind: 'scout_cards', count: Number(scout[1]),
-      ...( /ขึ้นมือ/.test(part) ? { destination: 'hand' as const } : /ลงนรก/.test(part) ? { destination: 'hell' as const } : /ไว้บนสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'top' as const } : /ไว้ใต้\s*Deck|ล่างสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'bottom' as const } : {}) });
+    else if (scout) {
+      const scoutCount = Number(scout[1]);
+      const topOrder = /(?:ไว้|วาง|เรียง).*บนสุด|บนสุด.*Deck|เรียงลำดับตามใจชอบ/.test(part);
+      const bottomOrder = /(?:ไว้|วาง|เรียง).*ใต้\s*Deck|ล่างสุด/.test(part);
+      const destination: 'hand' | 'hell' | 'deck' | undefined = /ขึ้นมือ/.test(part) ? 'hand'
+        : topOrder || bottomOrder ? 'deck' : /ลงนรก/.test(part) ? 'hell' : undefined;
+      const deckPosition = topOrder ? 'top' : bottomOrder ? 'bottom' : undefined;
+      const selectedCount = Number(part.match(/(?:เลือก|นำ|หยิบ)[^\n:]{0,100}?(\d+)\s*ใบ[^\n:]{0,100}?(?:จากที่\s*สอดแนม|จากที่\s*แสดง|ขึ้นมือ|ลงนรก|ไว้)/)?.[1]
+        ?? (/เลือกนำการ์ดใบนั้น|เลือกการ์ดใบนั้น|นำการ์ดใบนั้น/.test(part) ? 1
+          : destination === 'deck' && /สอดแนม\s*\d+\s*ใบ[^:]*?(?:เรียงลำดับตามใจชอบ|ไว้บนสุด|ไว้ใต้\s*Deck|ล่างสุด)/.test(part) ? scoutCount : 0));
+      const selectionText = part.match(/(?:เลือก|นำ|หยิบ)\s+([\s\S]{0,140}?)(?=\s+\d+\s*ใบ|\s+จากที่\s*สอดแนม|\s+จากที่\s*แสดง)/)?.[1];
+      const selectionSelector = selectionText ? parseSelector(selectionText) : undefined;
+      const unselectedDeckPosition: 'top' | 'bottom' | 'shuffle' = /การ์ดที่เหลือ[^.\n]{0,80}?(?:ไว้ใต้\s*Deck|ล่างสุด)/.test(part) ? 'bottom'
+        : /การ์ดที่เหลือ[^.\n]{0,80}?(?:ไว้บนสุด|บนสุดของ Deck)/.test(part) ? 'top' : 'shuffle';
+      effects.push({ kind: 'scout_cards', count: scoutCount,
+        ...(destination ? { destination } : {}), ...(destination === 'deck' && deckPosition ? { deckPosition } : {}),
+        ...(destination && selectedCount > 0 ? { selectionMin: /สามารถ/.test(part) ? 0 : selectedCount, selectionMax: selectedCount } : {}),
+        ...(selectionSelector ? { selectionSelector } : {}), unselectedDeckPosition });
+    }
     else if (mill) effects.push({ kind: 'mill_self', count: Number(mill[1]) });
     else if (draw) effects.push({ kind: 'draw_self', count: Number(draw[1]) });
     else if (search) effects.push({ kind: 'search_deck_to_hand', cardType: search[1],
@@ -397,7 +421,7 @@ function parseClause(source: string): ParsedCardTextClause {
   return {
     source, ...(split.costText ? { costText: split.costText } : {}), effectText: split.effectText,
     costEffectSeparator: split.separator, keywords, keywordSpecs, timing, ...(cost ? { cost } : {}), conditions,
-    ...(parseSelector(effectText) ? { selector: parseSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}), ...(duration ? { duration } : {}),
+    ...(parseEffectSelector(effectText) ? { selector: parseEffectSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}), ...(duration ? { duration } : {}),
     quotedReferences, exactNameReferences, effects, unresolved: [...new Set(unresolved)]
   };
 }
@@ -427,7 +451,10 @@ export function toEffectDefinitions(
     }
     if (effect.kind === 'sacrifice_avatar') return { kind: 'sacrifice_avatar', targetId: targetInstanceIds[targetIndex++] };
     if (effect.kind === 'scout_cards') return { kind: 'scout_cards', playerId: actorId, count: effect.count,
-      ...(effect.destination ? { destination: effect.destination } : {}), ...(effect.deckPosition ? { deckPosition: effect.deckPosition } : {}) };
+      ...(effect.destination ? { destination: effect.destination } : {}), ...(effect.deckPosition ? { deckPosition: effect.deckPosition } : {}),
+      selectionMin: effect.selectionMin ?? 0,
+      selectionMax: effect.selectionMax ?? (effect.destination ? effect.count : 0),
+      ...(effect.unselectedDeckPosition ? { unselectedDeckPosition: effect.unselectedDeckPosition } : {}) };
     if (effect.kind === 'mill_self') return { kind: 'mill', playerId: actorId, count: effect.count };
     if (effect.kind === 'cancel_pending_magic') return { kind: 'cancel_pending_magic' };
     if (effect.kind === 'search_deck_to_hand') {
@@ -504,7 +531,7 @@ export function toEffectPlan(
           (selector?.symbol !== undefined && !target.card.symbol?.includes(selector.symbol)) ||
           (selector?.name && effect.kind !== 'recover_from_hell' && !matchesCardName(target.card.name, selector.name, parseCardNameRules(target.card))) ||
           (selector?.cost && (selector.cost.comparison === 'at_most' ? target.card.cost > selector.cost.value : target.card.cost < selector.cost.value)) ||
-          !matchesZoneSelector(targetIds[index]) ||
+          !(['recover_from_hell', 'summon_from_hell'].includes(effect.kind) || matchesZoneSelector(targetIds[index])) ||
           (selector?.controller === 'self' && target.controllerId !== actorId) ||
           (selector?.controller === 'opponent' && target.controllerId === actorId) ||
           (effect.kind === 'sacrifice_avatar' && target.controllerId !== actorId))) return null;

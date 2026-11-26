@@ -32,7 +32,7 @@ export type EffectDefinition =
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; targetId: string }
   | { kind: 'return_to_deck'; instanceIds: string[]; position: 'shuffle' | 'top' | 'bottom' }
   | { kind: 'sacrifice_avatar'; targetId: string }
-  | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom' }
+  | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom'; selectionMin?: number; selectionMax?: number; unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle' }
   | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck' | 'hand' }
@@ -354,7 +354,10 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     const result = scoutCards(state, effect.playerId, effect.count, {
       ...(effect.destination ? { destination: effect.destination } : {}),
       ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
-      ...(effect.destination === 'deck' && effect.deckPosition ? { topOrderAllowed: effect.deckPosition === 'top' } : {})
+      ...(effect.destination && effect.selectionMin !== undefined ? { minSelect: effect.selectionMin } : {}),
+      ...(effect.destination && effect.selectionMax !== undefined ? { maxSelect: effect.selectionMax } : {}),
+      ...(effect.destination && effect.unselectedDeckPosition ? { unselectedDeckPosition: effect.unselectedDeckPosition } : {}),
+      ...(effect.destination === 'deck' && effect.deckPosition === 'top' ? { topOrderAllowed: true } : {})
     });
     if (!result.ok) return null;
     if (effect.destination) return result.state;

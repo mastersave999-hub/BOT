@@ -353,20 +353,20 @@ These are text triage counts, not unique mechanics or verified cards. Adapter te
 - Named Hell recovery to hand and named Avatar special summon are bound to explicit instance IDs in the actor's Hell. The resolver rejects absent, wrong-type, wrong-name, duplicate, or insufficient selections and keeps all-or-nothing semantics. Other Hell-selection phrasing remains unsupported until its selector/destination behavior is represented.
 - Modification Magic equip restrictions implement Rule Book pp.13, 18 quoted-word versus exact-name matching. Illegal attempts send the card to its owner's Hell; recomputation rechecks an existing attachment continuously and sends it to Hell if the restriction ceases to hold. Unparseable restriction syntax fails closed.
 
-### Phase 4B-2: current 1,833-row audit
+### Phase 4B-3: current 1,833-row audit
 
 | Status | Rows |
 |---|---:|
-| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 79 |
+| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 82 |
 | PARSED_READY (including verified) | 226 |
-| PARSED_READY not yet verified | 147 |
+| PARSED_READY not yet verified | 144 |
 | UNSUPPORTED | 1,603 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
-The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 79 pass full-clause before/after Game State assertions, while 147 remain unverified. Step 4B-2 newly verifies six combat-keyword catalog rows through seeded attack/battle fixtures; the 4B-1 GEM-paid Juti, Last Words, and End/Draw/Main timing coverage remains. The harness exercised timing/event behavior for 44 catalog rows total. Combat keyword fixtures cover Unity, Human Shield, Egg Kick, Grit, Backstab and Duo when present in the parsed set. Scout player-choice AST changes remain out of scope for 4B-3. The requested 211-row threshold is not met. Reproduce parsing counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
+The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 82 pass before/after Game State assertions, while 144 remain unverified. Eight catalog rows were newly promoted through valid plan bindings and target fixtures (BT05-003, BT07-017, ODY1-001, ODY1-002, ODY1-003, PRMO-085, KD02-004 and RM01-002); five previously verified trigger rows no longer pass the current event-fixture assertions and are listed as unverified in the card audit. No Scout card was newly promoted. The 4B-1/4B-2 GEM-paid Juti, Last Words, combat keyword and supported timing scenarios remain represented. The requested 211-row threshold is not met. Reproduce parser counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
 
-**Unverified blocker counts (overlapping):** timing/event context 75; keyword behavior 52; Scout choice resolution 58; generated plan-binding failure 20; no executable effect in a clause 15; no official catalog target fixture for `modify_power` 8 and `sacrifice_avatar` 2; typed trigger plan compile failure 6; LIFE timing outside active-field simulation 5; trigger fixture subject/actor mismatch 5; unavailable Hell selection 1. A row can have multiple blockers; counts are not an exclusive partition. No row was demoted from `PARSED_READY` to inflate the verified rate. Full Step 4B-2 validation passed.
+**Unverified blocker counts (overlapping):** timing/event context 96; keyword behavior 74; Scout trigger choice outside the active-clause fixture 29; generated plan-binding failure 13; no executable effect in a clause 15; no official catalog target fixture for `modify_power` 1; typed trigger plan compile failure 3; LIFE timing outside active-field simulation 5; trigger fixture subject/actor mismatch 5; Scout resolution rejection 4; no official Scout selector fixture 2; unavailable Hell selection 1. A row can have multiple blockers; counts are not an exclusive partition. These counts are from the Phase 4B-3 test harness, not mutually exclusive card totals.
 
 ### Phase 4B overlapping unsupported-reason counts
 
@@ -388,6 +388,6 @@ Counts below are overlapping pattern matches across exact database rows; duplica
 
 ### Phase 4B verification boundary
 
-`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 147 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
+`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 144 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
 
-**Step 4B-2 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed.
+**Step 4B-3 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed.

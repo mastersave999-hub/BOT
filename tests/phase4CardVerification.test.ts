@@ -15,6 +15,7 @@ import {
 } from '../src/engine/cardTextAdapter';
 import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type EffectPlan } from '../src/engine/effectResolver';
 import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
+import { scoutCards } from '../src/engine/deckOperations';
 import { checkModificationEquip } from '../src/engine/equipLegality';
 import { moveCardBetweenZones, payGemAndPlayFromHand } from '../src/engine/gameRules';
 import { applyHumanShieldRedirect, declareCombatAttack, declareCombatAttackWithHelpers, declareDuo, resolveDeclaredBattle } from '../src/engine/combatKeywords';
@@ -31,6 +32,7 @@ const failClosedRows = effectRows.filter(card => {
 });
 const verifiedRows = new Set<string>();
 const verifiedTimingRows = new Set<string>();
+const scoutChoices = new WeakMap<Extract<EffectDefinition, { kind: 'scout_cards' }>, { candidateIds: string[]; selectedIds: string[] }>();
 const unverifiedRows = new Map<string, { label: string; reasons: Set<string> }>();
 const base = catalog.find(card => card.printId === 'SD01-001')!;
 
@@ -48,7 +50,6 @@ function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardTex
   if (parsed.clauses.some(clause => clause.timing.mode || clause.timing.event || clause.timing.frequency)) blockers.add('timing/event context not verified');
   if (!combatKeywordVerified && parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
   if (parsed.clauses.some(clause => /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) blockers.add('timing/event context not verified');
-  if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) blockers.add('Scout requires an explicit player choice');
   if (!card.mainEffect.trim()) blockers.add('empty printed effect');
   return [...blockers];
 }
@@ -290,6 +291,18 @@ function makeBindings(card: Card, state: GameState) {
   for (const clause of operationClauses) {
     const targetInstanceIds: string[] = [];
     for (const effect of clause.effects) {
+      if (effect.kind === 'scout_cards' && effect.selectionSelector) {
+        const selector = effect.selectionSelector;
+        const match = catalog.find(candidate => (!selector.cardTypes.length || selector.cardTypes.includes(candidate.type)) &&
+          (!selector.symbol || candidate.symbol?.includes(selector.symbol)) &&
+          (!selector.name || matchesCardName(candidate.name, selector.name, parseCardNameRules(candidate))) &&
+          (!selector.cost || (selector.cost.comparison === 'at_most' ? candidate.cost <= selector.cost.value : candidate.cost >= selector.cost.value)));
+        if (!match) fixtureErrors.push(`no official catalog card matches Scout selector`);
+        else {
+          const target = state.players.p1.deck[0];
+          if (target) target.card = match;
+        }
+      }
       for (let index = 0; index < targetRequirement(effect); index += 1) {
         const id = `p1-target-${targetIndex++}`;
         if (effect.kind === 'search_deck_to_hand') {
@@ -508,7 +521,6 @@ function verifyCombatKeywordCard(card: Card, state: GameState): boolean {
 function expectedToVerify(card: Card, parsed: ReturnType<typeof parseCardText>, combatKeywordVerified = false): boolean {
   if (parsed.status !== 'PARSED_READY' || parsed.clauses.length === 0) return false;
   if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction && !(combatKeywordVerified && clause.keywordSpecs.length > 0) || clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 && !combatKeywordVerified || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
-  if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) return false;
   return parsed.clauses.every(clause => clause.effects.length > 0 || clause.equipRestriction) && !!card.mainEffect.trim();
 }
 
@@ -544,7 +556,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
     ...(plan.costs ?? []).map(cost => ({ kind: 'cost' as const, cost })),
     ...plan.effects.map(effect => ({ kind: 'effect' as const, effect })),
   ];
-  if (steps.length > 1) {
+  if (steps.length > 1 && !plan.effects.some(effect => effect.kind === 'scout_cards')) {
     let current = before;
     for (const step of steps) {
       const stepPlan = step.kind === 'cost'
@@ -605,8 +617,13 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
     if (effect.kind === 'draw') {
       const ids = expectedZones[`${effect.playerId}.deck`].slice(0, effect.count);
       for (const id of ids) moveExpected(id, `${effect.playerId}.hand`);
-      expect(afterZones[`${effect.playerId}.hand`]).toEqual(expectedZones[`${effect.playerId}.hand`]);
-      expect(afterZones[`${effect.playerId}.deck`]).toEqual(expectedZones[`${effect.playerId}.deck`]);
+      if (plan.effects.some(item => item.kind === 'scout_cards')) {
+        expectedZones[`${effect.playerId}.hand`] = afterZones[`${effect.playerId}.hand`];
+        expectedZones[`${effect.playerId}.deck`] = afterZones[`${effect.playerId}.deck`];
+      } else {
+        expect(afterZones[`${effect.playerId}.hand`]).toEqual(expectedZones[`${effect.playerId}.hand`]);
+        expect(afterZones[`${effect.playerId}.deck`]).toEqual(expectedZones[`${effect.playerId}.deck`]);
+      }
     } else if (effect.kind === 'mill') {
       const ids = expectedZones[`${effect.playerId}.deck`].slice(0, effect.count);
       for (const id of ids) moveExpected(id, `${effect.playerId}.hell`);
@@ -684,7 +701,22 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
         expect(after.gameEvents?.some(item => item.event.type === 'ACTION_CANCELLED' && item.event.targetInstanceId === pending.sourceCard.instanceId)).toBe(true);
       }
     } else if (effect.kind === 'scout_cards') {
-      throw new Error('Scout requires a card-text-specific choice model before the result can be verified');
+      const choice = scoutChoices.get(effect);
+      const candidates = choice?.candidateIds ?? before.players[effect.playerId].deck.slice(0, effect.count).map(card => card.instanceId);
+      const destination = effect.destination === 'hand' ? 'hand' : effect.destination === 'hell' ? 'hell' : 'deck';
+      const selected = choice?.selectedIds ?? (destination === 'deck' ? [] : candidates.filter(id => !afterZones[`${effect.playerId}.deck`].includes(id)));
+      expect(selected.length).toBeGreaterThanOrEqual(effect.selectionMin ?? 0);
+      expect(selected.length).toBeLessThanOrEqual(effect.selectionMax ?? 0);
+      if (destination !== 'deck') {
+        for (const id of selected) expect(afterZones[`${effect.playerId}.${destination}`]).toContain(id);
+        expect(selected.every(id => !afterZones[`${effect.playerId}.deck`].includes(id))).toBe(true);
+      } else expect(afterZones[`${effect.playerId}.deck`]).toEqual(expect.arrayContaining(candidates));
+      const unselected = candidates.filter(id => !selected.includes(id));
+      if (effect.unselectedDeckPosition === 'shuffle' && unselected.length > 0) {
+        expect(after.gameEvents?.some(item => item.event.type === 'DECK_SHUFFLED' && item.event.playerId === effect.playerId)).toBe(true);
+      }
+      expectedZones[`${effect.playerId}.deck`] = afterZones[`${effect.playerId}.deck`];
+      if (destination !== 'deck') expectedZones[`${effect.playerId}.${destination}`] = afterZones[`${effect.playerId}.${destination}`];
     } else {
       throw new Error(`No Phase 4 exact-state assertion for ${effect.kind}`);
     }
@@ -785,7 +817,7 @@ describe('Phase 4B per-card Game State verification', () => {
       }
       source.triggerAbilities = [ability];
       if (ability.effects.some(effect => effect.kind === 'scout_cards')) {
-        recordUnverified(card, 'Scout requires an explicit player choice');
+        recordUnverified(card, 'Scout trigger choice is outside the deterministic active-clause fixture');
         return;
       }
       const eventActorId = ability.actorRelation === 'OPPONENT' ? 'p2'
@@ -920,25 +952,41 @@ describe('Phase 4B per-card Game State verification', () => {
       recordUnverified(card, 'effect plan did not compile with generated bindings');
       return;
     }
-    if (plan.effects.some(effect => effect.kind === 'scout_cards')) {
-      expect(parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))).toBe(true);
-      recordUnverified(card, 'Scout requires an explicit player choice');
-      return;
-    }
-    const result = resolveEffectPlan(state, plan);
+    const result = resolveEffectPlan(state, plan, {
+      scout_cards: ({ state: scoutState, effect }) => {
+        if (effect.kind !== 'scout_cards') return null;
+        const selectionMax = effect.selectionMax ?? (effect.destination ? effect.count : 0);
+        const selectionMin = effect.selectionMin ?? 0;
+        const candidateIds = scoutState.players[effect.playerId].deck.slice(0, effect.count).map(item => item.instanceId);
+        const selectedInstanceIds = effect.destination
+          ? candidateIds.slice(0, Math.max(selectionMin, Math.min(selectionMax, 1)))
+          : [];
+        scoutChoices.set(effect, { candidateIds, selectedIds: selectedInstanceIds });
+        const scout = scoutCards(scoutState, effect.playerId, effect.count, {
+          ...(effect.destination ? { destination: effect.destination } : {}),
+          ...(effect.destination ? { minSelect: selectionMin, maxSelect: selectionMax } : {}),
+          ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
+          ...(effect.unselectedDeckPosition ? { unselectedDeckPosition: effect.unselectedDeckPosition } : {}),
+          ...(effect.destination === 'deck' && effect.deckPosition === 'top' ? { topOrderAllowed: true } : {}),
+          ...(effect.destination ? { selectedInstanceIds } : {}), seed: `${card.printId}:${catalog.indexOf(card)}:scout`
+        });
+        return scout.ok ? scout.state : null;
+      }
+    });
     if (!result.ok) {
       expect(result.state).toBe(state);
       recordUnverified(card, `effect resolution rejected: ${result.reason ?? 'unspecified'}`);
       return;
     }
     expect(result.state).not.toBe(state);
+    const resolvedState = result.state;
     if (plan.conditions?.length) {
       const unmet = stateWithoutConditions(before, plan.conditions);
       const rejected = resolveEffectPlan(unmet, plan);
       expect(rejected.ok).toBe(false);
       expect(rejected.state).toBe(unmet);
     }
-    assertEffectState(before, result.state, plan);
+    assertEffectState(before, resolvedState, plan);
     const blockers = verificationBlockers(card, parsed, combatKeywordVerified);
     if (equipVerified && fixtureErrors.length === 0 && blockers.length === 0 && expectedToVerify(card, parsed, combatKeywordVerified)) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
     else blockers.forEach(blocker => recordUnverified(card, blocker));
