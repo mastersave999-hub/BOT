@@ -304,14 +304,14 @@ Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test file
 
 ## 16. Phase 3 — Card Text Adapter dry-run
 
-`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed costs, selectors, durations, keyword specs, name references, and Magic declarations. Batch 1 maps selected Deck search, POWER, Symbol, LIFE and trigger effects. Partial Batch 2 adds selected-Avatar destroy/bounce/banish plus own-deck mill to typed effects, with movement and mill Game State assertions. This is not full Batch 2 coverage: Construct movement, Deck return/order rules, sacrifice, Scout-choice continuation, activated/continuous registration, executable `#` aliases, and Magic-use quota enforcement remain unsupported or incomplete. Unresolved syntax must continue to fail closed; `PARSED_READY` is not per-card verification.
+`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed costs, selectors, durations, keyword specs, name references, and Magic declarations. Batch 1 maps selected Deck search, POWER, Symbol, LIFE and trigger effects. Batch 2 now additionally maps selected Avatar/Construct destroy, bounce and banish; Deck return with shuffle and exact top/bottom placement; sacrifice cost/effect; and Scout through the Phase 2 pending Deck-choice API (including automatic shuffle when no destination is stated). Game State tests exercise these operation paths. Activated/continuous registration, executable `#` aliases, broad compound Scout continuations, and Magic-use quota enforcement remain unsupported or incomplete. Unresolved syntax must continue to fail closed; `PARSED_READY` is not per-card verification.
 
 ### Exact catalog coverage (rows with nonempty `mainEffect`)
 
 | Status | Rows |
 |---|---:|
-| PARSED_READY (typed AST with a complete supported mapping; not per-card verification) | 110 |
-| UNSUPPORTED | 1,719 |
+| PARSED_READY (typed AST with a complete supported mapping; not per-card verification) | 193 |
+| UNSUPPORTED | 1,636 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 | Per-card Game State verified | **0** |
@@ -335,12 +335,12 @@ The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among eff
 
 | Reason | Rows |
 |---|---:|
-| No complete mapped effect clause | 1,673 |
-| Targeted/zone-changing operation without a complete bound plan | 1,302 |
+| No complete mapped effect clause | 1,561 |
+| Targeted/zone-changing operation without a complete bound plan | 1,168 |
 | Condition expression gap | 455 |
-| Unrecognized cost syntax | 217 |
+| Unrecognized cost syntax | 195 |
 | Inherent `#` Rule Text without executable spec | 111 |
-| Cost primitive outside the atomic resolver | 48 |
+| Cost primitive outside the atomic resolver | 47 |
 | Explicit ambiguity marker | 4 |
 
 These are text triage counts, not unique mechanics or verified cards. Adapter tests cover representative catalog rows and name/Magic semantics; Phase 2 resolver tests remain separate typed-Game-State tests. No card is marked Verified in Phase 4.

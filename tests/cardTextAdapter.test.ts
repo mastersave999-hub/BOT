@@ -289,6 +289,115 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(result.state.players.p1.avatarZone[0].card.symbol).toBe('เทพ');
   });
 
+  it('executes Construct destruction, Deck returns with shuffle, and exact top/bottom placement', () => {
+    const base = byPrintId('SD01-001');
+    const initial = gameState();
+    const construct = { ...instance('p1-construct', 'p1'), card: { ...base, type: 'Construct' as const } };
+    initial.players.p1.constructZone.push(construct);
+    const destroy = parseCardText({ ...base, mainEffect: 'ทำลาย Construct ตัวนั้น' });
+    expect(destroy.status).toBe('PARSED_READY');
+    expect(destroy.clauses[0].effects[0]).toMatchObject({ kind: 'destroy_construct' });
+    const destroyPlan = toEffectPlan(destroy.clauses[0], 'p1', [], initial, ['p1-construct']);
+    expect(destroyPlan).not.toBeNull();
+    const destroyed = resolveEffectPlan(initial, destroyPlan!);
+    expect(destroyed.ok).toBe(true);
+    expect(destroyed.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-construct');
+
+    for (const [text, kind, zone] of [
+      ['นำ Construct ตัวนั้นกลับขึ้นมือ', 'bounce_construct', 'hand'],
+      ['เนรเทศ Construct ตัวนั้น', 'banish_construct', 'darkDimension']
+    ] as const) {
+      const state = gameState();
+      state.players.p1.constructZone.push(construct);
+      const parsed = parseCardText({ ...base, mainEffect: text });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].effects[0]).toMatchObject({ kind });
+      const plan = toEffectPlan(parsed.clauses[0], 'p1', [], state, ['p1-construct']);
+      expect(plan).not.toBeNull();
+      const result = resolveEffectPlan(state, plan!);
+      expect(result.ok).toBe(true);
+      expect(result.state.players.p1[zone].map(card => card.instanceId)).toContain('p1-construct');
+    }
+
+    for (const [text, position] of [
+      ['นำ Avatar ตัวนั้นกลับเข้า Deck แล้วสับ Deck', 'shuffle'],
+      ['นำ Avatar ตัวนั้นไว้บนสุดของ Deck', 'top'],
+      ['นำ Avatar ตัวนั้นไว้ใต้ Deck', 'bottom']
+    ] as const) {
+      const state = gameState();
+      state.players.p1.deck.push(instance('p1-deck-2', 'p1'));
+      const parsed = parseCardText({ ...base, mainEffect: text });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].effects[0]).toMatchObject({ kind: 'return_to_deck', position });
+      const plan = toEffectPlan(parsed.clauses[0], 'p1', [], state, ['p1-avatar']);
+      expect(plan).not.toBeNull();
+      const result = resolveEffectPlan(state, plan!);
+      expect(result.ok).toBe(true);
+      const ids = result.state.players.p1.deck.map(card => card.instanceId);
+      if (position === 'top') expect(ids[0]).toBe('p1-avatar');
+      if (position === 'bottom') expect(ids.at(-1)).toBe('p1-avatar');
+      expect(result.state.gameEvents?.some(item => item.event.type === 'DECK_SHUFFLED')).toBe(position === 'shuffle');
+    }
+
+    const ordered = gameState();
+    ordered.players.p1.avatarZone.push({ ...instance('p1-avatar-2', 'p1'), card: base });
+    const orderedText = parseCardText({ ...base, mainEffect: 'นำ Avatar 2 ใบไว้บนสุดของ Deck' });
+    expect(orderedText.status).toBe('PARSED_READY');
+    const orderedPlan = toEffectPlan(orderedText.clauses[0], 'p1', [], ordered, ['p1-avatar', 'p1-avatar-2']);
+    expect(orderedPlan?.effects[0]).toMatchObject({ kind: 'return_to_deck', instanceIds: ['p1-avatar', 'p1-avatar-2'], position: 'top' });
+    const orderedResult = resolveEffectPlan(ordered, orderedPlan!);
+    expect(orderedResult.ok).toBe(true);
+    expect(orderedResult.state.players.p1.deck.slice(0, 2).map(card => card.instanceId)).toEqual(['p1-avatar', 'p1-avatar-2']);
+  });
+
+  it('pays sacrifice costs immediately and executes sacrifice effects through Game State', () => {
+    const base = byPrintId('SD01-001');
+    const cost = parseCardText({ ...base, mainEffect: 'เซ่นไหว้ Avatar 1 ใบ : จั่วการ์ด 1 ใบ' });
+    expect(cost.status).toBe('PARSED_READY');
+    expect(cost.clauses[0].cost).toMatchObject({ kind: 'sacrifice_avatar', count: 1 });
+    const initial = gameState();
+    initial.players.p1.avatarZone[0] = { ...initial.players.p1.avatarZone[0], preventionShields: [{ id: 'test', kind: 'DESTRUCTION', mode: 'AUTOMATIC' }] };
+    const plan = toEffectPlan(cost.clauses[0], 'p1', ['p1-avatar'], initial);
+    expect(plan).not.toBeNull();
+    const paid = resolveEffectPlan(initial, plan!);
+    expect(paid.ok).toBe(true);
+    expect(paid.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-avatar');
+    expect(paid.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
+    expect(initial.players.p1.avatarZone.map(card => card.instanceId)).toContain('p1-avatar');
+
+    const effectState = gameState();
+    const effect = parseCardText({ ...base, mainEffect: 'เซ่นไหว้ Avatar 1 ใบ' });
+    expect(effect.status).toBe('PARSED_READY');
+    expect(effect.clauses[0].effects[0]).toMatchObject({ kind: 'sacrifice_avatar' });
+    const effectPlan = toEffectPlan(effect.clauses[0], 'p1', [], effectState, ['p1-avatar']);
+    expect(effectPlan).not.toBeNull();
+    const sacrificed = resolveEffectPlan(effectState, effectPlan!);
+    expect(sacrificed.ok).toBe(true);
+    expect(sacrificed.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-avatar');
+  });
+
+  it('routes Scout through pending deck choices and automatically shuffles when no destination is given', () => {
+    const base = byPrintId('SD01-001');
+    const initial = gameState();
+    initial.players.p1.deck.push(instance('p1-deck-2', 'p1'));
+    const scout = parseCardText({ ...base, mainEffect: 'สอดแนม 1 ใบ' });
+    expect(scout.status).toBe('PARSED_READY');
+    expect(scout.clauses[0].effects[0]).toMatchObject({ kind: 'scout_cards', count: 1 });
+    const automatic = resolveEffectPlan(initial, toEffectPlan(scout.clauses[0], 'p1')!);
+    expect(automatic.ok).toBe(true);
+    expect(automatic.state.pendingDeckChoice).toBeUndefined();
+    expect(automatic.state.gameEvents?.some(item => item.event.type === 'DECK_SHUFFLED')).toBe(true);
+
+    const routed = parseCardText({ ...base, mainEffect: 'สอดแนม 1 ใบ นำการ์ดใบนั้นขึ้นมือ' });
+    expect(routed.status).toBe('PARSED_READY');
+    expect(routed.clauses[0].effects.some(effect => effect.kind === 'scout_cards' && effect.destination === 'hand')).toBe(true);
+    const routePlan = toEffectPlan(routed.clauses[0], 'p1');
+    expect(routePlan).not.toBeNull();
+    const choice = resolveEffectPlan(initial, routePlan!);
+    expect(choice.ok).toBe(true);
+    expect(choice.state.pendingDeckChoice).toMatchObject({ kind: 'SCOUT', destination: 'hand', candidateInstanceIds: ['p1-deck'] });
+  });
+
   it('executes LIFE flips atomically and blocks turning LIFE face-down while Critical', () => {
     const initial = gameState();
     const lifeCard = { ...instance('p2-life', 'p2'), card: { ...byPrintId('SD01-001'), type: 'Life' as const }, isFaceUp: false };

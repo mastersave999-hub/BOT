@@ -4,6 +4,7 @@ import { runGameTransaction } from './gameTransaction';
 import { preventTargeting } from './prevention';
 import { appendGameEvents } from './gameEvents';
 import { recomputeContinuousEffects } from './continuousEffects';
+import { resolveDeckChoice, scoutCards } from './deckOperations';
 
 export type EffectCondition =
   | { kind: 'player_has_avatar'; playerId: string; nameIncludes: string }
@@ -24,6 +25,10 @@ export type EffectDefinition =
   | { kind: 'destroy_avatar'; targetId: string }
   | { kind: 'bounce_avatar'; targetId: string }
   | { kind: 'banish_avatar'; targetId: string }
+  | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; targetId: string }
+  | { kind: 'return_to_deck'; instanceIds: string[]; position: 'shuffle' | 'top' | 'bottom' }
+  | { kind: 'sacrifice_avatar'; targetId: string }
+  | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom' }
   | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; destination: 'deck' | 'hand' }
@@ -88,7 +93,7 @@ function applyCost(state: GameState, cost: EffectCost): GameState | null {
   const avatar = player.avatarZone.find(item => item.instanceId === cost.instanceId);
   if (!avatar) return null;
   const moved = moveCardBetweenZones(state, {
-    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true
+    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true, playerMandated: true
   });
   if (!moved.ok) return null;
   return moved.state;
@@ -288,6 +293,71 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     });
     return movement.ok ? movement.state : null;
   },
+  destroy_construct: ({ state, plan, effect }) => {
+    if (effect.kind !== 'destroy_construct' && effect.kind !== 'bounce_construct' && effect.kind !== 'banish_construct') return null;
+    const found = state.playerOrder.flatMap(playerId => state.players[playerId].constructZone)
+      .find(card => card.instanceId === effect.targetId && card.card.type === 'Construct');
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const destination = effect.kind === 'bounce_construct' ? 'hand' : effect.kind === 'banish_construct' ? 'darkDimension' : 'hell';
+    const moved = moveCardBetweenZones(state, { instanceId: found.instanceId, actorId: plan.actorId,
+      destination, destinationPlayerId: getOriginalOwnerId(found), effectMove: true, cause: 'EFFECT' });
+    return moved.ok ? moved.state : null;
+  },
+  bounce_construct: ({ state, plan, effect }) => defaultHandlers.destroy_construct({ state, plan, effect }),
+  banish_construct: ({ state, plan, effect }) => defaultHandlers.destroy_construct({ state, plan, effect }),
+  return_to_deck: ({ state, plan, effect }) => {
+    if (effect.kind !== 'return_to_deck' || effect.instanceIds.length === 0 || new Set(effect.instanceIds).size !== effect.instanceIds.length) return null;
+    const fieldAndPrivateCards = state.playerOrder.flatMap(playerId => state.players[playerId].avatarZone.concat(state.players[playerId].constructZone, state.players[playerId].magicZone, state.players[playerId].hell, state.players[playerId].hand));
+    const selected = effect.instanceIds.map(id => fieldAndPrivateCards.find(card => card.instanceId === id));
+    if (selected.some(card => !card || card.card.type === 'Life')) return null;
+    const owners = new Set((selected as CardInstance[]).map(getOriginalOwnerId));
+    if (owners.size !== 1) return null;
+    const ownerId = [...owners][0];
+    const moveOrder = effect.position === 'top' ? [...effect.instanceIds].reverse() : effect.instanceIds;
+    let next = state;
+    for (const instanceId of moveOrder) {
+      const moved = moveCardBetweenZones(next, { instanceId, actorId: plan.actorId,
+        destination: 'deck', destinationPlayerId: ownerId, effectMove: true,
+        deckPosition: effect.position === 'top' ? 'top' : 'bottom' });
+      if (!moved.ok) return null;
+      next = moved.state;
+    }
+    if (effect.position !== 'shuffle') return next;
+    const player = next.players[ownerId];
+    const deck = [...player.deck];
+    const random = deterministicRandom(`${state.id}:${state.turnNumber}:${state.eventLog.length}:return:${effect.instanceIds.join(',')}`);
+    for (let index = deck.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(random() * (index + 1));
+      [deck[index], deck[swapIndex]] = [deck[swapIndex], deck[index]];
+    }
+    const shuffled = { ...next, players: { ...next.players, [player.id]: { ...player, deck } } };
+    return appendGameEvents(shuffled, [{ type: 'DECK_SHUFFLED', playerId: player.id, cardCount: deck.length,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-return-shuffle:${effect.instanceIds.join(',')}` }]);
+  },
+  sacrifice_avatar: ({ state, plan, effect }) => {
+    if (effect.kind !== 'sacrifice_avatar') return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found || found.avatar.controllerId !== plan.actorId) return null;
+    const moved = moveCardBetweenZones(state, { instanceId: effect.targetId, actorId: plan.actorId,
+      destination: 'hell', destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true, playerMandated: true });
+    return moved.ok ? moved.state : null;
+  },
+  scout_cards: ({ state, effect }) => {
+    if (effect.kind !== 'scout_cards') return null;
+    const result = scoutCards(state, effect.playerId, effect.count, {
+      ...(effect.destination ? { destination: effect.destination } : {}),
+      ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
+      ...(effect.destination === 'deck' && effect.deckPosition ? { topOrderAllowed: effect.deckPosition === 'top' } : {})
+    });
+    if (!result.ok) return null;
+    if (effect.destination) return result.state;
+    const pending = result.state.pendingDeckChoice;
+    if (!pending) return null;
+    const completed = resolveDeckChoice(result.state, effect.playerId, [], pending.expectedRevision);
+    return completed.ok ? completed.state : null;
+  },
   mill: ({ state, plan, effect }) => {
     if (effect.kind !== 'mill' || !Number.isSafeInteger(effect.count) || effect.count < 0) return null;
     const player = state.players[effect.playerId];
@@ -412,7 +482,8 @@ function resolveEffectPlanInTransaction(
     if (!effect || !Object.hasOwn(defaultHandlers, effect.kind)) return fail(state, 'unsupported effect');
     if ('count' in effect && (!Number.isInteger(effect.count) || effect.count < 0)) return fail(state, 'invalid effect count');
     if ('amount' in effect && !Number.isFinite(effect.amount)) return fail(state, 'invalid effect value');
-    if (('targetId' in effect) && effect.kind !== 'cancel_chain_entry' && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
+    if (('targetId' in effect) && effect.kind !== 'cancel_chain_entry' &&
+      !state.playerOrder.some(playerId => Object.values(state.players[playerId]).some(zone => Array.isArray(zone) && zone.some(card => card && typeof card === 'object' && 'instanceId' in card && card.instanceId === effect.targetId)))) return fail(state, 'invalid effect target');
   }
   for (const cost of plannedCosts) {
     if (cost.playerId !== plan.actorId) return fail(state, 'cost payer must be the acting player');

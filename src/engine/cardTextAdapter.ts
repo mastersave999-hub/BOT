@@ -12,6 +12,10 @@ export type CardTextEffect =
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
   | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
   | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
+  | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
+  | { kind: 'return_to_deck'; target: 'selected_card'; count: number; position: 'shuffle' | 'top' | 'bottom' }
+  | { kind: 'sacrifice_avatar'; target: 'selected_avatar' }
+  | { kind: 'scout_cards'; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom' }
   | { kind: 'mill_self'; count: number };
 export type CardTextKeywordSpec = {
   keyword: CardTextKeyword;
@@ -149,7 +153,7 @@ function parseTiming(source: string): CardTextTiming {
 function parseCost(source: string): CardTextCost | undefined {
   let match = source.match(/ทิ้ง(?:การ์ด|Avatar|Construct|Magic)?[^:]{0,100}?(\d+)\s*ใบ/);
   if (match) return { kind: 'discard_from_hand', count: Number(match[1]), selector: parseSelector(source) };
-  match = source.match(/เซ่นไหว้\s*(?:Avatar)?\s*(\d+)\s*ใบ/);
+  match = source.match(/เซ่นไหว้[^:]{0,100}?(\d+)\s*ใบ/);
   if (match) return { kind: 'sacrifice_avatar', count: Number(match[1]), selector: parseSelector(source) };
   match = source.match(/ธรณีสูบ[^\d]*(\d+)\s*ใบ/);
   if (match) return { kind: 'mill', count: Number(match[1]) };
@@ -197,11 +201,25 @@ function parseClause(source: string): ParsedCardTextClause {
     const destroy = movementTarget && /ทำลาย\s*(?:Avatar|การ์ดใบนี้)/.test(part);
     const bounce = movementTarget && /กลับขึ้นมือ/.test(part);
     const banish = movementTarget && /เนรเทศ/.test(part);
+    const constructTarget = /Construct/.test(part) && /ตัวนั้น|ใบนั้น|Construct\s+1\s*ใบ/.test(part);
+    const destroyConstruct = constructTarget && /ทำลาย\s*(?:Construct|การ์ดใบนี้)/.test(part);
+    const deckReturn = part.match(/นำ\s+(?:การ์ด|Avatar|Construct)?[^:]{0,80}(?:กลับเข้า\s*Deck|ไว้บนสุดของ\s*Deck|ไว้ใต้\s*Deck)/);
+    const sacrificeEffect = /เซ่นไหว้/.test(part) && !split.costText;
+    const scout = part.match(/สอดแนม[^\d]{0,50}(\d+)\s*ใบ/);
     const mill = part.match(/ธรณีสูบ(?:\s*\([^)]*\))?[^\d]*(\d+)\s*ใบ/);
     const duration = /จนจบการต่อสู้/.test(part) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(part) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(part) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(part) ? 'NEXT_DRAW_PHASE' : undefined;
     if (destroy) effects.push({ kind: 'destroy_avatar', target: 'selected_avatar' });
     else if (bounce) effects.push({ kind: 'bounce_avatar', target: 'selected_avatar' });
     else if (banish) effects.push({ kind: 'banish_avatar', target: 'selected_avatar' });
+    else if (destroyConstruct) effects.push({ kind: 'destroy_construct', target: 'selected_construct' });
+    else if (constructTarget && /กลับขึ้นมือ/.test(part)) effects.push({ kind: 'bounce_construct', target: 'selected_construct' });
+    else if (constructTarget && /เนรเทศ/.test(part)) effects.push({ kind: 'banish_construct', target: 'selected_construct' });
+    else if (deckReturn) effects.push({ kind: 'return_to_deck', target: 'selected_card',
+      count: Number(deckReturn[0].match(/(\d+)\s*ใบ/)?.[1] ?? 1),
+      position: /กลับเข้า\s*Deck/.test(deckReturn[0]) ? 'shuffle' : /บนสุด/.test(deckReturn[0]) ? 'top' : 'bottom' });
+    else if (sacrificeEffect && /Avatar/.test(part)) effects.push({ kind: 'sacrifice_avatar', target: 'selected_avatar' });
+    else if (scout) effects.push({ kind: 'scout_cards', count: Number(scout[1]),
+      ...( /ขึ้นมือ/.test(part) ? { destination: 'hand' as const } : /ลงนรก/.test(part) ? { destination: 'hell' as const } : /ไว้บนสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'top' as const } : /ไว้ใต้\s*Deck|ล่างสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'bottom' as const } : {}) });
     else if (mill) effects.push({ kind: 'mill_self', count: Number(mill[1]) });
     else if (draw) effects.push({ kind: 'draw_self', count: Number(draw[1]) });
     else if (search) effects.push({ kind: 'search_deck_to_hand', cardType: search[1],
@@ -226,7 +244,7 @@ function parseClause(source: string): ParsedCardTextClause {
     }
   }
   if (split.costText && !cost) unresolved.push('cost syntax is not represented by a validated typed cost primitive');
-  if (split.costText && cost && cost.kind !== 'discard_from_hand') unresolved.push('typed cost primitive is not part of the Phase 2 atomic effect resolver');
+  if (split.costText && cost && cost.kind !== 'discard_from_hand' && cost.kind !== 'sacrifice_avatar') unresolved.push('typed cost primitive is not part of the Phase 2 atomic effect resolver');
   const keywordOnly = effects.length === 0 && keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD') && !split.costText && !/(?:เลือก|จั่ว|POWER\s*[+-]|POWER\s*(?:เท่ากับ|เป็น)|หงาย LIFE|คว่ำ LIFE|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText);
   if (!effects.length && !keywordOnly && !unresolved.length) unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
   const duration = /จนจบการต่อสู้/.test(effectText) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(effectText) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(effectText) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(effectText) ? 'NEXT_DRAW_PHASE' : undefined;
@@ -256,6 +274,16 @@ export function toEffectDefinitions(
         : effect.kind === 'bounce_avatar' ? { kind: 'bounce_avatar', targetId }
         : { kind: 'banish_avatar', targetId };
     }
+    if (effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct')
+      return { kind: effect.kind, targetId: targetInstanceIds[targetIndex++] };
+    if (effect.kind === 'return_to_deck') {
+      const instanceIds = targetInstanceIds.slice(targetIndex, targetIndex + effect.count);
+      targetIndex += effect.count;
+      return { kind: 'return_to_deck', instanceIds, position: effect.position };
+    }
+    if (effect.kind === 'sacrifice_avatar') return { kind: 'sacrifice_avatar', targetId: targetInstanceIds[targetIndex++] };
+    if (effect.kind === 'scout_cards') return { kind: 'scout_cards', playerId: actorId, count: effect.count,
+      ...(effect.destination ? { destination: effect.destination } : {}), ...(effect.deckPosition ? { deckPosition: effect.deckPosition } : {}) };
     if (effect.kind === 'mill_self') return { kind: 'mill', playerId: actorId, count: effect.count };
     if (effect.kind === 'search_deck_to_hand') {
       const instanceIds = targetInstanceIds.slice(targetIndex, targetIndex + effect.count);
@@ -292,20 +320,25 @@ export function toEffectPlan(
 ): EffectPlan | null {
   if (clause.unresolved.length || clause.effects.length === 0) return null;
   const requiredBindings = clause.effects.reduce((total, effect) => total +
-    (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' ? 1 : effect.kind === 'search_deck_to_hand' ? effect.count : 0), 0);
+    (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' ? effect.count : effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'sacrifice_avatar' ? 1 : 0), 0);
   if (targetInstanceIds.length !== requiredBindings || new Set(targetInstanceIds).size !== targetInstanceIds.length) return null;
   if (requiredBindings > 0) {
     if (!state) return null;
     const selector = clause.selector;
     let bindingIndex = 0;
     for (const effect of clause.effects) {
-      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar') {
-        const targetId = targetInstanceIds[bindingIndex++];
-        const target = Object.values(state.players).flatMap(player => player.avatarZone).find(card => card.instanceId === targetId);
-        if (!target || (selector?.cardTypes.length && !selector.cardTypes.includes(target.card.type)) ||
+      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'return_to_deck' || effect.kind === 'sacrifice_avatar') {
+        const targetCount = effect.kind === 'return_to_deck' ? effect.count : 1;
+        const targetIds = targetInstanceIds.slice(bindingIndex, bindingIndex + targetCount);
+        bindingIndex += targetCount;
+        const fieldAndPrivateCards = Object.values(state.players).flatMap(player => [...player.avatarZone, ...player.constructZone, ...player.magicZone, ...player.hand, ...player.hell, ...player.deck]);
+        const requiredType = effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' ? 'Construct' : effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'sacrifice_avatar' || effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' ? 'Avatar' : undefined;
+        const targets = targetIds.map(targetId => fieldAndPrivateCards.find(card => card.instanceId === targetId));
+        if (targets.some(target => !target || (requiredType && target.card.type !== requiredType) || (selector?.cardTypes.length && !selector.cardTypes.includes(target.card.type)) ||
           (selector?.symbol !== undefined && !target.card.symbol?.includes(selector.symbol)) ||
           (selector?.controller === 'self' && target.controllerId !== actorId) ||
-          (selector?.controller === 'opponent' && target.controllerId === actorId)) return null;
+          (selector?.controller === 'opponent' && target.controllerId === actorId) ||
+          (effect.kind === 'sacrifice_avatar' && target.controllerId !== actorId))) return null;
       } else if (effect.kind === 'search_deck_to_hand') {
         const player = state.players[actorId];
         const selected = targetInstanceIds.slice(bindingIndex, bindingIndex + effect.count);
@@ -319,17 +352,23 @@ export function toEffectPlan(
   }
   const costs: EffectCost[] = [];
   if (clause.cost) {
-    if (clause.cost.kind !== 'discard_from_hand' || costInstanceIds.length !== clause.cost.count || !state ||
-      new Set(costInstanceIds).size !== costInstanceIds.length) return null;
+    if (costInstanceIds.length !== clause.cost.count || !state || new Set(costInstanceIds).size !== costInstanceIds.length) return null;
     const player = state.players[actorId];
-    const selected = costInstanceIds.map(id => player?.hand.find(card => card.instanceId === id));
-    if (!player || selected.some(card => !card)) return null;
-    const selector = clause.cost.selector;
-    if (selector && selected.some(card => !card ||
-      (selector.cardTypes.length > 0 && !selector.cardTypes.includes(card.card.type)) ||
-      (selector.symbol !== undefined && card.card.symbol !== selector.symbol) ||
-      (selector.zones.includes('บนมือ') === false))) return null;
-    costs.push({ kind: 'discard_from_hand', playerId: actorId, instanceIds: [...costInstanceIds] });
+    const selector = 'selector' in clause.cost ? clause.cost.selector : undefined;
+    if (!player) return null;
+    if (clause.cost.kind === 'discard_from_hand') {
+      const selected = costInstanceIds.map(id => player.hand.find(card => card.instanceId === id));
+      if (selected.some(card => !card)) return null;
+      if (selector && selected.some(card => !card || (selector.cardTypes.length > 0 && !selector.cardTypes.includes(card.card.type)) ||
+        (selector.symbol !== undefined && card.card.symbol !== selector.symbol))) return null;
+      costs.push({ kind: 'discard_from_hand', playerId: actorId, instanceIds: [...costInstanceIds] });
+    } else if (clause.cost.kind === 'sacrifice_avatar') {
+      const selected = costInstanceIds.map(id => player.avatarZone.find(card => card.instanceId === id));
+      if (selected.some(card => !card || card.card.type !== 'Avatar' || card.controllerId !== actorId ||
+        (selector?.cardTypes.length && !selector.cardTypes.includes(card.card.type)) ||
+        (selector?.symbol && !card.card.symbol?.includes(selector.symbol)))) return null;
+      costs.push(...costInstanceIds.map(instanceId => ({ kind: 'sacrifice_avatar' as const, playerId: actorId, instanceId })));
+    } else return null;
   }
   const lifeEffect = clause.effects.find((effect): effect is Extract<CardTextEffect, { kind: 'flip_life' }> => effect.kind === 'flip_life');
   let targetPlayerId: string | undefined;
