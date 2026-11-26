@@ -10,7 +10,9 @@ export type CardTextEffect =
   | { kind: 'set_power'; value: number; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
-  | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean };
+  | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
+  | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
+  | { kind: 'mill_self'; count: number };
 export type CardTextKeywordSpec = {
   keyword: CardTextKeyword;
   kind: 'COMBAT_KEYWORD' | 'TRIGGER' | 'ACTIVATED' | 'CONTINUOUS' | 'ONCE_PER_TURN' | 'INHERENT_RULE';
@@ -191,8 +193,17 @@ function parseClause(source: string): ParsedCardTextClause {
     const setPower = part.match(/POWER\s*(?:เท่ากับ|เป็น)\s*(\d+)\b/i);
     const symbolChange = part.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+จนจบ(?:การต่อสู้|การโจมตี|เทิร์น)|\s+จนถึง Draw Phase ถัดไป|$)/i);
     const search = part.match(/นำ\s+(Avatar|Construct|Magic)\s+ชื่อ\s+(?:\"([^\"]+)\"|([^\s]+(?:\s+[^\s]+)*?))\s+(\d+)\s*ใบจาก\s+Deck\s+ขึ้นมือ(?:\s+หลังจากนั้นสับ\s+Deck)?/i);
+    const movementTarget = /Avatar/.test(part) && /ตัวนั้น|ใบนั้น|Avatar\s+1\s*ใบ/.test(part);
+    const destroy = movementTarget && /ทำลาย\s*(?:Avatar|การ์ดใบนี้)/.test(part);
+    const bounce = movementTarget && /กลับขึ้นมือ/.test(part);
+    const banish = movementTarget && /เนรเทศ/.test(part);
+    const mill = part.match(/ธรณีสูบ(?:\s*\([^)]*\))?[^\d]*(\d+)\s*ใบ/);
     const duration = /จนจบการต่อสู้/.test(part) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(part) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(part) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(part) ? 'NEXT_DRAW_PHASE' : undefined;
-    if (draw) effects.push({ kind: 'draw_self', count: Number(draw[1]) });
+    if (destroy) effects.push({ kind: 'destroy_avatar', target: 'selected_avatar' });
+    else if (bounce) effects.push({ kind: 'bounce_avatar', target: 'selected_avatar' });
+    else if (banish) effects.push({ kind: 'banish_avatar', target: 'selected_avatar' });
+    else if (mill) effects.push({ kind: 'mill_self', count: Number(mill[1]) });
+    else if (draw) effects.push({ kind: 'draw_self', count: Number(draw[1]) });
     else if (search) effects.push({ kind: 'search_deck_to_hand', cardType: search[1],
       name: createNameReference((search[2] ?? search[3]).trim(), !!search[2]), count: Number(search[4]), shuffle: /สับ\s+Deck/i.test(part) });
     else if (flip && /(ฝ่ายตรงข้าม|อีกฝ่าย|ของเรา|ฝ่ายเรา)/.test(part)) {
@@ -239,6 +250,13 @@ export function toEffectDefinitions(
       kind: 'flip_life', playerId: targetPlayerId ?? (effect.player === 'self' ? actorId : ''),
       face: effect.face, count: effect.count, allowWhileCritical: effect.allowWhileCritical
     };
+    if (effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar') {
+      const targetId = targetInstanceIds[targetIndex++];
+      return effect.kind === 'destroy_avatar' ? { kind: 'destroy_avatar', targetId }
+        : effect.kind === 'bounce_avatar' ? { kind: 'bounce_avatar', targetId }
+        : { kind: 'banish_avatar', targetId };
+    }
+    if (effect.kind === 'mill_self') return { kind: 'mill', playerId: actorId, count: effect.count };
     if (effect.kind === 'search_deck_to_hand') {
       const instanceIds = targetInstanceIds.slice(targetIndex, targetIndex + effect.count);
       targetIndex += effect.count;
@@ -256,7 +274,7 @@ export function toEffectDefinitions(
       layer: 1,
       expiresAt: effect.duration === 'NEXT_DRAW_PHASE' ? 'DRAW_PHASE' : effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 'END_OF_BATTLE' : 'END_OF_TURN'
     };
-    return {
+    if (effect.kind === 'modify_power') return {
       kind: 'modify_power', targetId, amount: effect.amount,
       layer: effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 4 : 1,
       expiresAt: effect.duration === 'NEXT_DRAW_PHASE' ? 'DRAW_PHASE' : effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 'END_OF_BATTLE' : 'END_OF_TURN'
@@ -274,14 +292,14 @@ export function toEffectPlan(
 ): EffectPlan | null {
   if (clause.unresolved.length || clause.effects.length === 0) return null;
   const requiredBindings = clause.effects.reduce((total, effect) => total +
-    (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' ? 1 : effect.kind === 'search_deck_to_hand' ? effect.count : 0), 0);
+    (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' ? 1 : effect.kind === 'search_deck_to_hand' ? effect.count : 0), 0);
   if (targetInstanceIds.length !== requiredBindings || new Set(targetInstanceIds).size !== targetInstanceIds.length) return null;
   if (requiredBindings > 0) {
     if (!state) return null;
     const selector = clause.selector;
     let bindingIndex = 0;
     for (const effect of clause.effects) {
-      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol') {
+      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar') {
         const targetId = targetInstanceIds[bindingIndex++];
         const target = Object.values(state.players).flatMap(player => player.avatarZone).find(card => card.instanceId === targetId);
         if (!target || (selector?.cardTypes.length && !selector.cardTypes.includes(target.card.type)) ||

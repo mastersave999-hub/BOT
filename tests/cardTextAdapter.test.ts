@@ -40,6 +40,36 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(parsed.reason).toContain('typed');
   });
 
+  it('compiles and executes Thai destroy, bounce, banish, and mill clauses in Game State', () => {
+    const base = byPrintId('SD01-001');
+    const cases = [
+      ['ทำลาย Avatar ตัวนั้น', 'destroy_avatar', 'hell'],
+      ['นำ Avatar ตัวนั้นกลับขึ้นมือ', 'bounce_avatar', 'hand'],
+      ['เนรเทศ Avatar ตัวนั้น', 'banish_avatar', 'darkDimension']
+    ] as const;
+    for (const [text, kind, destination] of cases) {
+      const parsed = parseCardText({ ...base, mainEffect: text });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].effects[0]).toMatchObject({ kind });
+      const initial = gameState();
+      const plan = toEffectPlan(parsed.clauses[0], 'p1', [], initial, ['p1-avatar']);
+      expect(plan).not.toBeNull();
+      const result = resolveEffectPlan(initial, plan!);
+      expect(result.ok).toBe(true);
+      expect(result.state.players.p1[destination as 'hell' | 'hand' | 'darkDimension'].map(card => card.instanceId)).toContain('p1-avatar');
+      expect(initial.players.p1.avatarZone.map(card => card.instanceId)).toContain('p1-avatar');
+    }
+
+    const milled = parseCardText({ ...base, mainEffect: 'ธรณีสูบ 1 ใบ' });
+    expect(milled.status).toBe('PARSED_READY');
+    const initial = gameState();
+    const result = resolveEffectPlan(initial, toCardTextEffectPlan(milled, 'p1')!);
+    expect(result.ok).toBe(true);
+    expect(result.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-deck');
+    expect(result.state.players.p1.deck).toHaveLength(0);
+    expect(result.state.gameEvents?.some(item => item.event.type === 'PLAYER_DECKED_OUT')).toBe(true);
+  });
+
   it('parses Cost : Effect into a selector-bearing typed cost and defers concrete payment binding', () => {
     const parsed = parseCardText(byPrintId('SD01-018'));
     const clause = parsed.clauses.find(item => item.costEffectSeparator === ':');

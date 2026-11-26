@@ -23,6 +23,8 @@ export type EffectDefinition =
   | { kind: 'reset_power'; targetId: string }
   | { kind: 'destroy_avatar'; targetId: string }
   | { kind: 'bounce_avatar'; targetId: string }
+  | { kind: 'banish_avatar'; targetId: string }
+  | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; destination: 'deck' | 'hand' }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string }
@@ -273,6 +275,45 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
         ? { ...item, isRested: false, layerModifiers: [], attachedInstances: [] }
         : item)
     } } };
+  },
+  banish_avatar: ({ state, plan, effect }) => {
+    if (effect.kind !== 'banish_avatar') return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const movement = moveCardBetweenZones(state, {
+      instanceId: effect.targetId, actorId: plan.actorId, destination: 'darkDimension',
+      destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true, cause: 'EFFECT'
+    });
+    return movement.ok ? movement.state : null;
+  },
+  mill: ({ state, plan, effect }) => {
+    if (effect.kind !== 'mill' || !Number.isSafeInteger(effect.count) || effect.count < 0) return null;
+    const player = state.players[effect.playerId];
+    if (!player) return null;
+    let next = state;
+    const milled: string[] = [];
+    for (const card of player.deck.slice(0, effect.count)) {
+      const moved = moveCardBetweenZones(next, {
+        instanceId: card.instanceId, actorId: plan.actorId, destination: 'hell',
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true, cause: 'EFFECT'
+      });
+      if (!moved.ok) return null;
+      next = moved.state;
+      milled.push(card.instanceId);
+    }
+    const emitted = [];
+    if (milled.length) emitted.push({
+      type: 'DECK_MILLED' as const, playerId: effect.playerId, cardInstanceIds: milled,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-mill:${milled.join(',')}`
+    });
+    if (effect.count > 0 && next.players[effect.playerId].deck.length === 0) emitted.push({
+      type: 'PLAYER_DECKED_OUT' as const, playerId: effect.playerId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-deck-out:${effect.playerId}`
+    });
+    if (emitted.length) next = appendGameEvents(next, emitted);
+    return next;
   },
   destroy_opponent_avatars: ({ state, plan, effect }) => {
     if (effect.kind !== 'destroy_opponent_avatars' || effect.actorId !== plan.actorId) return null;

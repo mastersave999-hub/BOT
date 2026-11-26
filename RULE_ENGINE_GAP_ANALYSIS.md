@@ -304,14 +304,14 @@ Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test file
 
 ## 16. Phase 3 — Card Text Adapter dry-run
 
-`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed costs, selectors, durations, keyword specs, name references, and Magic declarations. Batch 1 adds ordered clause plans to the existing atomic resolver, explicit selected-card Deck searches and shuffle, selected-Avatar POWER add/set (including layer/duration semantics), Symbol change, and LIFE flip effects with Critical-state enforcement. SD02-001, SD01-005, SD01-018, compound draw, POWER, Symbol, LIFE, and Unity each have Game State coverage. The trigger adapter can compile supported timing events into the Phase 2 `TriggerAbility` type. It does not claim complete Phase 2 wiring: continuous/aura source registration, generic activated ability execution, unavailable/specific event discrimination, and executable `#` name/deck rules remain fail-closed. Conditions, selector/cost syntax outside the implemented subset, and every unresolved clause still clear all effects for the card.
+`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed costs, selectors, durations, keyword specs, name references, and Magic declarations. Batch 1 maps selected Deck search, POWER, Symbol, LIFE and trigger effects. Partial Batch 2 adds selected-Avatar destroy/bounce/banish plus own-deck mill to typed effects, with movement and mill Game State assertions. This is not full Batch 2 coverage: Construct movement, Deck return/order rules, sacrifice, Scout-choice continuation, activated/continuous registration, executable `#` aliases, and Magic-use quota enforcement remain unsupported or incomplete. Unresolved syntax must continue to fail closed; `PARSED_READY` is not per-card verification.
 
 ### Exact catalog coverage (rows with nonempty `mainEffect`)
 
 | Status | Rows |
 |---|---:|
-| PARSED_READY (typed AST with a complete supported mapping; not per-card verification) | 80 |
-| UNSUPPORTED | 1,749 |
+| PARSED_READY (typed AST with a complete supported mapping; not per-card verification) | 110 |
+| UNSUPPORTED | 1,719 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 | Per-card Game State verified | **0** |
@@ -335,8 +335,8 @@ The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among eff
 
 | Reason | Rows |
 |---|---:|
-| No complete mapped effect clause | 1,722 |
-| Targeted/zone-changing operation without a complete bound plan | 1,358 |
+| No complete mapped effect clause | 1,673 |
+| Targeted/zone-changing operation without a complete bound plan | 1,302 |
 | Condition expression gap | 455 |
 | Unrecognized cost syntax | 217 |
 | Inherent `#` Rule Text without executable spec | 111 |
