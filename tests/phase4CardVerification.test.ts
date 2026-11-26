@@ -43,7 +43,7 @@ function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardTex
   if (parsed.clauses.some(clause => clause.timing.mode || clause.timing.event || clause.timing.frequency)) blockers.add('timing/event context not verified');
   if (parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
   if (parsed.clauses.some(clause => /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) blockers.add('timing/event context not verified');
-  if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) blockers.add('Scout requires player choice');
+  if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) blockers.add('Scout requires an explicit player choice');
   if (!card.mainEffect.trim()) blockers.add('empty printed effect');
   return [...blockers];
 }
@@ -530,7 +530,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
         expect(after.gameEvents?.some(item => item.event.type === 'ACTION_CANCELLED' && item.event.targetInstanceId === pending.sourceCard.instanceId)).toBe(true);
       }
     } else if (effect.kind === 'scout_cards') {
-      throw new Error('Scout requires an explicit player-choice resolution and is not verified by an automatic selection');
+      throw new Error('Scout requires a card-text-specific choice model before the result can be verified');
     } else {
       throw new Error(`No Phase 4 exact-state assertion for ${effect.kind}`);
     }

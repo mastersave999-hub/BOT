@@ -477,7 +477,7 @@ export function toEffectPlan(
         const targetCount = effect.kind === 'return_to_deck' || effect.kind === 'recover_from_hell' ? effect.count : 1;
         const targetIds = targetInstanceIds.slice(bindingIndex, bindingIndex + targetCount);
         bindingIndex += targetCount;
-        const fieldAndPrivateCards = Object.values(state.players).flatMap(player => [...player.avatarZone, ...player.constructZone, ...player.magicZone, ...player.hand, ...player.hell, ...player.deck]);
+        const fieldAndPrivateCards = Object.values(state.players).flatMap(player => [...player.avatarZone, ...player.constructZone, ...player.magicZone, ...player.hand, ...player.hell, ...player.deck, ...player.lifeDeck]);
         const requiredType = effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' ? 'Construct' : effect.kind === 'recover_from_hell' ? effect.cardType : effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'sacrifice_avatar' || effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'summon_from_hell' ? 'Avatar' : undefined;
         const targets = targetIds.map(targetId => fieldAndPrivateCards.find(card => card.instanceId === targetId));
         const matchesZoneSelector = (targetId: string) => {
@@ -717,6 +717,9 @@ export function parseCardText(card: Card): CardTextAdapterResult {
   if (ruleTexts.length > executableNameRuleCount) reasons.push('inherent # Rule Text is retained as rule metadata but has no complete executable specification');
   if (taggedMagic.length > 1 || overrideMagic.length > 1) reasons.push('multiple or conflicting Magic type declarations');
   if (taggedMagic.length > 0 && overrideMagic.length > 0 && (taggedMagic.length !== 1 || overrideMagic.length !== 1)) reasons.push('cannot disambiguate mixed Magic-use declarations');
+  const hasExecutableRule = clauses.some(clause => clause.effects.length > 0 || clause.equipRestriction !== undefined ||
+    clause.keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD')) || continuousEffects.length > 0;
+  if (!hasExecutableRule) reasons.push('card has no executable effect, combat keyword, equip restriction, or continuous rule');
   if (AMBIGUOUS_WORDING.test(source)) reasons.push('wording explicitly matches an unresolved or ambiguous-rule marker');
   const status: CardTextStatus = AMBIGUOUS_WORDING.test(source) || reasons.some(reason => /conflicting|cannot disambiguate|ambiguous-rule/.test(reason))
     ? 'AMBIGUOUS' : reasons.length ? 'UNSUPPORTED' : 'PARSED_READY';
