@@ -16,6 +16,8 @@ import {
 import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type EffectPlan } from '../src/engine/effectResolver';
 import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
 import { checkModificationEquip } from '../src/engine/equipLegality';
+import { moveCardBetweenZones, payGemAndPlayFromHand } from '../src/engine/gameRules';
+import { finishEndPhaseTurn, transitionGamePhase } from '../src/engine/turnEngine';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
 const catalog = JSON.parse(readFileSync(new URL('../cards_clean.json', import.meta.url), 'utf8')) as Card[];
@@ -26,6 +28,7 @@ const failClosedRows = effectRows.filter(card => {
   return parsed.status === 'UNSUPPORTED' && parsed.reason?.includes('multi-player target resolution');
 });
 const verifiedRows = new Set<string>();
+const verifiedTimingRows = new Set<string>();
 const unverifiedRows = new Map<string, { label: string; reasons: Set<string> }>();
 const base = catalog.find(card => card.printId === 'SD01-001')!;
 
@@ -254,6 +257,25 @@ function verifyEquipRestrictions(card: Card, parsed: ReturnType<typeof parseCard
   expect(checkModificationEquip(card, legalTarget)).toMatchObject({ legal: true, restricted: true });
   expect(checkModificationEquip(card, illegalTarget).legal).toBe(false);
   return clauses.every(clause => clause.equipRestriction !== undefined);
+}
+
+function exactPaymentCards(target: Card, requiredCost: number): Card[] | null {
+  if (requiredCost === 0) return [];
+  const candidates = [...new Map(catalog.filter(card => (card.gem ?? 0) > 0 &&
+    ((card.gemColor ?? card.color) === 'ไร้สี' || (card.gemColor ?? card.color) === target.color))
+    .map(card => [card.gem, card])).values()];
+  const search = (start: number, remaining: number, selected: Card[]): Card[] | null => {
+    if (remaining === 0) return selected;
+    for (let index = start; index < candidates.length; index += 1) {
+      const gem = candidates[index].gem ?? 0;
+      if (gem <= remaining) {
+        const result = search(index + 1, remaining - gem, [...selected, candidates[index]]);
+        if (result) return result;
+      }
+    }
+    return null;
+  };
+  return search(0, requiredCost, []);
 }
 
 function makeBindings(card: Card, state: GameState) {
@@ -544,6 +566,37 @@ describe('Phase 4B per-card Game State verification', () => {
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 
+  it('gates พอดี triggers on exact GEM paid, not legal overpayment', () => {
+    const exactState = makeState();
+    const exactTarget = instance('exact-target', 'p1', { ...base, cost: 2, type: 'Avatar' }, {
+      triggerAbilities: [{ id: 'exact-juti', eventType: 'AVATAR_SUMMONED', eventSubject: 'SOURCE',
+        requiresExactGemPaid: true, effects: [{ kind: 'draw', playerId: 'p1', count: 1 }] }]
+    });
+    const exactGem = instance('exact-gem', 'p1', { ...base, type: 'Magic', gem: 2, gemColor: 'แดง', color: 'แดง' });
+    exactState.players.p1.hand.push(exactTarget, exactGem);
+    const exactSummon = payGemAndPlayFromHand(exactState, 'p1', exactTarget.instanceId, [exactGem.instanceId]);
+    expect(exactSummon.ok).toBe(true);
+    expect(exactSummon.exactGemPaid).toBe(true);
+    expect(exactSummon.state.gameEvents?.some(item => item.event.type === 'AVATAR_SUMMONED' && item.event.exactGemPaid)).toBe(true);
+    expect(resolveTriggerChain(exactSummon.state).players.p1.hand.map(card => card.instanceId)).toEqual(['p1-deck-0']);
+
+    const overpayState = makeState();
+    const overpayTarget = instance('overpay-target', 'p1', { ...base, cost: 4, type: 'Avatar' }, {
+      triggerAbilities: [{ id: 'exact-juti', eventType: 'AVATAR_SUMMONED', eventSubject: 'SOURCE',
+        requiresExactGemPaid: true, effects: [{ kind: 'draw', playerId: 'p1', count: 1 }] }]
+    });
+    const gemThree = instance('gem-three', 'p1', { ...base, type: 'Magic', gem: 3, gemColor: 'แดง', color: 'แดง' });
+    const gemTwo = instance('gem-two', 'p1', { ...base, type: 'Magic', gem: 2, gemColor: 'แดง', color: 'แดง' });
+    overpayState.players.p1.hand.push(overpayTarget, gemThree, gemTwo);
+    const overpaidSummon = payGemAndPlayFromHand(overpayState, 'p1', overpayTarget.instanceId,
+      [gemThree.instanceId, gemTwo.instanceId]);
+    expect(overpaidSummon.ok).toBe(true);
+    expect(overpaidSummon.exactGemPaid).toBe(false);
+    expect(overpaidSummon.state.reactionWindow).toBeUndefined();
+    expect(overpaidSummon.state.players.p1.hand).toHaveLength(0);
+    expect(overpaidSummon.state.players.p1.hell.map(card => card.instanceId)).toEqual(['gem-three', 'gem-two']);
+  });
+
   it.each(failClosedRows.map((card, rowIndex) => [rowIndex + 1, card] as const))('fails closed for unsupported multi-player row %i: %s', (_rowNumber, card) => {
     const parsed = parseCardText(card);
     expect(parsed.status).toBe('UNSUPPORTED');
@@ -573,19 +626,11 @@ describe('Phase 4B per-card Game State verification', () => {
     }
     const triggerClause = parsed.clauses.length === 1 ? parsed.clauses[0] : undefined;
     if (triggerClause?.timing.event && triggerClause.effects.length > 0) {
-      if (card.type === 'Life' || triggerClause.timing.event === 'AVATAR_DESTROYED' && triggerClause.timing.eventSubject === 'SOURCE') {
-        recordUnverified(card, 'trigger source is outside the active-field event dispatcher');
+      if (card.type === 'Life') {
+        recordUnverified(card, 'LIFE timing is outside the active-field trigger simulation');
         return;
       }
       const source = instance('p1-trigger-source', 'p1', card);
-      if (card.type === 'Avatar') state.players.p1.avatarZone.push(source);
-      else if (card.type === 'Construct') state.players.p1.constructZone.push(source);
-      else if (card.type === 'Magic') state.players.p1.magicZone.push(source);
-      else if (card.subtype === 'Land') state.landMagicZone = source;
-      else {
-        recordUnverified(card, `unsupported trigger source zone: ${card.type}`);
-        return;
-      }
       const binding = bindings[0] ?? {};
       const ability = toTriggerAbility(triggerClause, `phase4:${card.printId}:${catalog.indexOf(card)}`, 'p1', {
         state, sourceInstanceId: source.instanceId,
@@ -604,26 +649,78 @@ describe('Phase 4B per-card Game State verification', () => {
       const eventActorId = ability.actorRelation === 'OPPONENT' ? 'p2'
         : ability.actorRelation === 'SELF' || ability.eventSubject === 'SOURCE' ? 'p1' : 'p2';
       const eventId = `phase4:${card.printId}:${catalog.indexOf(card)}:event`;
-      let event: GameEvent;
-      if (ability.eventType === 'MAGIC_PLAYED' && ability.effects.some(effect => effect.kind === 'cancel_pending_magic')) {
-        const pendingCardDefinition = catalog.find(candidate => candidate.type === 'Magic' && candidate.subtype !== 'Land' && !candidate.mainEffect.includes('#'));
-        if (!pendingCardDefinition) {
-          recordUnverified(card, 'no official catalog Magic can seed the pending cancellation context');
+      let emitted: GameState;
+      if (ability.eventType === 'AVATAR_SUMMONED' && /^(?:พอดี\s+)?จุติ/u.test(triggerClause.source)) {
+        const paymentCards = exactPaymentCards(card, card.cost);
+        if (!paymentCards) {
+          recordUnverified(card, 'no official catalog GEM cards can exactly pay the summon Cost');
           return;
         }
-        const pendingCard = instance('p2-pending-magic', 'p2', pendingCardDefinition);
-        state.players.p2.magicZone.push(pendingCard);
-        state.reactionWindow = {
-          id: `${eventId}:window`, trigger: { type: 'MAGIC_PLAYED', actorId: 'p2', sourceInstanceId: pendingCard.instanceId },
-          turnOwnerId: 'p1', priorityPlayerId: 'p2', passedPlayerIds: [], priorityOrder: ['p2', 'p1'], chain: [], revision: 0,
-          pendingAction: { type: 'RESOLVE_MAGIC', actorId: 'p2', sourceCard: pendingCard }
-        };
-        event = { type: 'MAGIC_PLAYED', instanceId: pendingCard.instanceId, subtype: pendingCardDefinition.subtype ?? 'Normal', playerId: 'p2', eventId };
+        state.players.p1.hand.push(source);
+        paymentCards.forEach((paymentCard, index) => state.players.p1.hand.push(instance(`p1-gem-payment-${index}`,
+          'p1', paymentCard)));
+        const summoned = payGemAndPlayFromHand(state, 'p1', source.instanceId,
+          paymentCards.map((_paymentCard, index) => `p1-gem-payment-${index}`), card.cost);
+        if (!summoned.ok) {
+          recordUnverified(card, `GEM-paid summon rejected: ${summoned.reason ?? 'unspecified'}`);
+          return;
+        }
+        expect(summoned.state.players.p1.avatarZone.some(item => item.instanceId === source.instanceId)).toBe(true);
+        for (const index of paymentCards.keys()) expect(summoned.state.players.p1.hell.some(item => item.instanceId === `p1-gem-payment-${index}`)).toBe(true);
+        expect(summoned.state.gameEvents?.some(item => item.event.type === 'AVATAR_SUMMONED' &&
+          item.event.instanceId === source.instanceId && item.event.exactGemPaid === (card.cost > 0))).toBe(true);
+        emitted = summoned.state;
+      } else if (ability.eventType === 'AVATAR_DESTROYED' && ability.eventSubject === 'SOURCE') {
+        state.players.p1.avatarZone.push(source);
+        const destroyed = moveCardBetweenZones(state, {
+          instanceId: source.instanceId, actorId: 'p1', destination: 'hell',
+          effectMove: true, cause: 'EFFECT'
+        });
+        if (!destroyed.ok) {
+          recordUnverified(card, `Last Words destruction rejected: ${destroyed.reason ?? 'unspecified'}`);
+          return;
+        }
+        emitted = destroyed.state;
       } else {
-        event = makeTriggerEvent(ability.eventType, eventId, eventActorId,
-          ability.eventSubject === 'SOURCE' ? source.instanceId : 'p2-event-subject');
+        if (card.type === 'Avatar') state.players.p1.avatarZone.push(source);
+        else if (card.type === 'Construct') state.players.p1.constructZone.push(source);
+        else if (card.type === 'Magic') state.players.p1.magicZone.push(source);
+        else {
+          recordUnverified(card, `unsupported trigger source zone: ${card.type}`);
+          return;
+        }
+        if (ability.eventType === 'MAGIC_PLAYED' && ability.effects.some(effect => effect.kind === 'cancel_pending_magic')) {
+          const pendingCardDefinition = catalog.find(candidate => candidate.type === 'Magic' && candidate.subtype !== 'Land' && !candidate.mainEffect.includes('#'));
+          if (!pendingCardDefinition) {
+            recordUnverified(card, 'no official catalog Magic can seed the pending cancellation context');
+            return;
+          }
+          const pendingCard = instance('p2-pending-magic', 'p2', pendingCardDefinition);
+          state.players.p2.magicZone.push(pendingCard);
+          state.reactionWindow = {
+            id: `${eventId}:window`, trigger: { type: 'MAGIC_PLAYED', actorId: 'p2', sourceInstanceId: pendingCard.instanceId },
+            turnOwnerId: 'p1', priorityPlayerId: 'p2', passedPlayerIds: [], priorityOrder: ['p2', 'p1'], chain: [], revision: 0,
+            pendingAction: { type: 'RESOLVE_MAGIC', actorId: 'p2', sourceCard: pendingCard }
+          };
+        }
+        if (ability.eventType === 'PHASE_STARTED' && ability.phase === 'DRAW') {
+          state.currentPhase = 'END';
+          state.currentTurnPlayerIndex = 1;
+          emitted = finishEndPhaseTurn(state);
+        } else if (ability.eventType === 'PHASE_STARTED' && ability.phase) {
+          state.currentPhase = ability.phase === 'MAIN' ? 'BATTLE' : 'MAIN';
+          emitted = transitionGamePhase(state, 'p1', ability.phase);
+        } else if (ability.eventType === 'TURN_ENDED') {
+          state.currentPhase = 'END';
+          emitted = finishEndPhaseTurn(state);
+        } else {
+          const event = ability.eventType === 'PHASE_STARTED' && ability.phase
+            ? { type: ability.eventType, phase: ability.phase, playerId: eventActorId, turnNumber: state.turnNumber, eventId }
+            : makeTriggerEvent(ability.eventType, eventId, eventActorId,
+              ability.eventSubject === 'SOURCE' ? source.instanceId : 'p2-event-subject');
+          emitted = appendGameEvents(state, [event]);
+        }
       }
-      const emitted = appendGameEvents(state, [event]);
       const triggerWasQueued = emitted.reactionWindow?.chain?.some(entry => entry.entryType === 'TRIGGER_ABILITY' && entry.triggerId === `${source.instanceId}:${ability.id}`);
       if (!triggerWasQueued) {
         recordUnverified(card, 'event fixture did not satisfy the parsed trigger subject and actor context');
@@ -632,11 +729,15 @@ describe('Phase 4B per-card Game State verification', () => {
       const beforeResolution = structuredClone(emitted);
       const resolved = resolveTriggerChain(emitted);
       assertEffectState(beforeResolution, resolved, {
-        actorId: 'p1', ...(ability.conditions?.length ? { conditions: ability.conditions } : {}), effects: ability.effects
+        actorId: 'p1', ...(ability.conditions?.length ? { conditions: ability.conditions } : {}),
+        ...(ability.costs?.length ? { costs: ability.costs } : {}), effects: ability.effects
       });
-      const triggerKeywordsOnly = triggerClause.keywordSpecs.every(spec => spec.kind === 'TRIGGER' || spec.kind === 'ONCE_PER_TURN');
-      if (equipVerified && fixtureErrors.length === 0 && triggerClause.unresolved.length === 0 && !triggerClause.cost && !triggerClause.conditions.length && triggerKeywordsOnly) {
-        verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      const triggerKeywordsOnly = triggerClause.keywordSpecs.every(spec =>
+        ['TRIGGER', 'ONCE_PER_TURN', 'EXACT_COST', 'AUTOMATIC'].includes(spec.kind));
+      if (equipVerified && fixtureErrors.length === 0 && triggerClause.unresolved.length === 0 && !triggerClause.conditions.length && triggerKeywordsOnly) {
+        const verifiedKey = `${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`;
+        verifiedRows.add(verifiedKey);
+        verifiedTimingRows.add(verifiedKey);
       } else {
         recordUnverified(card, 'trigger fired, but the card has additional unverified cost, condition, or keyword behavior');
       }
@@ -686,6 +787,6 @@ describe('Phase 4B per-card Game State verification', () => {
     }
     console.info(`[phase4] PARSED_READY rows attempted=${parsedRows.length}; VERIFIED_WORKING=${verifiedRows.size}; NOT_VERIFIED=${unverifiedRows.size}`);
     console.info(`[phase4] NOT_VERIFIED reasons: ${[...reasonCounts].sort((left, right) => right[1] - left[1]).map(([reason, count]) => `${reason}=${count} (e.g. ${reasonExamples.get(reason)?.join(', ')})`).join('; ')}`);
-    console.info(`[phase4] VERIFIED_WORKING rows: ${[...verifiedRows].sort().join('; ')}`);
+    console.info(`[phase4] VERIFIED_TIMING rows=${verifiedTimingRows.size}`);
   });
 });

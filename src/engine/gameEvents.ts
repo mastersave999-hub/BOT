@@ -8,7 +8,7 @@ type GameEventPayload =
   | { type: 'CONSTRUCT_LEFT'; instanceId: string; name: string; playerId: string }
   | { type: 'MAGIC_PLAYED'; instanceId: string; subtype: import('./types').MagicSubtype; playerId: string }
   | { type: 'MAGIC_RESOLVED'; instanceId: string; playerId: string }
-  | { type: 'AVATAR_SUMMONED'; instanceId: string; playerId: string }
+  | { type: 'AVATAR_SUMMONED'; instanceId: string; playerId: string; exactGemPaid?: boolean }
   | { type: 'TOKEN_CREATED' | 'TOKEN_DESTROYED'; instanceId: string; playerId: string }
   | { type: 'ATTACK_DECLARED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'BATTLE_ENDED'; attackerId: string; targetId: string; playerId: string }

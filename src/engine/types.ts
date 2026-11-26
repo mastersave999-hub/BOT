@@ -176,6 +176,7 @@ export type ReactionChainEntry =
       controllerId: string;
   triggerId: string;
   effects: import('./effectResolver').EffectDefinition[];
+  costs?: import('./effectResolver').EffectCost[];
   conditions?: import('./effectResolver').EffectCondition[];
   cancelled: boolean;
   eventId: string;

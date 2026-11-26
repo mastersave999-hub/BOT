@@ -67,17 +67,24 @@ describe('GEM payment rules (Rule Book 3.2 pp. 6, 17)', () => {
 
     expect(validateGemPayment([avatar, gemThree, gemTwo], avatar, ['gem-three', 'gem-two'], 4)).toEqual({
       valid: true,
-      total: 5
+      total: 5,
+      exactGemPaid: false
     });
-    expect(validateGemPayment([avatar, gemFour, gemOne], avatar, ['gem-four', 'gem-one'], 4).valid).toBe(false);
-    expect(validateGemPayment([avatar, gemFour], avatar, ['gem-four'], 4).valid).toBe(true);
+    expect(validateGemPayment([avatar, gemOne, gemFour], avatar, ['gem-one', 'gem-four'], 4).valid).toBe(false);
+    expect(validateGemPayment([avatar, gemFour], avatar, ['gem-four'], 4)).toEqual({ valid: true, total: 4, exactGemPaid: true });
+  });
+
+  it('allows Cost 0 without paying any GEM and does not mark it as exact payment', () => {
+    expect(validateGemPayment([avatar], avatar, [], 0)).toEqual({ valid: true, total: 0, exactGemPaid: false });
+    const gemOne = makeCard('gem-one', { gem: 1 });
+    expect(validateGemPayment([avatar, gemOne], avatar, ['gem-one'], 0).valid).toBe(false);
   });
 
   it('requires one selected payment set to cover one target card Cost', () => {
     const gemTwo = makeCard('gem-two', { gem: 2 });
     const otherAvatar = makeCard('other-avatar', { type: 'Avatar', gem: 0 });
 
-    expect(validateGemPayment([avatar, gemTwo], avatar, ['gem-two'], 3)).toEqual({ valid: false, total: 2 });
+    expect(validateGemPayment([avatar, gemTwo], avatar, ['gem-two'], 3)).toEqual({ valid: false, total: 2, exactGemPaid: false });
     expect(validateGemPayment([avatar, otherAvatar, gemTwo], avatar, ['other-avatar', 'gem-two'], 2).valid).toBe(false);
   });
 });

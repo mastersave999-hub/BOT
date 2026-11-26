@@ -65,6 +65,8 @@ export type CardTextTiming = {
   event?: string;
   actorRelation?: 'SELF' | 'OPPONENT';
   eventSubject?: 'SOURCE';
+  phase?: 'DRAW' | 'MAIN' | 'BATTLE' | 'END';
+  requiresExactGemPaid?: boolean;
 };
 export interface ParsedCardTextClause {
   source: string;
@@ -114,8 +116,10 @@ const EVENT_HEADERS: Array<[RegExp, string]> = [
   [/เมื่อโจมตี/, 'ATTACK_DECLARED'], [/เมื่อต่อสู้/, 'BATTLE_STARTED'],
   [/เมื่อจบเทิร์น/i, 'TURN_ENDED'], [/ในช่วง End Phase/i, 'PHASE_STARTED'], [/ก่อนเริ่ม Main Phase/, 'BEFORE_MAIN_PHASE'],
   [/เมื่อหงาย LIFE Card|เมื่อ LIFE Card ถูกหงาย/, 'LIFE_REVEALED'],
-  [/จุติ\s*\(/, 'AVATAR_SUMMONED'], [/คำสั่งเสีย\s*\(/, 'AVATAR_DESTROYED'],
-  [/พอดี\s*\(/, 'EXACT_COST']
+  [/จุติ(?:\s*\(|\s*:)/, 'AVATAR_SUMMONED'], [/คำสั่งเสีย(?:\s*\(|\s*:)/, 'AVATAR_DESTROYED'],
+  [/พอดี\s*\(/, 'EXACT_COST'],
+  [/ก่อนเริ่ม Main Phase|เมื่อเริ่มต้น Main Phase|ใน Main Phase ถัดไป|ในช่วง Main Phase/i, 'PHASE_STARTED'],
+  [/ในช่วง Draw Phase|Draw Phase/i, 'PHASE_STARTED'], [/ในช่วง End Phase|End Phase/i, 'PHASE_STARTED']
 ];
 
 function splitCostEffect(source: string): { costText?: string; effectText: string; separator: ':' | null } {
@@ -226,11 +230,15 @@ function parseTiming(source: string): CardTextTiming {
     : event === 'PHASE_STARTED' || event === 'TURN_ENDED' ? 'SELF' : undefined;
   const hasCardSubject = ['AVATAR_SUMMONED', 'AVATAR_DESTROYED', 'AVATAR_DESTROYED_IN_BATTLE', 'ATTACK_DECLARED', 'BATTLE_STARTED', 'LIFE_REVEALED', 'MAGIC_PLAYED'].includes(event ?? '');
   const eventSubject = hasCardSubject && /(?:Avatar|การ์ด)\s*(?:ตัวนี้|ใบนี้)/.test(eventHeader) ? 'SOURCE' : undefined;
+  const phase = /Draw Phase/i.test(source) ? 'DRAW' : /End Phase/i.test(source) ? 'END'
+    : /Main Phase/i.test(source) ? 'MAIN' : undefined;
   const frequency = /เทิร์นละครั้ง/.test(source) ? 'ONCE_PER_TURN' : undefined;
   const mode = /ต่อเนื่อง/.test(source) ? 'CONTINUOUS' : /สั่งใช้/.test(source) ? 'ACTIVATED' : /อัตโนมัติ/.test(source) ? 'AUTOMATIC' : undefined;
+  const requiresExactGemPaid = event === 'AVATAR_SUMMONED' && /^\s*พอดี(?:\s|:)/u.test(source);
   return {
     ...(frequency ? { frequency } : {}), ...(mode ? { mode } : {}), ...(event ? { event } : {}),
-    ...(actorRelation ? { actorRelation } : {}), ...(eventSubject ? { eventSubject } : {})
+    ...(actorRelation ? { actorRelation } : {}), ...(eventSubject ? { eventSubject } : {}),
+    ...(phase ? { phase } : {}), ...(requiresExactGemPaid ? { requiresExactGemPaid: true } : {})
   };
 }
 
@@ -663,6 +671,7 @@ export function toCardTextEffectPlan(
 
 const TRIGGER_EVENT_TYPES: Record<string, TriggerAbility['eventType']> = {
   AVATAR_SUMMONED: 'AVATAR_SUMMONED', AVATAR_DESTROYED: 'AVATAR_DESTROYED',
+  EXACT_COST: 'AVATAR_SUMMONED', BEFORE_MAIN_PHASE: 'PHASE_STARTED',
   ATTACK_DECLARED: 'ATTACK_DECLARED', BATTLE_STARTED: 'ATTACK_DECLARED',
   BATTLE_ENDED: 'BATTLE_ENDED', TURN_ENDED: 'TURN_ENDED', PHASE_STARTED: 'PHASE_STARTED',
   LIFE_REVEALED: 'LIFE_REVEALED', MAGIC_PLAYED: 'MAGIC_PLAYED'
@@ -678,13 +687,16 @@ export function toTriggerAbility(
   const eventType = clause.timing.event ? TRIGGER_EVENT_TYPES[clause.timing.event] : undefined;
   if (!eventType || clause.timing.mode === 'CONTINUOUS' || clause.timing.mode === 'ACTIVATED') return null;
   const plan = toEffectPlan(clause, actorId, options.costInstanceIds, options.state, options.targetInstanceIds);
-  if (!plan || (plan.costs?.length ?? 0) > 0) return null;
+  if (!plan) return null;
   return {
     id, eventType, effects: plan.effects,
+    ...(plan.costs?.length ? { costs: plan.costs } : {}),
     ...(plan.conditions?.length ? { conditions: plan.conditions } : {}),
     ...(options.sourceInstanceId ? { sourceInstanceId: options.sourceInstanceId } : {}),
     ...(clause.timing.actorRelation ? { actorRelation: clause.timing.actorRelation } : {}),
     ...(clause.timing.eventSubject === 'SOURCE' ? { eventSubject: 'SOURCE' } : {}),
+    ...(clause.timing.requiresExactGemPaid ? { requiresExactGemPaid: true } : {}),
+    ...(clause.timing.phase ? { phase: clause.timing.phase } : {}),
     ...(clause.timing.frequency === 'ONCE_PER_TURN' ? { frequency: 'ONCE_PER_TURN' } : {})
   };
 }
@@ -703,7 +715,9 @@ export function parseCardText(card: Card): CardTextAdapterResult {
       if (ruleText) ruleTexts.push(ruleText);
     } else abilityLines.push(line);
   }
-  const clauses = abilityLines.map(parseClause);
+  const exactCostCondition = /(?:^|\n)\s*พอดี(?:\s|\()/u.test(source);
+  const clauses = abilityLines.map(parseClause).map(clause => clause.timing.event === 'AVATAR_SUMMONED' && exactCostCondition
+    ? { ...clause, timing: { ...clause.timing, requiresExactGemPaid: true } } : clause);
   const continuousEffects = clauses.flatMap(clause => clause.timing.mode === 'CONTINUOUS' ? parseContinuousPowerEffects(clause.source) : []);
   const taggedMagic = [...source.matchAll(/ความสามารถนี้ถือเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);
   const overrideMagic = [...source.matchAll(/โดยถือว่าเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);

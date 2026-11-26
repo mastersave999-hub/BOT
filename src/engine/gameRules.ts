@@ -2,6 +2,7 @@ import type { CardInstance, GameState, PendingExitPrevention, PlayerState } from
 import { appendGameEvents, type GameEvent } from './gameEvents';
 import { recomputeContinuousEffects } from './continuousEffects';
 import { preventDestruction } from './prevention';
+import { validateGemPayment } from './gemPayment';
 
 export type PlayerZone = 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension';
 
@@ -160,6 +161,8 @@ export interface ZoneMoveRequest {
   playerMandated?: boolean;
   /** Internal continuation after an exit window has already been resolved. */
   skipExitPrevention?: boolean;
+  /** Exact payment metadata for the summon trigger (Rule Book 3.2 p.7). */
+  exactGemPaid?: boolean;
 }
 
 export interface ZoneMoveResult { ok: boolean; state: GameState; reason?: string }
@@ -376,6 +379,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   });
   if (request.destination === 'avatarZone' && card.card.type === 'Avatar') events.push({
     type: 'AVATAR_SUMMONED', instanceId: card.instanceId, playerId: destinationPlayerId,
+    exactGemPaid: request.exactGemPaid ?? false,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:avatar-summoned:${card.instanceId}:${destinationPlayerId}`
   });
   if (request.destination === 'avatarZone' && card.card.type === 'Token') events.push({
@@ -401,11 +405,60 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     controllerId: card.controllerId, actorId: request.actorId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-left-field:${card.instanceId}:${request.destination}`
   });
+  if (sourceZone === 'avatarZone' && card.card.type === 'Avatar' && request.destination === 'hell' &&
+    (exitCause === 'EFFECT' || exitCause === 'COMBAT')) events.push({
+    type: 'AVATAR_DESTROYED', instanceId: card.instanceId, ownerId: originalOwnerId,
+    controllerId: card.controllerId, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:avatar-destroyed:${card.instanceId}:${request.actorId}`
+  });
   if (sourceZone === 'avatarZone' && card.card.type === 'Token' && request.destination === 'removedFromGame') events.push({
     type: 'TOKEN_DESTROYED', instanceId: card.instanceId, playerId: sourcePlayerId!,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:token-destroyed:${card.instanceId}`
   });
   return { ok: true, state: appendGameEvents(next, events) };
+}
+
+export interface GemPaidPlayResult extends ZoneMoveResult {
+  exactGemPaid?: boolean;
+}
+
+/** Completes one Cost Step followed by one Avatar Summon or Construct Build (Rule Book 3.2 pp.6–7, 17). */
+export function payGemAndPlayFromHand(
+  state: GameState,
+  actorId: string,
+  targetInstanceId: string,
+  paymentInstanceIds: string[],
+  requiredCost?: number
+): GemPaidPlayResult {
+  const player = state.players[actorId];
+  if (!player || state.playerOrder[state.currentTurnPlayerIndex] !== actorId || state.currentPhase !== 'MAIN') {
+    return { ok: false, state, reason: 'GEM payment requires the active player in Main Phase' };
+  }
+  const target = player.hand.find(card => card.instanceId === targetInstanceId);
+  if (!target || (target.card.type !== 'Avatar' && target.card.type !== 'Construct')) {
+    return { ok: false, state, reason: 'GEM payment requires an Avatar or Construct in hand' };
+  }
+  const cost = requiredCost ?? target.card.cost;
+  const payment = validateGemPayment(player.hand, target, paymentInstanceIds, cost);
+  if (!payment.valid) return { ok: false, state, reason: 'Invalid GEM payment' };
+
+  const paidCards = player.hand.filter(card => paymentInstanceIds.includes(card.instanceId));
+  const paidIds = new Set(paymentInstanceIds);
+  const players = { ...state.players, [actorId]: { ...player, hand: player.hand.filter(card => !paidIds.has(card.instanceId)) } };
+  for (const card of paidCards) {
+    const ownerId = getOriginalOwnerId(card);
+    if (!players[ownerId]) return { ok: false, state, reason: 'GEM card owner does not exist' };
+    players[ownerId] = { ...players[ownerId], hell: [...players[ownerId].hell, { ...card, originalOwnerId: ownerId }] };
+  }
+  const afterCostStep: GameState = { ...state, players };
+  const result = moveCardBetweenZones(afterCostStep, {
+    instanceId: targetInstanceId, actorId,
+    destination: target.card.type === 'Avatar' ? 'avatarZone' : 'constructZone',
+    destinationPlayerId: actorId,
+    exactGemPaid: payment.exactGemPaid
+  });
+  if (!result.ok) return { ok: false, state, reason: result.reason };
+  return { ...result, exactGemPaid: payment.exactGemPaid };
 }
 
 export function resolveExitPreventionChainEntry(state: GameState, targetCardId: string, prevented: boolean): ZoneMoveResult {

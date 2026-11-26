@@ -261,11 +261,6 @@ export function resolveDeclaredBattle(state: GameState): BattleLifecycleResult {
       if (!wasDestroyed) continue;
       if (avatar.instanceId === attacker.instanceId) destroyedAttacker = true;
       if (avatar.instanceId === resolvedTarget.instanceId) destroyedDefender = true;
-      next = appendGameEvents(next, [{
-        type: 'AVATAR_DESTROYED', instanceId: avatar.instanceId, ownerId: getOriginalOwnerId(avatar),
-        controllerId: avatar.controllerId, actorId: attackerPlayerId,
-        eventId: `${eventIdBase}:destroyed:${avatar.instanceId}`
-      }]);
     }
   } else {
     const defender = structuredClone(next.players[targetPlayerId]);

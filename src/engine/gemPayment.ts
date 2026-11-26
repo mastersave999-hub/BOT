@@ -3,6 +3,7 @@ import type { CardInstance } from './types';
 export interface GemPaymentValidation {
   valid: boolean;
   total: number;
+  exactGemPaid: boolean;
 }
 
 export function getGemPaymentCardUnavailableReason(
@@ -39,34 +40,23 @@ export function validateGemPayment(
   selectedIds: string[],
   requiredCost: number
 ): GemPaymentValidation {
-  const total = getSelectedGemTotal(hand, selectedIds);
-  const invalid = { valid: false, total };
-
+  const invalid: GemPaymentValidation = { valid: false, total: 0, exactGemPaid: false };
   if (
-    !Number.isFinite(requiredCost) ||
-    requiredCost <= 0 ||
+    !Number.isSafeInteger(requiredCost) || requiredCost < 0 ||
     !hand.some(card => card.instanceId === targetCard.instanceId) ||
-    (targetCard.card.type !== 'Avatar' && targetCard.card.type !== 'Construct')
-  ) {
-    return invalid;
+    (targetCard.card.type !== 'Avatar' && targetCard.card.type !== 'Construct') ||
+    new Set(selectedIds).size !== selectedIds.length
+  ) return { ...invalid, total: getSelectedGemTotal(hand, selectedIds) };
+
+  if (requiredCost === 0) return { valid: selectedIds.length === 0, total: 0, exactGemPaid: false };
+
+  const paymentCards = selectedIds.map(instanceId => hand.find(card => card.instanceId === instanceId));
+  if (paymentCards.some(card => !card || card.instanceId === targetCard.instanceId ||
+    getGemPaymentCardUnavailableReason(card, targetCard) !== null)) {
+    return { ...invalid, total: getSelectedGemTotal(hand, selectedIds) };
   }
 
-  if (new Set(selectedIds).size !== selectedIds.length) return invalid;
-
-  let paid = 0;
-  for (const instanceId of selectedIds) {
-    const paymentCard = hand.find(card => card.instanceId === instanceId);
-    if (
-      !paymentCard ||
-      paymentCard.instanceId === targetCard.instanceId ||
-      getGemPaymentCardUnavailableReason(paymentCard, targetCard) !== null ||
-      paid >= requiredCost
-    ) {
-      return invalid;
-    }
-
-    paid += paymentCard.card.gem ?? 0;
-  }
-
-  return { valid: paid >= requiredCost, total: paid };
+  const total = paymentCards.reduce((sum, card) => sum + (card?.card.gem ?? 0), 0);
+  const valid = total >= requiredCost && paymentCards.every(card => total - (card?.card.gem ?? 0) < requiredCost);
+  return { valid, total, exactGemPaid: valid && total === requiredCost };
 }
