@@ -24,6 +24,8 @@ export const CardSchema = z.object({
   rarity: z.string().default('C'),
   dropRate: z.string().optional(),
   mainEffect: z.string().default(''),
+  /** Explicit metadata for Rule Book 3.2 Rule Text (#), which cannot be cancelled. */
+  ruleTextProtected: z.boolean().optional(),
   favorText: z.string().optional(),
   creator: z.string().optional(),
   isOnlyOne: z.boolean().default(false),
@@ -34,20 +36,50 @@ export const CardSchema = z.object({
 
 export type Card = z.infer<typeof CardSchema>;
 
+export type EffectDuration = 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE';
+
+export interface ContinuousPowerEffect {
+  layer: 1 | 2;
+  powerMod: number;
+  targetCardType?: 'Avatar' | 'Construct' | 'Life';
+  targetController?: 'SOURCE_CONTROLLER' | 'OPPONENT' | 'ANY';
+  targetSymbol?: string;
+  targetNameIncludes?: string;
+}
+
+export interface PreventionShield {
+  id: string;
+  kind: 'DAMAGE' | 'DESTRUCTION' | 'TARGETING';
+  sourceInstanceId?: string;
+  sourceControllerId?: string;
+  /** DAMAGE shields prevent this many points per use; omission prevents all damage. */
+  amount?: number;
+  usesRemaining?: number;
+  expiresAt?: EffectDuration;
+  /** Player-directed movement bypasses destruction protection unless explicitly allowed. */
+  includePlayerActions?: boolean;
+}
+
 export interface CardInstance {
   instanceId: string;
   card: Card;
   ownerId: string;
+  /** Immutable card holder; defaults to ownerId for older saved states. */
+  originalOwnerId?: string;
   controllerId: string;
+  /** Duo Avatars and card effects may explicitly forbid control changes. */
+  controlChangeImmune?: boolean;
   isRested: boolean;
   isFaceUp: boolean;
   duoWithInstanceId?: string;
   attachedInstances: CardInstance[];
+  continuousEffects?: ContinuousPowerEffect[];
+  preventionShields?: PreventionShield[];
   layerModifiers: {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
     sourceCardId: string;
-    expiresAt?: 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE';
+    expiresAt?: EffectDuration;
   }[];
 }
 
@@ -158,6 +190,7 @@ export interface PlayerState {
     opponentTurnRemaining: number; // 1 across opponent turns
   };
   usedMagicTypesThisTurn: Set<MagicSubtype>; // Max 1 per Magic Type per turn
+  preventionShields?: PreventionShield[];
 }
 
 export interface PendingDeckSearchVerification {

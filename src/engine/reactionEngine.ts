@@ -10,6 +10,7 @@ import type {
   ReactionTriggerType,
   ReactionWindow
 } from './types';
+import { appendGameEvents } from './gameEvents';
 
 const REACT_MAGIC_TIMING_TEXT = /โดยถือว่าเป็นการใช้\s*React Magic|ถือว่าเป็นการใช้\s*React Magic/;
 const OPPONENT_TURN_TEXT = /เทิร์นฝ่ายตรงข้าม|เทิร์นอีกฝ่าย/;
@@ -363,6 +364,62 @@ function sendResolvedMagicToHell(state: GameState, playerId: string, instance: C
   };
 }
 
+export type CancellationTargetKind = 'MAGIC_PLAY' | 'ABILITY' | 'CHAIN_ENTRY';
+
+function applyCancellation(
+  state: GameState,
+  actorId: string,
+  targetInstanceId: string,
+  targetKind: CancellationTargetKind
+): { state: GameState; applied: boolean } {
+  const window = state.reactionWindow;
+  if (!window) return { state, applied: false };
+  const chain = [...(window.chain ?? [])];
+  let nextState = state;
+  let pendingAction = window.pendingAction;
+  let applied = false;
+  if (targetKind === 'CHAIN_ENTRY') {
+    const index = chain.findIndex(entry => entry.sourceCard.instanceId === targetInstanceId);
+    const entry = chain[index];
+    if (!entry || entry.sourceCard.card.ruleTextProtected) return { state, applied: false };
+    chain.splice(index, 1);
+    nextState = sendResolvedMagicToHell(nextState, entry.playerId, entry.sourceCard);
+    applied = true;
+  } else if (pendingAction && 'sourceCard' in pendingAction && pendingAction.sourceCard.instanceId === targetInstanceId && !pendingAction.sourceCard.card.ruleTextProtected) {
+    if (targetKind === 'MAGIC_PLAY' && pendingAction.type === 'RESOLVE_MAGIC') {
+      nextState = sendResolvedMagicToHell(nextState, pendingAction.actorId, pendingAction.sourceCard);
+      pendingAction = undefined;
+      applied = true;
+    } else if (targetKind === 'ABILITY' && pendingAction.type !== 'RESOLVE_MAGIC') {
+      pendingAction = undefined;
+      applied = true;
+    }
+  }
+  if (!applied) return { state, applied: false };
+  const eventId = `${state.id}:${state.gameEvents?.length ?? 0}:cancel:${targetKind}:${targetInstanceId}:${actorId}`;
+  nextState = appendGameEvents({
+    ...nextState,
+    reactionWindow: { ...window, chain, pendingAction, revision: (window.revision ?? 0) + 1 }
+  }, [{ type: 'ACTION_CANCELLED', actorId, targetInstanceId, targetKind, eventId }]);
+  return { state: nextState, applied: true };
+}
+
+/** Cancels only an unresolved action/chain entry inside an open Reaction Window. */
+export function cancelReactionTarget(
+  state: GameState,
+  actorId: string,
+  target: { kind: CancellationTargetKind; instanceId: string }
+): { ok: true; state: GameState } | { ok: false; state: GameState; reason: string } {
+  const window = state.reactionWindow;
+  if (!window || window.priorityPlayerId !== actorId || window.pendingReaction) {
+    return { ok: false, state, reason: 'Cancellation requires priority in an open Reaction Window.' };
+  }
+  const result = applyCancellation(state, actorId, target.instanceId, target.kind);
+  return result.applied
+    ? { ok: true, state: result.state }
+    : { ok: false, state, reason: 'The selected action or chain entry is no longer pending.' };
+}
+
 function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: ReactionChainEntry) {
   const parsed = parseCardAbility(entry.sourceCard.card);
   const requiresAvatarTarget = parsed.needsTargetAvatar || parsed.destroysTarget || parsed.bouncesTarget || parsed.resetsPower || parsed.powerMod !== 0;
@@ -383,16 +440,36 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
   let nextState = state;
   let chain = [...(window.chain ?? [])];
   let pendingAction = window.pendingAction;
+  let canceledTarget: { instanceId: string; kind: CancellationTargetKind } | undefined;
   if (cancelsPlayedMagic && entry.respondedTo.type === 'MAGIC_PLAYED' && entry.respondedTo.sourceInstanceId) {
-    const chainIndex = chain.findIndex(item => item.sourceCard.instanceId === entry.respondedTo.sourceInstanceId);
+    const targetId = entry.respondedTo.sourceInstanceId;
+    const chainIndex = chain.findIndex(item => item.sourceCard.instanceId === targetId);
     const canceledEntry = chain[chainIndex];
-    if (chainIndex !== -1 && canceledEntry) {
+    if (canceledEntry && !canceledEntry.sourceCard.card.ruleTextProtected) {
       chain = chain.filter((_, index) => index !== chainIndex);
       nextState = sendResolvedMagicToHell(nextState, canceledEntry.playerId, canceledEntry.sourceCard);
-    } else if (pendingAction?.type === 'RESOLVE_MAGIC' && pendingAction.sourceCard.instanceId === entry.respondedTo.sourceInstanceId) {
+      canceledTarget = { instanceId: targetId, kind: 'CHAIN_ENTRY' };
+    } else if (pendingAction?.type === 'RESOLVE_MAGIC' && pendingAction.sourceCard.instanceId === targetId && !pendingAction.sourceCard.card.ruleTextProtected) {
       nextState = sendResolvedMagicToHell(nextState, pendingAction.actorId, pendingAction.sourceCard);
       pendingAction = undefined;
+      canceledTarget = { instanceId: targetId, kind: 'MAGIC_PLAY' };
     }
+  }
+
+  if (cancelsPlayedMagic) {
+    if (canceledTarget) {
+      const eventId = `${state.id}:${state.gameEvents?.length ?? 0}:cancel:${canceledTarget.kind}:${canceledTarget.instanceId}:${entry.playerId}`;
+      nextState = appendGameEvents(nextState, [{
+        type: 'ACTION_CANCELLED', actorId: entry.playerId, targetInstanceId: canceledTarget.instanceId,
+        targetKind: canceledTarget.kind, eventId
+      }]);
+    }
+    return {
+      state: sendResolvedMagicToHell(nextState, entry.playerId, entry.sourceCard),
+      logs: [`${entry.sourceCard.card.name}: ยกเลิกผลของ Magic ที่ระบุ`],
+      chain,
+      pendingAction
+    };
   }
 
   const result = executeCardAbility(nextState, entry.playerId, entry.sourceCard, 'MAGIC_CAST', entry.targetAvatarId);
@@ -478,11 +555,22 @@ export function resolveReactionCard(
     }
   }
 
-  const result = executeCardAbility(state, pendingReaction.playerId, pendingReaction.sourceCard, 'MAGIC_CAST', targetId);
-  const cancelledOriginalMagic =
-    window.pendingAction?.type === 'RESOLVE_MAGIC' &&
+  const cancelledOriginalMagic = window.pendingAction?.type === 'RESOLVE_MAGIC' &&
+    !window.pendingAction.sourceCard.card.ruleTextProtected &&
     /ยกเลิกการใช้\s*Magic Card/.test(pendingReaction.sourceCard.card.mainEffect ?? '');
-  const resolvedState = sendResolvedMagicToHell(result.state, pendingReaction.playerId, pendingReaction.sourceCard);
+  const result = cancelledOriginalMagic
+    ? { state, logs: [`${pendingReaction.sourceCard.card.name}: ยกเลิกผลของ Magic ที่ระบุ`] }
+    : executeCardAbility(state, pendingReaction.playerId, pendingReaction.sourceCard, 'MAGIC_CAST', targetId);
+  let staged = result.state;
+  if (cancelledOriginalMagic && window.pendingAction?.type === 'RESOLVE_MAGIC') {
+    const canceled = window.pendingAction.sourceCard;
+    staged = sendResolvedMagicToHell(staged, window.pendingAction.actorId, canceled);
+    staged = appendGameEvents(staged, [{
+      type: 'ACTION_CANCELLED', actorId: pendingReaction.playerId, targetInstanceId: canceled.instanceId,
+      targetKind: 'MAGIC_PLAY', eventId: `${state.id}:${state.gameEvents?.length ?? 0}:cancel:MAGIC_PLAY:${canceled.instanceId}:${pendingReaction.playerId}`
+    }]);
+  }
+  const resolvedState = sendResolvedMagicToHell(staged, pendingReaction.playerId, pendingReaction.sourceCard);
   const { reactionWindow: _reactionWindow, ...closedState } = resolvedState;
   return {
     ok: true,
@@ -546,17 +634,13 @@ export function passReactionPriority(state: GameState, playerId: string): Reacti
     };
   }
 
-  const shouldCancelOriginal = window.pendingAction?.type === 'RESOLVE_MAGIC' &&
-    top.respondedTo.type === 'MAGIC_PLAYED' &&
-    top.respondedTo.sourceInstanceId === window.pendingAction.sourceCard.instanceId &&
-    /ยกเลิกการใช้\s*Magic Card/.test(top.sourceCard.card.mainEffect ?? '');
   const { reactionWindow: _reactionWindow, ...closedState } = resolved.state;
   return {
     ok: true,
     resolvedCard: top.sourceCard.card.name,
     logs,
     state: closedState,
-    pendingAction: shouldCancelOriginal ? undefined : pendingAction
+    pendingAction
   };
 }
 

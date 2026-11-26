@@ -37,6 +37,7 @@ function makeLifeInstance(ownerId: string, index: number, faceUp = false): CardI
   return {
     instanceId: `${ownerId}-life-instance-${index}`,
     ownerId,
+    originalOwnerId: ownerId,
     controllerId: ownerId,
     isRested: false,
     isFaceUp: faceUp,
@@ -127,6 +128,26 @@ describe('multiplayer LIFE card privacy', () => {
     ];
     expect(isGameStateValidForSync(invalid)).toBe(false);
   });
+  it('round-trips a controlled borrowed Avatar without changing its original owner', () => {
+    const state = makeState();
+    const borrowed = {
+      ...makeLifeInstance('player-1', 4),
+      instanceId: 'borrowed-avatar',
+      originalOwnerId: 'player-1',
+      controllerId: 'player-2',
+      card: { ...makeCard('Borrowed Avatar', 'borrowed-avatar'), type: 'Avatar' as const }
+    };
+    state.players['player-2'].avatarZone = [borrowed];
+
+    expect(isGameStateValidForSync(state)).toBe(true);
+    const received = decodeNetMessage(encodeNetMessage({ type: 'SYNC', state, winner: null }));
+    expect(received?.type).toBe('SYNC');
+    if (received?.type !== 'SYNC') return;
+    expect(received.state.players['player-2'].avatarZone[0]).toMatchObject({
+      ownerId: 'player-1', originalOwnerId: 'player-1', controllerId: 'player-2'
+    });
+  });
+
   it('redacts face-down LIFE identity for opponents but preserves revealed cards', () => {
     const state = makeState();
     state.players['player-2'].hand = [makeLifeInstance('player-2', 2, true)];

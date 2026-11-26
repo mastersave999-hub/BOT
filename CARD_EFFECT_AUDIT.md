@@ -52,8 +52,9 @@ The Phase 2.1 tests exercise shared rules and engine infrastructure against sele
 
 - `parseCardAbility` uses Thai substring/regex flags. `getUnsupportedEffectReason` blocks several free-text patterns, but there is no grammar, complete target/cost choice model, or parse-error channel.
 - `executeCardAbility` now has trigger guards and calls `resolveEffectPlan` for its supported operation subset. Its resolver preflights basic targets/counts and actor-owned explicit costs, stages a structured clone, and rolls back rejected/throwing handlers. Card text is not converted into complete cost/condition plans.
-- Reaction chain entries and ordinary ability resolution both eventually call `executeCardAbility`, but React uses additional eligibility, timing, priority and payment paths. Existing tests do not establish parity for all operation types. `resolveReactionCard` and queued-chain resolution are separate code paths.
-- `recomputeContinuousAuras` is limited POWER parsing and symbol/name heuristics; it is not a complete effect-layer engine for keywords, non-POWER changes, conditions, or all zones.
+- Reaction chain entries and ordinary ability resolution both use `executeCardAbility` for supported operations, but React uses additional eligibility, timing, priority and payment paths. Phase 2B adds typed cancellation to queued and direct pending-Magic paths; it does not make arbitrary printed cancellation text executable. `resolveReactionCard` and queued-chain resolution remain separate code paths.
+- `recomputeContinuousEffects` refreshes explicit typed source declarations and retains only the existing narrow POWER/symbol/name heuristic subset for catalog text. It is not a complete effect-layer engine for keywords, non-POWER changes, conditions, or all zones; no Phase 3 text parser was added.
+- Cancellation/prevention primitives are now typed and state-tested, but the printed catalog texts that request them are not parsed or verified. Rule Text immunity requires explicit `ruleTextProtected` metadata.
 - Catalog category counts below are overlapping text-pattern matches. They are a workload map only, not supported-mechanics or successful-card counts.
 
 ## Per-record effect-to-mechanics mapping
@@ -1921,6 +1922,10 @@ Phase 2.2 state-level evidence covers Construct boundaries, all four Magic subty
 No catalog row was promoted from its prior triage status. The per-card **Verified by Game State test** total remains **0**. The 1,833 effect-bearing records are still not individually verified, and this phase does not claim otherwise. Control Change, Search, Scout, Mill, Trigger Effects, and unsupported printed effects remain outside the verified scope. Layer 4 expiry versus post-combat transfer remains a **Rule ambiguity**; End Phase discard destination remains unspecified by the Rule Book and owner Hell is an application convention.
 
 Final shared-engine validation for this update: `npm test` passed **12 files / 97 tests**; `npx tsc --noEmit`, `npm run build`, and `git diff --check` passed. These suite totals do not count as individual catalog-card verification.
+
+## Phase 2B — Prevention, Cancellation & Continuous Effects evidence boundary
+
+The synthetic Game State suite `tests/phase2bSystems.test.ts` verifies typed cancellation/LIFO, typed prevention decisions and source-based continuous POWER recalculation. These tests do not verify printed card text, so the status totals above remain unchanged and **Verified by per-card Game State test remains 0**. Rule Book 3.2 pp.11–12 specifies LIFO and no interruption during a resolving effect; p.15 specifies cancellation of a Magic effect and continued consumption of its Magic type; p.18 makes Rule Text (`#`) uncancellable; pp.9–10 and 24 distinguish protected destruction from player-directed movement and order automatic prevention before React/activated protection. The exact physical destination of a cancelled Magic card is not stated: owner Hell remains an application convention. LIFE damage is one card per successful hit (p.25), so partial numeric prevention is not interpreted as fractional LIFE. Trigger Effects, Control Change, Combat Keywords, and Phase 3 parsing remain out of scope. The matrix in `RULE_ENGINE_GAP_ANALYSIS.md` records implementation limits and ambiguities. Phase 2B validation: `npm test` passed **14 files / 114 tests**; `npx tsc --noEmit`, `npm run build`, and `git diff --check` passed.
 
 ## Phase 2A — Deck Operations evidence boundary
 

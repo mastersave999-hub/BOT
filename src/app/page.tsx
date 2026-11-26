@@ -28,6 +28,7 @@ function createCardInstance(card: Card, ownerId: string, instanceId: string, isF
     instanceId,
     card,
     ownerId,
+    originalOwnerId: ownerId,
     controllerId: ownerId,
     isRested: false,
     isFaceUp,
