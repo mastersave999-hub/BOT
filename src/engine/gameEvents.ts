@@ -1,28 +1,56 @@
-export type GameEvent =
+type GameEventPayload =
   | { type: 'CARD_MOVED'; instanceId?: string; ownerId: string; controllerId: string; from: string; to: string; actorId: string }
   | { type: 'CONSTRUCT_ENTERED'; instanceId: string; name: string; playerId: string }
   | { type: 'CONSTRUCT_LEFT'; instanceId: string; name: string; playerId: string }
-  | { type: 'MAGIC_PLAYED'; instanceId: string; subtype: string; playerId: string }
+  | { type: 'MAGIC_PLAYED'; instanceId: string; subtype: import('./types').MagicSubtype; playerId: string }
   | { type: 'MAGIC_RESOLVED'; instanceId: string; playerId: string }
   | { type: 'AVATAR_SUMMONED'; instanceId: string; playerId: string }
   | { type: 'TOKEN_CREATED' | 'TOKEN_DESTROYED'; instanceId: string; playerId: string }
   | { type: 'ATTACK_DECLARED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'BATTLE_ENDED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'TURN_STARTED' | 'TURN_ENDED'; playerId: string; turnNumber: number }
-  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: string };
+  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' };
+
+export type GameEvent = GameEventPayload & { eventId: string };
 
 export interface PendingGameEvent { sequence: number; event: GameEvent }
 
-/** Deterministic append-only event collection. Events are committed only after a transaction succeeds. */
+/** Deterministic append-only event collection. Explicit event IDs make retries idempotent. */
 export function appendGameEvents<T extends { gameEvents?: PendingGameEvent[] }>(target: T, events: GameEvent[]): T {
   const existing = target.gameEvents ?? [];
-  const appended = events.map((event, index) => ({ sequence: existing.length + index, event }));
-  return { ...target, gameEvents: [...existing, ...appended] };
+  const seenIds = new Set(existing.map(({ event }) => event.eventId));
+  const appended: PendingGameEvent[] = [];
+  for (const event of events) {
+    if (!event.eventId) throw new TypeError('Game events require a stable eventId');
+    if (seenIds.has(event.eventId)) continue;
+    seenIds.add(event.eventId);
+    appended.push({ sequence: existing.length + appended.length, event });
+  }
+  return appended.length ? { ...target, gameEvents: [...existing, ...appended] } : target;
 }
 
 export type GameEventHandler = (event: GameEvent) => void;
 
-/** Dispatches a fixed snapshot once; nested dispatches must be explicitly initiated by callers. */
+const activeDispatchKeys = new Set<string>();
+let dispatchDepth = 0;
+const MAX_EVENT_DISPATCH_DEPTH = 32;
+
+/** Dispatches an immutable snapshot and stops reentrant cycles for the same identified event. */
 export function dispatchGameEvents(events: readonly GameEvent[], handlers: readonly GameEventHandler[]): void {
-  for (const event of events) for (const handler of handlers) handler(event);
+  if (dispatchDepth >= MAX_EVENT_DISPATCH_DEPTH) return;
+  dispatchDepth += 1;
+  try {
+    for (const event of [...events]) {
+      const key = event.eventId ?? JSON.stringify(event);
+      if (activeDispatchKeys.has(key)) continue;
+      activeDispatchKeys.add(key);
+      try {
+        for (const handler of handlers) handler(event);
+      } finally {
+        activeDispatchKeys.delete(key);
+      }
+    }
+  } finally {
+    dispatchDepth -= 1;
+  }
 }

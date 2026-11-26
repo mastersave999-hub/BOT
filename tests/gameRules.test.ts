@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Card, CardInstance, GameState, PlayerState } from '../src/engine/types';
-import { canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones, validateConstructZone, validateGameState } from '../src/engine/gameRules';
+import { beginEndPhaseDiscard, canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones, validateConstructZone, validateGameState } from '../src/engine/gameRules';
 import { runGameTransaction } from '../src/engine/gameTransaction';
 import { redactLifeCardsForViewer } from '../src/engine/multiplayer';
 
@@ -20,6 +20,20 @@ describe('shared game rules', () => {
     const afterNormal = player('p1', { usedMagicTypesThisTurn: new Set(['Normal']) });
     expect(canUseMagicTypeThisTurn(afterNormal, 'Normal')).toBe(false);
   });
+  it('enforces the combined Avatar and Token limits at legal boundaries', () => {
+    const avatars = Array.from({ length: 3 }, (_, index) => instance(`avatar-${index}`, 'p1', `Avatar ${index}`, 'Avatar'));
+    const tokens = Array.from({ length: 2 }, (_, index) => instance(`token-${index}`, 'p1', `Token ${index}`, 'Token'));
+    const nextAvatar = instance('avatar-3', 'p1', 'Avatar 3', 'Avatar');
+    const atLimit = state(player('p1', { avatarZone: [...avatars, ...tokens], hand: [nextAvatar, instance('extra-token', 'p1', 'Extra token', 'Token')] }));
+    const fourthAvatar = moveCardBetweenZones(atLimit, { instanceId: nextAvatar.instanceId, actorId: 'p1', destination: 'avatarZone', destinationPlayerId: 'p1' });
+    expect(fourthAvatar.ok).toBe(true);
+    expect(validateGameState(fourthAvatar.state)).toBeNull();
+    const tooMany = moveCardBetweenZones(fourthAvatar.state, { instanceId: 'extra-token', actorId: 'p1', destination: 'avatarZone', destinationPlayerId: 'p1' });
+    expect(tooMany.ok).toBe(false);
+    const fiveAvatars = state(player('p1', { avatarZone: [...avatars, nextAvatar, instance('avatar-4', 'p1', 'Avatar 4', 'Avatar')] }));
+    expect(validateGameState(fiveAvatars)).toMatch(/limit is 4 Avatars/);
+  });
+
   it('enforces three unique Constructs per player but permits the same name for the opponent', () => {
     const first = instance('a', 'p1', 'Shared'), second = instance('b', 'p1', 'B'), third = instance('c', 'p1', 'C');
     const current = state(player('p1', { hand: [first, second, third] }), player('p2', { constructZone: [instance('other', 'p2', 'Shared')] }));
@@ -71,23 +85,22 @@ describe('shared game rules', () => {
     expect(moved.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED']);
   });
 
-  it('discards exactly the selected excess hand cards to Hell and rejects invalid or repeated choices', () => {
+  it('discards exactly the selected excess hand cards after End Phase selection opens', () => {
     const hand = Array.from({ length: 9 }, (_, index) => instance(`h${index}`, 'p1', `Card ${index}`, 'Magic'));
-    const current = state(player('p1', { hand }));
-    expect(discardToHandLimit(current, 'p1', ['h0']).ok).toBe(false);
-    expect(discardToHandLimit(current, 'p1', ['h0', 'h0']).ok).toBe(false);
-    expect(discardToHandLimit(current, 'p1', ['missing', 'h1']).ok).toBe(false);
-    const result = discardToHandLimit(current, 'p1', ['h1', 'h7']);
+    const current = { ...state(player('p1', { hand })), currentPhase: 'END' as const };
+    const pending = beginEndPhaseDiscard(current, 'p1');
+    expect(pending.ok).toBe(true);
+    expect(discardToHandLimit(current, 'p1', ['h1', 'h7']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['h0']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['h0', 'h0']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['missing', 'h1']).ok).toBe(false);
+    const result = discardToHandLimit(pending.state, 'p1', ['h1', 'h7']);
     expect(result.ok).toBe(true);
-    const pendingState = { ...current, currentPhase: 'END' as const, pendingEndPhaseDiscardPlayerId: 'p1' };
-    const pendingResult = discardToHandLimit(pendingState, 'p1', ['h1', 'h7']);
-    expect(pendingResult.ok).toBe(true);
-    expect(pendingResult.state.pendingEndPhaseDiscardPlayerId).toBeUndefined();
-    expect(pendingResult.state.players.p1.hand).toHaveLength(7);
+    expect(result.state.pendingEndPhaseDiscardPlayerId).toBeUndefined();
     expect(result.state.players.p1.hand).toHaveLength(7);
     expect(result.state.players.p1.hell.map(item => item.instanceId)).toEqual(['h1', 'h7']);
-    expect(discardToHandLimit(state(player('p1', { hand: hand.slice(0, 7) })), 'p1', []).ok).toBe(true);
-    expect(discardToHandLimit(state(player('p1', { hand: hand.slice(0, 6) })), 'p1', []).ok).toBe(true);
+    const exactlySeven = { ...state(player('p1', { hand: hand.slice(0, 7) })), currentPhase: 'END' as const };
+    expect(beginEndPhaseDiscard(exactlySeven, 'p1').ok).toBe(false);
   });
 
   it('rolls back nested mutations and emits no committed events on rejection or throw', () => {

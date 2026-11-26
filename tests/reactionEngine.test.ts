@@ -101,7 +101,7 @@ describe('reaction window engine', () => {
     expect(started.ok).toBe(true);
     if (!started.ok) return;
     expect(started.state.players['player-2'].reactMagicBudget.opponentTurnRemaining).toBe(0);
-    expect(started.state.players['player-2'].usedMagicTypesThisTurn.has('React')).toBe(false);
+    expect(started.state.players['player-2'].usedMagicTypesThisTurn.has('React')).toBe(true);
     const resolved = resolveReactionCard(started.state);
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
@@ -110,6 +110,13 @@ describe('reaction window engine', () => {
     expect(resolved.state.players['player-2'].hell.map(card => card.instanceId)).toContain('react-1');
     expect(resolved.pendingAction?.type).toBe('SUMMON_JUTI');
     expect(resolved.state.reactionWindow).toBeUndefined();
+
+    const secondReact = makeInstance(eligible, 'player-2', 'react-2');
+    const afterFirstReact = {
+      ...resolved.state,
+      players: { ...resolved.state.players, 'player-2': { ...resolved.state.players['player-2'], hand: [secondReact] } }
+    };
+    expect(openReactionWindow(afterFirstReact, summon, { type: 'SUMMON_JUTI', actorId: 'player-1', sourceCard: summoned, paidCost: true })).toBe(afterFirstReact);
   });
 
   it('blocks protection effects until their prevention semantics are implemented', () => {

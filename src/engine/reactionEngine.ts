@@ -1,4 +1,5 @@
 import { executeCardAbility, getUnsupportedEffectReason, parseCardAbility } from './abilityEngine';
+import { canUseMagicTypeThisTurn } from './gameRules';
 import type {
   Card,
   CardInstance,
@@ -166,14 +167,10 @@ export function getReactionEligibility(
   }
   const player = state.players[playerId];
   const ownTurnUse = window.turnOwnerId === playerId;
-  const remainingReactUses = ownTurnUse
-    ? player?.reactMagicBudget.ownTurnRemaining
-    : player?.reactMagicBudget.opponentTurnRemaining;
   if (
     window.pendingReaction ||
     !player ||
-    (remainingReactUses ?? 0) < 1 ||
-    (ownTurnUse && player.usedMagicTypesThisTurn.has('React'))
+    !canUseMagicTypeThisTurn(player, 'React')
   ) {
     return { eligible: false, reason: 'React Magic is unavailable at this time.', treatedAsReact: false };
   }
@@ -312,7 +309,7 @@ export function queueReactionCard(
     },
     usedMagicTypesThisTurn: new Set(player.usedMagicTypesThisTurn)
   };
-  if (ownTurnUse) updatedPlayer.usedMagicTypesThisTurn.add('React');
+  updatedPlayer.usedMagicTypesThisTurn.add('React');
   const chainEntry: ReactionChainEntry = {
     playerId,
     sourceCard,
@@ -434,7 +431,7 @@ export function beginReactionCard(
     opponentTurnRemaining: Math.max(0, player.reactMagicBudget.opponentTurnRemaining - Number(!isOwnTurnUse))
   };
   const usedMagicTypesThisTurn = new Set(player.usedMagicTypesThisTurn);
-  if (isOwnTurnUse) usedMagicTypesThisTurn.add('React');
+  usedMagicTypesThisTurn.add('React');
   const updatedPlayer = {
     ...player,
     hand: player.hand.filter(card => card.instanceId !== cardInstanceId),

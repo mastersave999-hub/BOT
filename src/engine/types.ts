@@ -173,6 +173,12 @@ export interface GameState {
   reactionWindow?: ReactionWindow;
   reactionSequence?: number;
   pendingEndPhaseDiscardPlayerId?: string;
+  /** Revision captured when End Phase discard selection opens; commands must match it. */
+  pendingEndPhaseDiscardRevision?: number;
+  /** Monotonic revision for command preconditions and duplicate-command rejection. */
+  stateRevision?: number;
+  /** Recent idempotency keys for accepted multiplayer commands. */
+  processedCommandIds?: string[];
   /** Opening dice roll (d6) per player id; present only when turn order was decided by dice. */
   openingRolls?: Record<string, number>;
   battleContext?: {

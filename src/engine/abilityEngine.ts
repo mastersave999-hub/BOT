@@ -1,5 +1,4 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
-import { calculateNetPower } from './layers';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 
 type LayerMod = CardInstance['layerModifiers'][number];
@@ -280,8 +279,7 @@ export function executeCardAbility(
   targetAvatarId?: string
 ): { state: GameState; logs: string[] } {
   const logs: string[] = [];
-  let nextState = { ...state, players: { ...state.players } };
-  const existingActor = nextState.players[actorId];
+  const existingActor = state.players[actorId];
   if (!existingActor) return { state, logs };
   const actor = { ...existingActor };
 
@@ -382,150 +380,38 @@ export function executeCardAbility(
     }
   }) };
 
-  // 1. Handle Draw Effect ("จั่วการ์ด X ใบ")
-  if (parsed.drawCount > 0) {
-    const mainDeck = actor.deck.filter(card => card.card.type !== 'Life');
-    if (mainDeck.length > 0) {
-      const drawn = mainDeck.slice(0, parsed.drawCount).map(c => ({ ...c, isFaceUp: true }));
-      actor.deck = mainDeck.slice(drawn.length);
-      actor.hand = [...actor.hand, ...drawn];
-      logs.push(`✨ ความสามารถ "${sourceCard.card.name}": จั่วการ์ด ${drawn.length} ใบ`);
-    }
-  }
-
-  // 2. Handle Destroy All Opponent Avatars
-  if (parsed.destroysAllOpponentAvatars) {
-    for (const pid of nextState.playerOrder) {
-      if (pid === actorId) continue;
-      const opp = { ...nextState.players[pid] };
-      if (opp.avatarZone.length > 0) {
-        const destroyedNames = opp.avatarZone.map(a => a.card.name).join(', ');
-        opp.hell = [...opp.hell, ...opp.avatarZone.flatMap(avatar => [avatar, ...avatar.attachedInstances])];
-        opp.avatarZone = [];
-        nextState.players[pid] = opp;
-        logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar ฝ่ายตรงข้ามทั้งหมด (${destroyedNames})!`);
-      }
-    }
-  }
-
-  // 3. Handle On-Attack Self Buff ("เมื่อโจมตี : POWER +X")
-  if (triggerType === 'ON_ATTACK' && parsed.hasOnAttack && parsed.powerMod !== 0) {
-    actor.avatarZone = actor.avatarZone.map(a => {
-      if (a.instanceId === sourceCard.instanceId) {
-        return {
-          ...a,
-          layerModifiers: [
-            ...a.layerModifiers,
-            {
-              layer: 4,
-              powerMod: parsed.powerMod,
-              sourceCardId: `attack-${sourceCard.instanceId}-${Date.now()}`,
-              expiresAt: 'END_OF_TURN'
-            }
-          ]
-        };
-      }
-      return a;
-    });
-    logs.push(`⚔️ "${sourceCard.card.name}" เปิดใช้งานความสามารถเมื่อโจมตี: POWER ${parsed.powerMod >= 0 ? '+' : ''}${parsed.powerMod} จนจบเทิร์น!`);
-  }
-
-  // 4. Handle Targeted Effects (Power Mod, Destroy Target, Bounce Target)
-  if (targetAvatarId && triggerType !== 'ON_ATTACK') {
-    for (const pid of nextState.playerOrder) {
-      const p = pid === actorId ? actor : { ...nextState.players[pid] };
-      const targetIdx = p.avatarZone.findIndex(a => a.instanceId === targetAvatarId);
-      if (targetIdx !== -1) {
-        const targetAvatar = p.avatarZone[targetIdx];
-
-        if (parsed.destroysTarget) {
-          p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
-          p.hell = [...p.hell, targetAvatar, ...targetAvatar.attachedInstances];
-          logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar "${targetAvatar.card.name}" ลงนรก!`);
-        } else if (parsed.bouncesTarget) {
-          p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
-          p.hell = [...p.hell, ...targetAvatar.attachedInstances];
-          p.hand = [...p.hand, { ...targetAvatar, isRested: false, layerModifiers: [], attachedInstances: [] }];
-          logs.push(`🌪️ "${sourceCard.card.name}" นำ "${targetAvatar.card.name}" กลับขึ้นมือ!`);
-        } else if (parsed.resetsPower) {
-          const updatedTarget: CardInstance = {
-            ...targetAvatar,
-            layerModifiers: targetAvatar.layerModifiers.filter(modifier => modifier.sourceCardId.startsWith('aura-'))
-          };
-          p.avatarZone = p.avatarZone.map(a => (a.instanceId === targetAvatarId ? updatedTarget : a));
-          logs.push(`⚡ "${sourceCard.card.name}" คืน POWER ของ "${targetAvatar.card.name}" เป็นค่าเริ่มต้น`);
-        } else if (parsed.powerMod !== 0) {
-          const updatedTarget: CardInstance = {
-            ...targetAvatar,
-            layerModifiers: [
-              ...targetAvatar.layerModifiers,
-              {
-                layer: 1,
-                powerMod: parsed.powerMod,
-                sourceCardId: `eff-${sourceCard.instanceId}-${Date.now()}`,
-                expiresAt: 'END_OF_TURN'
-              }
-            ]
-          };
-          p.avatarZone = p.avatarZone.map(a => (a.instanceId === targetAvatarId ? updatedTarget : a));
-          const newPwr = calculateNetPower(updatedTarget);
-          logs.push(
-            `⚡ "${sourceCard.card.name}" ปรับ POWER ของ "${targetAvatar.card.name}" ${parsed.powerMod >= 0 ? '+' : ''}${parsed.powerMod} (ปัจจุบัน PWR ${newPwr})`
-          );
-        }
-
-        nextState.players[pid] = p;
-        break;
-      }
-    }
-  }
-
-  // 5. Handle Summon / Recover from Hell
-  if (parsed.summonsFromHell && actor.hell.length > 0 && actor.avatarZone.length < 4) {
-    const hellAvatarIdx = actor.hell.findIndex(c => c.card.type === 'Avatar');
-    if (hellAvatarIdx !== -1) {
-      const revived = { ...actor.hell[hellAvatarIdx], isFaceUp: true, isRested: false, layerModifiers: [] };
-      actor.hell = actor.hell.filter((_, i) => i !== hellAvatarIdx);
-      actor.avatarZone = [...actor.avatarZone, revived];
-      logs.push(`🔥 "${sourceCard.card.name}" อัญเชิญ "${revived.card.name}" จากนรกกลับลงสนาม!`);
-    }
-  } else if (parsed.recoversFromHell > 0 && actor.hell.length > 0) {
-    const toRecover = actor.hell
-      .filter(card => card.card.type !== 'Life')
-      .slice(0, parsed.recoversFromHell);
-    const recoveredIds = new Set(toRecover.map(card => card.instanceId));
-    actor.hell = actor.hell.filter(card => !recoveredIds.has(card.instanceId));
-    actor.deck = [...actor.deck, ...toRecover.map(c => ({ ...c, isFaceUp: false }))];
-    logs.push(`♻️ "${sourceCard.card.name}" นำการ์ด ${toRecover.length} ใบจากนรกกลับเข้า Deck!`);
-  }
-
-  nextState.players[actorId] = actor;
-  nextState = recomputeContinuousAuras(nextState);
-
-  return { state: nextState, logs };
 }
 
-/** Expires only the modifiers whose explicit timing matches this boundary. */
+/** Expires only matching durations at the requested player's boundary across every card zone. */
 export function expireModifiersAt(
   state: GameState,
   timing: 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE',
   playerId?: string
 ): GameState {
+  const expireCard = (card: CardInstance): CardInstance => ({
+    ...card,
+    layerModifiers: card.layerModifiers.filter(modifier => modifier.expiresAt !== timing),
+    attachedInstances: card.attachedInstances.map(expireCard)
+  });
   const newPlayers: Record<string, PlayerState> = {};
-  for (const pid of state.playerOrder) {
-    const p = state.players[pid];
-    if (!p) continue;
-    newPlayers[pid] = {
-      ...p,
-      avatarZone: p.avatarZone.map(a => ({
-        ...a,
-        layerModifiers: pid === playerId || playerId === undefined
-          ? a.layerModifiers.filter(m => m.expiresAt !== timing)
-          : a.layerModifiers
-      }))
-    };
+  for (const [pid, player] of Object.entries(state.players)) {
+    const mayExpire = playerId === undefined || pid === playerId;
+    newPlayers[pid] = mayExpire ? {
+      ...player,
+      deck: player.deck.map(expireCard),
+      hand: player.hand.map(expireCard),
+      lifeDeck: player.lifeDeck.map(expireCard),
+      avatarZone: player.avatarZone.map(expireCard),
+      constructZone: player.constructZone.map(expireCard),
+      magicZone: player.magicZone.map(expireCard),
+      hell: player.hell.map(expireCard),
+      darkDimension: player.darkDimension.map(expireCard)
+    } : player;
   }
-  return recomputeContinuousAuras({ ...state, players: newPlayers });
+  const landMagicZone = state.landMagicZone && (playerId === undefined || state.landMagicZone.controllerId === playerId)
+    ? expireCard(state.landMagicZone)
+    : state.landMagicZone;
+  return recomputeContinuousAuras({ ...state, players: newPlayers, landMagicZone });
 }
 
 export function clearEndOfTurnModifiers(state: GameState): GameState {
