@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Card, CardInstance, GameState, PlayerState } from '../src/engine/types';
-import { beginEndPhaseDiscard, canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones, validateConstructZone, validateGameState } from '../src/engine/gameRules';
+import { beginEndPhaseDiscard, canUseMagicTypeThisTurn, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateConstructZone, validateGameState } from '../src/engine/gameRules';
 import { runGameTransaction } from '../src/engine/gameTransaction';
 import { redactLifeCardsForViewer } from '../src/engine/multiplayer';
 
@@ -91,12 +91,67 @@ describe('shared game rules', () => {
       destination: 'deck',
       deckPosition: 'bottom',
       effectMove: true,
-      cause: 'PLAYER_ACTION'
+      cause: 'EFFECT',
+      playerMandated: true
     });
     expect(moved.ok).toBe(true);
     expect(moved.state.players.p1.avatarZone).toHaveLength(0);
     expect(moved.state.players.p1.deck.map(item => item.instanceId)).toContain(selectedAvatar.instanceId);
     expect(moved.state.players.p1.avatarZone[0]?.preventionShields).toBeUndefined();
+  });
+
+  it('resolves automatic protection before opening one optional exit-prevention choice across exit routes', () => {
+    const automatic = { id: 'auto', kind: 'DESTRUCTION' as const, mode: 'AUTOMATIC' as const };
+    const activated = { id: 'activated', kind: 'DESTRUCTION' as const, mode: 'ACTIVATED' as const, usesRemaining: 1 };
+    const blockedAutomatically = { ...instance('auto-avatar', 'p1', 'Auto Avatar', 'Avatar'), preventionShields: [automatic, activated] };
+    const autoState = state(player('p1', { avatarZone: [blockedAutomatically] }));
+    const prevented = moveCardBetweenZones(autoState, { instanceId: 'auto-avatar', actorId: 'p2', destination: 'hell', effectMove: true, cause: 'EFFECT' });
+    expect(prevented.state.pendingExitPrevention).toBeUndefined();
+    expect(prevented.state.players.p1.avatarZone).toHaveLength(1);
+
+    const routes = [
+      { destination: 'hell' as const, cause: 'COMBAT' as const },
+      { destination: 'hell' as const, cause: 'EFFECT' as const },
+      { destination: 'hand' as const, cause: 'EFFECT' as const },
+      { destination: 'darkDimension' as const, cause: 'EFFECT' as const }
+    ];
+    for (const [index, route] of routes.entries()) {
+      const target = { ...instance(`target-${index}`, 'p1', `Target ${index}`, 'Avatar'), preventionShields: [activated] };
+      const current = state(player('p1', { avatarZone: [target] }));
+      const opened = moveCardBetweenZones(current, { instanceId: target.instanceId, actorId: 'p2', destination: route.destination, effectMove: true, cause: route.cause });
+      expect(opened.state.pendingExitPrevention?.targetCardId).toBe(target.instanceId);
+      expect(opened.state.pendingExitPrevention?.usedActivatedPrevention).toBe(false);
+      const used = useExitPrevention(opened.state, 'p1', 'activated');
+      expect(used.ok).toBe(true);
+      expect(used.state.pendingExitPrevention).toBeUndefined();
+      expect(used.state.players.p1.avatarZone).toHaveLength(1);
+      expect(useExitPrevention(used.state, 'p1', 'activated').ok).toBe(false);
+    }
+  });
+
+  it('declining commits the paused movement and routes attached Modification Magic to Hell', () => {
+    const modification = { ...instance('mod', 'p2', 'Attached Mod', 'Magic'), card: { ...card('Attached Mod', 'Magic'), subtype: 'Modification' as const } };
+    const target = { ...instance('exit-target', 'p1', 'Exit Target', 'Avatar'), attachedInstances: [modification], preventionShields: [{ id: 'activated', kind: 'DESTRUCTION' as const, mode: 'ACTIVATED' as const }] };
+    const current = state(player('p1', { avatarZone: [target] }));
+    const opened = moveCardBetweenZones(current, { instanceId: target.instanceId, actorId: 'p2', destination: 'hell', effectMove: true, cause: 'EFFECT' });
+    const declined = declineExitPrevention(opened.state, 'p1');
+    expect(declined.ok).toBe(true);
+    expect(declined.state.players.p1.avatarZone).toHaveLength(0);
+    expect(declined.state.players.p1.hell.map(item => item.instanceId)).toContain(target.instanceId);
+    expect(declined.state.players.p2.hell.map(item => item.instanceId)).toContain('mod');
+  });
+
+  it('bypasses all exit protection for effect-mandated player choice', () => {
+    const target = { ...instance('chosen', 'p1', 'Chosen', 'Avatar'), preventionShields: [
+      { id: 'automatic', kind: 'DESTRUCTION' as const, mode: 'AUTOMATIC' as const },
+      { id: 'activated', kind: 'DESTRUCTION' as const, mode: 'ACTIVATED' as const }
+    ] };
+    const current = state(player('p1', { avatarZone: [target] }));
+    const moved = moveCardBetweenZones(current, { instanceId: target.instanceId, actorId: 'p2', destination: 'hell', effectMove: true, cause: 'EFFECT', playerMandated: true });
+    expect(moved.ok).toBe(true);
+    expect(moved.state.pendingExitPrevention).toBeUndefined();
+    expect(moved.state.players.p1.avatarZone).toHaveLength(0);
+    expect(moved.state.players.p1.hell.map(item => item.instanceId)).toContain(target.instanceId);
   });
 
   it('uses controller authorization separately from original-owner return routing', () => {

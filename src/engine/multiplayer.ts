@@ -164,7 +164,7 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
   const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
-  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification) return false;
+  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification || previous.pendingExitPrevention) return false;
   const outgoingPlayer = previous.players[activePlayerId];
   const incomingOutgoingPlayer = incoming.players[activePlayerId];
   const completedDrawPhase = previous.currentPhase === 'DRAW' && incoming.currentPhase === 'MAIN' &&

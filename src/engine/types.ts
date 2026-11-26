@@ -221,6 +221,19 @@ export interface PlayerState {
   preventionShields?: PreventionShield[];
 }
 
+export interface PendingExitPrevention {
+  targetCardId: string;
+  destination: 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension' | 'landMagicZone' | 'removedFromGame';
+  destinationPlayerId?: string;
+  actorId: string;
+  preventionPlayerId: string;
+  effectMove?: boolean;
+  deckPosition?: 'top' | 'bottom';
+  cause: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' | 'OTHER';
+  expectedRevision: number;
+  usedActivatedPrevention: false;
+}
+
 export interface PendingDeckSearchVerification {
   deckOwnerId: string;
   searcherId: string;
@@ -259,6 +272,7 @@ export interface GameState {
   pendingEndPhaseDiscardPlayerId?: string;
   /** Revision captured when End Phase discard selection opens; commands must match it. */
   pendingEndPhaseDiscardRevision?: number;
+  pendingExitPrevention?: PendingExitPrevention;
   /** Private Deck operation choice; card identities are projected only to authorized viewers. */
   pendingDeckChoice?: PendingDeckChoice;
   /** Public confirmation required by Rule Book 3.2 p.3 when a Deck Search finds no target. */
