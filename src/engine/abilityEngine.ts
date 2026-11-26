@@ -1,6 +1,7 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 import { recomputeContinuousEffects, expirePreventionShieldsAt } from './continuousEffects';
+import { calculateEffectiveSymbol } from './layers';
 import { dispatchTriggersForEvent } from './triggerEngine';
 
 type LayerMod = CardInstance['layerModifiers'][number];
@@ -212,7 +213,7 @@ export function recomputeContinuousAuras(state: GameState): GameState {
           // Check if it affects all allies or matching symbol/name
           const eff = contAvatar.card.mainEffect || '';
           const appliesToAll = !eff.includes('ชื่อ') && !eff.includes('{symbol');
-          const matchesSymbol = eff.includes('{symbol เทพ}') && (avatar.card.symbol?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
+          const matchesSymbol = eff.includes('{symbol เทพ}') && (calculateEffectiveSymbol(avatar)?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
           if (appliesToAll || matchesSymbol || contAvatar.instanceId === avatar.instanceId) {
             auraMods.push({
               layer: 2,
@@ -239,7 +240,7 @@ export function recomputeContinuousAuras(state: GameState): GameState {
       if (landCard && landParsed && landParsed.powerMod !== 0) {
         const landEff = landCard.mainEffect || '';
         const appliesToAll = !landEff.includes('ชื่อ') && !landEff.includes('{symbol');
-        const matchesTribe = landEff.includes('{symbol เทพ}') && (avatar.card.symbol?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
+        const matchesTribe = landEff.includes('{symbol เทพ}') && (calculateEffectiveSymbol(avatar)?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
         const matchesNames = landEff.includes('กุ่ย') && (avatar.card.name.includes('กุ่ย') || avatar.card.name.includes('ฮอล') || avatar.card.name.includes('นาย'));
 
         if (appliesToAll || matchesTribe || matchesNames) {

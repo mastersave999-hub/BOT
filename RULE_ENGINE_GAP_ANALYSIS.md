@@ -304,14 +304,14 @@ Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test file
 
 ## 16. Phase 3 — Card Text Adapter dry-run
 
-`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed cost forms, selector metadata (controller/type/zone/name/symbol/cost bound), durations, keywords, and both p.11 Magic declarations as independent AST nodes. The Phase 2 interpreter mapping remains conservative: self-draw compiles to an executable `EffectDefinition`; a recognized hand-discard cost compiles only with explicit instance IDs and a Game State proving the parsed card type/symbol/hand selector. Catalog SD01-005 (Juti header + draw 3) and SD01-018 (selector-checked discard + draw 2) have real typed Game State tests. Conditions, multi-effect transactions, non-draw effect execution, search/scout/mill composition, and complete static keyword behavior are not yet executable through this adapter and stay fail-closed. Any unresolved clause clears every typed effect for that card.
+`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed costs, selectors, durations, keyword specs, name references, and Magic declarations. Batch 1 adds ordered clause plans to the existing atomic resolver, explicit selected-card Deck searches and shuffle, selected-Avatar POWER add/set (including layer/duration semantics), Symbol change, and LIFE flip effects with Critical-state enforcement. SD02-001, SD01-005, SD01-018, compound draw, POWER, Symbol, LIFE, and Unity each have Game State coverage. The trigger adapter can compile supported timing events into the Phase 2 `TriggerAbility` type. It does not claim complete Phase 2 wiring: continuous/aura source registration, generic activated ability execution, unavailable/specific event discrimination, and executable `#` name/deck rules remain fail-closed. Conditions, selector/cost syntax outside the implemented subset, and every unresolved clause still clear all effects for the card.
 
 ### Exact catalog coverage (rows with nonempty `mainEffect`)
 
 | Status | Rows |
 |---|---:|
-| PARSED_READY (typed AST with complete supported discard/draw or draw-only plan; not per-card verification) | 35 |
-| UNSUPPORTED | 1,794 |
+| PARSED_READY (typed AST with a complete supported mapping; not per-card verification) | 80 |
+| UNSUPPORTED | 1,749 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 | Per-card Game State verified | **0** |
@@ -335,13 +335,12 @@ The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among eff
 
 | Reason | Rows |
 |---|---:|
-| Free-form or unrecognized clause | 1,789 |
-| State-changing effect lacks a verified typed translation | 1,405 |
-| Cost needs typed atomic feasibility/payment handling | 1,349 |
-| Zone choice, search, or ordering | 605 |
-| Conditional expression | 603 |
-| Target selection/legality | 451 |
-| Duration | 377 |
+| No complete mapped effect clause | 1,722 |
+| Targeted/zone-changing operation without a complete bound plan | 1,358 |
+| Condition expression gap | 455 |
+| Unrecognized cost syntax | 217 |
+| Inherent `#` Rule Text without executable spec | 111 |
+| Cost primitive outside the atomic resolver | 48 |
 | Explicit ambiguity marker | 4 |
 
 These are text triage counts, not unique mechanics or verified cards. Adapter tests cover representative catalog rows and name/Magic semantics; Phase 2 resolver tests remain separate typed-Game-State tests. No card is marked Verified in Phase 4.

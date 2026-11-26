@@ -1,4 +1,5 @@
 import type { CardInstance, ContinuousPowerEffect, GameState, PlayerState, PreventionShield } from './types';
+import { calculateEffectiveSymbol } from './layers';
 
 function flattenFieldCard(card: CardInstance): CardInstance[] {
   return [card, ...card.attachedInstances.flatMap(flattenFieldCard)];
@@ -23,7 +24,7 @@ function isEffectTarget(source: CardInstance, effect: ContinuousPowerEffect, tar
   const relation = effect.targetController ?? 'SOURCE_CONTROLLER';
   if (relation === 'SOURCE_CONTROLLER' && target.controllerId !== source.controllerId) return false;
   if (relation === 'OPPONENT' && target.controllerId === source.controllerId) return false;
-  if (effect.targetSymbol && !target.card.symbol?.includes(effect.targetSymbol)) return false;
+  if (effect.targetSymbol && !calculateEffectiveSymbol(target)?.includes(effect.targetSymbol)) return false;
   if (effect.targetNameIncludes && !target.card.name.includes(effect.targetNameIncludes)) return false;
   return true;
 }
@@ -51,7 +52,7 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
     const isSelf = source.instanceId === target.instanceId;
     const appliesToAll = !text.includes('ชื่อ') && !text.includes('{symbol');
     const matchesSymbol = /\{symbol\s+([^}]+)\}/.exec(text)?.[1];
-    const matchesTribe = !!matchesSymbol && (target.card.symbol?.includes(matchesSymbol) ?? false);
+    const matchesTribe = !!matchesSymbol && (calculateEffectiveSymbol(target)?.includes(matchesSymbol) ?? false);
     if (isSelf || appliesToAll || matchesTribe) {
       result.push({ layer: 2, powerMod, sourceCardId: `aura-cont-${source.instanceId}` });
     }
@@ -62,7 +63,7 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
     const text = land.card.mainEffect ?? '';
     const appliesToAll = !text.includes('ชื่อ') && !text.includes('{symbol');
     const matchesSymbol = /\{symbol\s+([^}]+)\}/.exec(text)?.[1];
-    const matchesTribe = !!matchesSymbol && (target.card.symbol?.includes(matchesSymbol) ?? false);
+    const matchesTribe = !!matchesSymbol && (calculateEffectiveSymbol(target)?.includes(matchesSymbol) ?? false);
     const matchesNames = ['กุ่ย', 'ฮอล', 'นาย'].some(name => text.includes(name) && target.card.name.includes(name));
     if (powerMod !== 0 && (appliesToAll || matchesTribe || matchesNames)) {
       result.push({ layer: 2, powerMod, sourceCardId: `aura-land-${land.instanceId}` });
