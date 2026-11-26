@@ -11,7 +11,7 @@ export type CardTextEffect =
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
   | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
-  | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name: NameReference; alternateNames?: NameReference[]; count: number; destination: 'hand' | 'deck_top' | 'deck_bottom' | 'banish' }
+  | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name?: NameReference; alternateNames?: NameReference[]; count: number; destination: 'hand' | 'deck_top' | 'deck_bottom' | 'banish' }
   | { kind: 'summon_from_hell'; cardType: 'Avatar'; name?: NameReference; count: 1; rested: boolean }
   | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
@@ -52,7 +52,8 @@ export type CardTextSelector = {
 export type CardTextEquipRestriction =
   | { kind: 'NAME'; name: NameReference }
   | { kind: 'SYMBOL'; symbol: string }
-  | { kind: 'TEXT_BOX'; phrase: string };
+  | { kind: 'TEXT_BOX'; phrase: string }
+  | { kind: 'RULES'; name?: NameReference; symbol?: string; color?: string; textBox?: string };
 export type CardTextDuration = 'END_OF_BATTLE' | 'END_OF_ATTACK' | 'END_OF_TURN' | 'NEXT_DRAW_PHASE';
 export type CardTextCost =
   | { kind: 'discard_from_hand'; count: number; selector?: CardTextSelector }
@@ -195,16 +196,23 @@ function parseSelector(source: string): CardTextSelector | undefined {
 }
 
 function parseEquipRestriction(source: string): CardTextEquipRestriction | undefined {
-  const textBox = source.match(/สวมใส่ได้เฉพาะ\s+Avatar\s+ที่มี\s*["“]([^"”]+)["”]\s*อยู่ใน\s*Text Box\s*เท่านั้น?\s*$/i);
-  if (textBox) return { kind: 'TEXT_BOX', phrase: textBox[1].trim() };
-  const symbol = source.match(/สวมใส่ได้เฉพาะ\s+Avatar\s*\{\s*symbol\s+([^}]+)\}\s*เท่านั้น?\s*$/i);
-  if (symbol) return { kind: 'SYMBOL', symbol: symbol[1].trim() };
-  const name = source.match(/สวมใส่ได้เฉพาะ\s+(?:Avatar\s+)?(?:""([^"]+)""|"([^"]+)"|“([^”]+)”|([^\n.。]+?))(?=\s+เท่านั้น(?:\s|$)|[.。]|$)\s*เท่านั้น?\s*$/u);
-  if (!name) return undefined;
-  const quotedName = name[1] ?? name[2] ?? name[3];
-  const value = (quotedName ?? name[4])?.trim();
-  if (!value) return undefined;
-  return { kind: 'NAME', name: createNameReference(value, quotedName !== undefined) };
+  const phrase = source.match(/สวมใส่ได้(?:เฉพาะ|แค่)\s+([\s\S]{1,180})/i)?.[1];
+  if (!phrase) return undefined;
+  const restriction = phrase.split(/เท่านั้น|(?=Avatar\s+ที่สวมใส่การ์ดใบนี้)/u, 1)[0].trim();
+  const textBox = restriction.match(/Avatar\s+ที่มี\s*["“]([^"”]+)["”]\s*อยู่ใน\s*Text Box/i)?.[1]?.trim();
+  const symbol = restriction.match(/(?:\{\s*symbol\s+([^}]+)\}|\bSymbol\s+([\p{L}\p{N}ก-๙_-]+))/iu);
+  const color = restriction.match(/สี\s*(แดง|ฟ้า|เขียว|ม่วง|ไร้สี)/u)?.[1];
+  const quotedName = textBox ? undefined : restriction.match(/["“]([^"”]+)["”]/)?.[1]?.trim();
+  const plainName = restriction.replace(/^Avatar\s*/i, '').replace(/\{\s*symbol\s+[^}]+\}|\bSymbol\s+[\p{L}\p{N}ก-๙_-]+/giu, '')
+    .replace(/สี\s*(?:แดง|ฟ้า|เขียว|ม่วง|ไร้สี)|ที่เป็น|อยู่ใน Text Box/gu, '')
+    .replace(/["“][^"”]+["”]/gu, '').trim();
+  const name = quotedName ?? (plainName && plainName !== 'ที่มี' ? plainName : undefined);
+  const matching = quotedName ? createNameReference(quotedName, true) : name ? createNameReference(name, false) : undefined;
+  if (textBox && !symbol && !color && !name) return { kind: 'TEXT_BOX', phrase: textBox };
+  if (symbol && !color && !name && !textBox) return { kind: 'SYMBOL', symbol: (symbol[1] ?? symbol[2]).trim() };
+  if (matching && !symbol && !color && !textBox) return { kind: 'NAME', name: matching };
+  if (!symbol && !color && !textBox && !matching && !/Avatar/u.test(restriction)) return undefined;
+  return { kind: 'RULES', ...(matching ? { name: matching } : {}), ...(symbol ? { symbol: (symbol[1] ?? symbol[2]).trim() } : {}), ...(color ? { color } : {}), ...(textBox ? { textBox } : {}) };
 }
 
 function parseContinuousPowerEffects(source: string): ContinuousPowerEffect[] {
@@ -335,14 +343,17 @@ function parseClause(source: string): ParsedCardTextClause {
   const effects: CardTextEffect[] = [];
   const unresolved: string[] = [];
   const selfPresenceCondition = /ตราบเท่าที่\s+Avatar\s+(?:ใบนี้|ตัวนี้)\s*อยู่บน Avatar Zone/.test(source);
-  if (continuousAura && /ถ้า|หาก|ตราบเท่าที่/.test(source) && !selfPresenceCondition) {
+  const attachedNameCondition = /ถ้า\s+Avatar\s+ที่สวมใส่การ์ดใบนี้คือ\s*["“][^"”]+["”]\s*POWER\s*[+-]\s*\d+\s*แทน/u.test(source);
+  if (continuousAura && /ถ้า|หาก|ตราบเท่าที่/.test(source) && !selfPresenceCondition && !attachedNameCondition) {
     unresolved.push('continuous board condition is not represented by the supported continuous AST');
   }
   if (/ผู้เล่นทุกคน|ผู้เล่นแต่ละคน/.test(effectText)) unresolved.push('multi-player target resolution is not represented by the supported plan');
   if (conditionalPrefix && conditions.length === 0) unresolved.push('condition expression is not fully represented by the supported condition AST');
   const standaloneKeywordDefinition = keywords.some(keyword => ['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) &&
     !split.costText && !split.separator && /^\s*(?:สามัคคี|โล่มนุษย์|เตะไข่|ลูกฮึด|แทงหลัง|คู่หู)(?:\s*\([^)]*\)|\s*[-–:]\s*[^\n]+)?\s*$/.test(effectText);
-  const parts = standaloneKeywordDefinition || continuousAura || equipRestriction ? [] : effectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
+  const equipEffectText = equipRestriction ? effectText.replace(/สวมใส่ได้เฉพาะ[\s\S]*?เท่านั้น/u, '').trim() : effectText;
+  const parts = standaloneKeywordDefinition || continuousAura || !equipEffectText
+    ? [] : equipEffectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
   for (const part of parts) {
     const draw = part.match(/^(?:จั่วการ์ด(?:จาก\s+Deck(?:\s+เรา)?)?)\s*(\d+)\s*ใบ(?:\s*หลังจากนั้นสับ Deck)?$/i);
     const flip = part.match(/^(หงาย|คว่ำ)\s*LIFE Card\s*(?:ใบบนสุด\s*)?(?:ของฝ่ายตรงข้าม|ของอีกฝ่าย|ฝ่ายตรงข้าม|ของเรา|ฝ่ายเรา)?\s*(\d+)\s*ใบ/i);
@@ -350,7 +361,7 @@ function parseClause(source: string): ParsedCardTextClause {
     const setPower = part.match(/POWER\s*(?:เท่ากับ|เป็น)\s*(\d+)\b/i);
     const symbolChange = part.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+จนจบ(?:การต่อสู้|การโจมตี|เทิร์น)|\s+จนถึง Draw Phase ถัดไป|$)/i);
     const search = part.match(/นำ\s+(Avatar|Construct|Magic)\s+ชื่อ\s+(?:\"([^\"]+)\"|([^\s]+(?:\s+[^\s]+)*?))\s+(\d+)\s*ใบจาก\s+Deck\s+ขึ้นมือ(?:\s+หลังจากนั้นสับ\s+Deck)?/i);
-    const recovery = part.match(/^(?:นำ|เลือก(?:หยิบ)?|เนรเทศ)\s+(Avatar|Construct|Magic)\s+(?:ชื่อ\s*)?([\s\S]+?)\s+(?:ได้สูงสุด\s*)?(\d+)\s*ใบ\s*จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา|ของฝ่ายเรา)?\s*(ขึ้นมือ|กลับขึ้นมือ|กลับเข้า\s*Deck|ไว้บนสุดของ\s*Deck|ไว้ใต้\s*Deck|เนรเทศ)?$/i);
+    const recovery = part.match(/^(?:นำ|เลือก(?:หยิบ)?|เนรเทศ)\s+(Avatar|Construct|Magic)\s*(?:ชื่อ\s*)?([\s\S]*?)\s*(?:ได้สูงสุด\s*)?(\d+)\s*ใบ\s*จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา|ของฝ่ายเรา)?\s*(ขึ้นมือ|กลับขึ้นมือ|กลับเข้า\s*Deck|ไว้บนสุดของ\s*Deck|ไว้ใต้\s*Deck|เนรเทศ)?$/i);
     const hellSummon = part.match(/^อัญเชิญ\s+Avatar\s+(?:ชื่อ\s*)?(?:\"([^\"]+)\"|“([^”]+)”|([^,]+?))\s+จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา)(?:\s+ลง\s+Avatar Zone)?(?:\s+ในสภาพ(นอน|ตื่น))?$/i);
     const movementTarget = /Avatar/.test(part) && /ตัวนั้น|ใบนั้น|Avatar\s+1\s*ใบ/.test(part);
     const destroy = movementTarget && /ทำลาย\s*(?:Avatar|การ์ดใบนี้)/.test(part);
@@ -374,13 +385,16 @@ function parseClause(source: string): ParsedCardTextClause {
       count: Number(deckReturn[0].match(/(\d+)\s*ใบ/)?.[1] ?? 1),
       position: /กลับเข้า\s*Deck/.test(deckReturn[0]) ? 'shuffle' : /บนสุด/.test(deckReturn[0]) ? 'top' : 'bottom' });
     else if (recovery) {
-      const recoveryNames = [...recovery[2].matchAll(/["“]([^"”]+)["”]/g)].map(match => createNameReference(match[1].trim(), true));
-      const names = recoveryNames.length ? recoveryNames : [createNameReference(recovery[2].trim(), false)];
+      const recoveryText = recovery[2].trim();
+      const recoveryNames = [...recoveryText.matchAll(/["“]([^"”]+)["”]/g)].map(match => createNameReference(match[1].trim(), true));
+      const names = recoveryNames.length ? recoveryNames
+        : recoveryText && !/Cost|POWER|Gem|symbol|color|สี/i.test(recoveryText)
+          ? [createNameReference(recoveryText, false)] : [];
       const destination = /บนสุด/.test(recovery[4] ?? '') ? 'deck_top'
         : /ใต้\s*Deck/.test(recovery[4] ?? '') ? 'deck_bottom'
           : /เนรเทศ/.test(recovery[4] ?? '') || /^เนรเทศ/u.test(part) ? 'banish' : 'hand';
       effects.push({ kind: 'recover_from_hell', cardType: recovery[1] as 'Avatar' | 'Construct' | 'Magic',
-        name: names[0], ...(names.length > 1 ? { alternateNames: names.slice(1) } : {}),
+        ...(names[0] ? { name: names[0] } : {}), ...(names.length > 1 ? { alternateNames: names.slice(1) } : {}),
         count: Number(recovery[3]), destination });
     }
     else if (hellSummon) effects.push({ kind: 'summon_from_hell', cardType: 'Avatar',
@@ -485,10 +499,13 @@ export function toEffectDefinitions(
     if (effect.kind === 'recover_from_hell') {
       const instanceIds = targetInstanceIds.slice(targetIndex, targetIndex + effect.count);
       targetIndex += effect.count;
-      return { kind: 'recover_from_hell', playerId: actorId, instanceIds, count: effect.count, destination: effect.destination };
+      return { kind: 'recover_from_hell', playerId: actorId, instanceIds, count: effect.count, destination: effect.destination,
+        cardType: effect.cardType,
+        ...(effect.name ? { names: [effect.name, ...(effect.alternateNames ?? [])].map(reference => ({ value: reference.value, matching: reference.matching })) } : {}) };
     }
     if (effect.kind === 'summon_from_hell') return {
-      kind: 'summon_from_hell', playerId: actorId, instanceId: targetInstanceIds[targetIndex++], rested: effect.rested
+      kind: 'summon_from_hell', playerId: actorId, instanceId: targetInstanceIds[targetIndex++] ?? '', rested: effect.rested,
+      cardType: 'Avatar', ...(effect.name ? { names: [{ value: effect.name.value, matching: effect.name.matching }] } : {})
     };
     const targetId = targetInstanceIds[targetIndex++] ?? '';
     if (effect.kind === 'set_power') return {
@@ -521,8 +538,10 @@ export function toEffectPlan(
   const requiredBindings = clause.effects.reduce((total, effect) => total +
     (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' || effect.kind === 'recover_from_hell' ? effect.count :
       effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'sacrifice_avatar' || effect.kind === 'summon_from_hell' ? 1 : 0), 0);
-  if (targetInstanceIds.length !== requiredBindings || new Set(targetInstanceIds).size !== targetInstanceIds.length) return null;
-  if (requiredBindings > 0) {
+  const supportsPendingHellChoice = clause.effects.length === 1 &&
+    (clause.effects[0].kind === 'recover_from_hell' || clause.effects[0].kind === 'summon_from_hell') && targetInstanceIds.length === 0;
+  if ((!supportsPendingHellChoice && targetInstanceIds.length !== requiredBindings) || new Set(targetInstanceIds).size !== targetInstanceIds.length) return null;
+  if (requiredBindings > 0 && !supportsPendingHellChoice) {
     if (!state) return null;
     const selector = clause.selector;
     let bindingIndex = 0;

@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEffectPlan } from '../src/engine/effectResolver';
+import { resolveHellChoice } from '../src/engine/hellChoice';
 import { activateRegisteredCardTextAbility, createNameReference, effectiveMagicSubtype, magicCancellationTargetType, matchesCardName, parseCardNameRules, parseCardText, toCardTextEffectPlan, toEffectDefinitions, toEffectPlan, toTriggerAbility, validateAbilityMagicQuota } from '../src/engine/cardTextAdapter';
 import { moveCardBetweenZones } from '../src/engine/gameRules';
+import { checkModificationEquip } from '../src/engine/equipLegality';
 import { validateMagicPlay } from '../src/engine/gameRules';
 import { validateDeck } from '../src/engine/deckValidator';
 import { calculateEffectiveSymbol, calculateNetPower } from '../src/engine/layers';
+import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
 import { beginReactionCard, canCancelMagicCard, cancelReactionTarget, resolveReactionCard } from '../src/engine/reactionEngine';
 import { payCombatKeyword } from '../src/engine/combatKeywords';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
@@ -625,6 +628,31 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(criticalResult.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
   });
 
+  it('parses and enforces combined Modification equip name and Symbol restrictions', () => {
+    const modification = byPrintId('SD07-018');
+    const parsed = parseCardText(modification);
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(parsed.clauses[0].equipRestriction).toMatchObject({
+      kind: 'RULES', name: { value: 'ขุนพล', matching: 'DELIMITED_WORD_SEQUENCE' }, symbol: 'ชาวต่างชาติ'
+    });
+    const host = { ...byPrintId('SD01-001'), name: 'กวนอู ขุนพล', symbol: 'ชาวต่างชาติ', color: 'แดง' };
+    expect(checkModificationEquip(modification, host)).toMatchObject({ legal: true, restricted: true });
+    expect(checkModificationEquip(modification, { ...host, symbol: 'เทพ' }).legal).toBe(false);
+    expect(checkModificationEquip(modification, { ...host, name: 'กวนอู' }).legal).toBe(false);
+
+    const state = gameState();
+    const guan = { ...instance('host-guan', 'p1'), card: host, attachedInstances: [
+      { ...instance('mod-guan', 'p1'), card: modification }
+    ] };
+    const otherHost = { ...instance('host-other', 'p1'), card: { ...host, name: 'ขุนพล ผู้พิทักษ์' }, attachedInstances: [
+      { ...instance('mod-other', 'p1'), card: modification }
+    ] };
+    state.players.p1.avatarZone.push(guan, otherHost);
+    const recalculated = recomputeContinuousEffects(state);
+    expect(calculateNetPower(recalculated.players.p1.avatarZone.find(card => card.instanceId === guan.instanceId)! ) - host.power).toBe(2);
+    expect(calculateNetPower(recalculated.players.p1.avatarZone.find(card => card.instanceId === otherHost.instanceId)! ) - host.power).toBe(1);
+  });
+
   it('parses explicit Hell recovery destinations without conflating their zone semantics', () => {
     const card = byPrintId('SD01-001');
     const cases = [
@@ -638,6 +666,72 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
       expect(parsed.status).toBe('PARSED_READY');
       expect(parsed.clauses[0].effects[0]).toMatchObject({ kind: 'recover_from_hell', count: 1, destination });
     }
+  });
+
+  it('opens a matching type-only Hell recovery choice when no name is printed', () => {
+    const base = byPrintId('SD01-001');
+    const parsed = parseCardText({ ...base, mainEffect: 'นำ Construct 1 ใบจากนรกเรา ขึ้นมือ' });
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(parsed.clauses[0].effects[0]).toMatchObject({ kind: 'recover_from_hell', cardType: 'Construct', count: 1 });
+    const state = gameState();
+    const construct = { ...instance('hell-construct', 'p1'), card: { ...base, type: 'Construct' as const } };
+    state.players.p1.hell.push(construct);
+    const plan = toEffectPlan(parsed.clauses[0], 'p1', [], state);
+    expect(plan).not.toBeNull();
+    const staged = resolveEffectPlan(state, plan!);
+    expect(staged.ok).toBe(true);
+    expect(staged.state.pendingHellChoice?.candidateInstanceIds).toEqual(['hell-construct']);
+    const pending = staged.state.pendingHellChoice!;
+    const resolved = resolveHellChoice(staged.state, 'p1', ['hell-construct'], pending.expectedRevision);
+    expect(resolved.ok).toBe(true);
+    expect(resolved.state.players.p1.hand.map(card => card.instanceId)).toContain('hell-construct');
+  });
+
+  it.each([
+    ['deck top', 'นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา ไว้บนสุดของ Deck', 'deck', 'deck_top'],
+    ['deck bottom', 'นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา ไว้ใต้ Deck', 'deck', 'deck_bottom'],
+    ['Banish', 'เนรเทศ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา', 'darkDimension', 'banish']
+  ] as const)('resolves a pending Hell choice to %s', (_label, text, zone, destination) => {
+    const base = byPrintId('SD01-001');
+    const parsed = parseCardText({ ...base, mainEffect: text });
+    expect(parsed.status).toBe('PARSED_READY');
+    const state = gameState();
+    state.players.p1.hell.push(instance('destination-choice', 'p1'));
+    const plan = toEffectPlan(parsed.clauses[0], 'p1', [], state);
+    expect(plan).not.toBeNull();
+    const staged = resolveEffectPlan(state, plan!);
+    expect(staged.ok).toBe(true);
+    const pending = staged.state.pendingHellChoice!;
+    expect(staged.state.gameEvents?.some(item => item.event.type === 'EFFECT_RESOLVED' && item.event.effectKind === 'recover_from_hell') ?? false).toBe(false);
+    const resolved = resolveHellChoice(staged.state, 'p1', ['destination-choice'], pending.expectedRevision);
+    expect(resolved.ok).toBe(true);
+    expect(resolved.state.players.p1[zone].map(card => card.instanceId)).toContain('destination-choice');
+    expect(resolved.state.pendingHellChoice).toBeUndefined();
+    expect(resolved.state.gameEvents?.filter(item => item.event.type === 'EFFECT_RESOLVED' && item.event.effectKind === 'recover_from_hell')).toHaveLength(1);
+    if (destination === 'deck_top') expect(resolved.state.players.p1.deck[0].instanceId).toBe('destination-choice');
+    if (destination === 'deck_bottom') expect(resolved.state.players.p1.deck.at(-1)?.instanceId).toBe('destination-choice');
+  });
+
+  it('opens and resolves a revision-checked choice for matching Hell recovery candidates', () => {
+    const base = byPrintId('SD01-001');
+    const recover = parseCardText({ ...base, mainEffect: 'นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเราขึ้นมือ' });
+    const state = gameState();
+    state.players.p1.hell.push(instance('p1-recover-choice', 'p1'));
+    const plan = toEffectPlan(recover.clauses[0], 'p1', [], state);
+    expect(plan).not.toBeNull();
+    const staged = resolveEffectPlan(state, plan!);
+    expect(staged.ok).toBe(true);
+    expect(staged.state.pendingHellChoice).toMatchObject({
+      authorizedViewerId: 'p1', cardType: 'Avatar', candidateInstanceIds: ['p1-recover-choice'], destination: 'hand', minSelect: 1, maxSelect: 1
+    });
+    const pending = staged.state.pendingHellChoice!;
+    expect(resolveHellChoice(staged.state, 'p2', ['p1-recover-choice'], pending.expectedRevision).ok).toBe(false);
+    expect(resolveHellChoice(staged.state, 'p1', ['p1-recover-choice'], pending.expectedRevision - 1).ok).toBe(false);
+    const resolved = resolveHellChoice(staged.state, 'p1', ['p1-recover-choice'], pending.expectedRevision, 'hell-choice-1');
+    expect(resolved.ok).toBe(true);
+    expect(resolved.state.pendingHellChoice).toBeUndefined();
+    expect(resolved.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-recover-choice');
+    expect(resolveHellChoice(resolved.state, 'p1', ['p1-recover-choice'], pending.expectedRevision, 'hell-choice-1').ok).toBe(false);
   });
 
   it('binds named Hell recovery and special summon to a selected owned card', () => {
@@ -660,9 +754,13 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(summon.clauses[0].effects[0]).toMatchObject({ kind: 'summon_from_hell', rested: true });
     const summonState = gameState();
     summonState.players.p1.hell.push(instance('p1-summon', 'p1'));
-    const summonPlan = toEffectPlan(summon.clauses[0], 'p1', [], summonState, ['p1-summon']);
+    const summonPlan = toEffectPlan(summon.clauses[0], 'p1', [], summonState);
     expect(summonPlan).not.toBeNull();
-    const summoned = resolveEffectPlan(summonState, summonPlan!);
+    const stagedSummon = resolveEffectPlan(summonState, summonPlan!);
+    expect(stagedSummon.ok).toBe(true);
+    const pendingSummon = stagedSummon.state.pendingHellChoice!;
+    expect(pendingSummon).toMatchObject({ destination: 'avatarZone', cardType: 'Avatar', candidateInstanceIds: ['p1-summon'] });
+    const summoned = resolveHellChoice(stagedSummon.state, 'p1', ['p1-summon'], pendingSummon.expectedRevision);
     expect(summoned.ok).toBe(true);
     expect(summoned.state.players.p1.avatarZone.map(card => card.instanceId)).toContain('p1-summon');
     expect(summoned.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-summon')?.isRested).toBe(true);

@@ -35,6 +35,7 @@ export function validateMagicPlay(state: GameState, playerId: string, subtype: N
   if (state.pendingEndPhaseDiscardPlayerId) return 'End Phase discard selection is pending';
   if (state.pendingExitPrevention) return 'Exit-prevention choice is pending';
   if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return 'A Deck operation choice is pending';
+  if (state.pendingHellChoice) return 'A Hell recovery choice is pending';
   if (subtype === 'React') {
     if (convertedNormalToReact && (state.currentPhase !== 'BATTLE' || state.reactionWindow)) return 'Converted Normal Magic may only use React timing during your Battle Phase';
     if (!convertedNormalToReact && !state.reactionWindow) return 'React Magic requires a valid response window';
@@ -99,7 +100,26 @@ export function validateGameState(state: GameState): string | null {
       pending.push(...current.attachedInstances);
     }
   }
-  if ([state.pendingDeckChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId, state.pendingExitPrevention].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if ([state.pendingDeckChoice, state.pendingHellChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId, state.pendingExitPrevention].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if (state.pendingHellChoice) {
+    const pending = state.pendingHellChoice;
+    const player = state.players[pending.playerId];
+    if (!player || !state.players[pending.actorId] || !state.players[pending.authorizedViewerId] ||
+      !['recover_from_hell', 'summon_from_hell'].includes(pending.effectKind) ||
+      !['Avatar', 'Construct', 'Magic'].includes(pending.cardType) ||
+      !['deck_top', 'deck_bottom', 'hand', 'banish', 'avatarZone'].includes(pending.destination) ||
+      (pending.destination === 'avatarZone' && (pending.effectKind !== 'summon_from_hell' || pending.cardType !== 'Avatar')) ||
+      (pending.effectKind === 'summon_from_hell' && pending.destination !== 'avatarZone') ||
+      !Array.isArray(pending.candidateInstanceIds) || !Number.isSafeInteger(pending.expectedRevision) || pending.expectedRevision !== state.stateRevision ||
+      !Number.isSafeInteger(pending.minSelect) || !Number.isSafeInteger(pending.maxSelect) || pending.minSelect < 0 ||
+      pending.maxSelect < pending.minSelect || pending.maxSelect > pending.candidateInstanceIds.length ||
+      new Set(pending.candidateInstanceIds).size !== pending.candidateInstanceIds.length ||
+      pending.candidateInstanceIds.some(id => typeof id !== 'string' || !player.hell.some(card => card.instanceId === id && card.card.type === pending.cardType)) ||
+      (pending.names !== undefined && (!Array.isArray(pending.names) || pending.names.some(name => !name.value ||
+        !['DELIMITED_WORD_SEQUENCE', 'EXACT_CARD_NAME'].includes(name.matching))))) {
+      return 'Invalid pending Hell choice';
+    }
+  }
   if (state.pendingExitPrevention) {
     const pending = state.pendingExitPrevention;
     const targetOnField = Object.values(state.players).some(player =>
@@ -177,7 +197,7 @@ const ZONES: readonly PlayerZone[] = ['deck', 'hand', 'lifeDeck', 'avatarZone', 
 export function changeAvatarControl(state: GameState, actorId: string, instanceId: string, controllerId: string): ZoneMoveResult {
   const invalid = validateGameState(state);
   if (invalid) return { ok: false, state, reason: invalid };
-  if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
+  if (state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
   if (!state.players[actorId] || !state.players[controllerId]) return { ok: false, state, reason: 'Actor or new controller does not exist' };
   const sourcePlayerId = state.playerOrder.find(playerId => state.players[playerId]?.avatarZone.some(item => item.instanceId === instanceId));
   const avatar = sourcePlayerId ? state.players[sourcePlayerId].avatarZone.find(item => item.instanceId === instanceId) : undefined;
@@ -209,7 +229,7 @@ export function changeAvatarControl(state: GameState, actorId: string, instanceI
 export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest): ZoneMoveResult {
   const invalid = validateGameState(state);
   if (invalid) return { ok: false, state, reason: invalid };
-  if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
+  if (state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
   if (state.pendingExitPrevention && !request.skipExitPrevention) return { ok: false, state, reason: 'Exit-prevention choice is pending' };
   let card: CardInstance | undefined;
   let sourcePlayerId: string | undefined;
@@ -562,7 +582,7 @@ export function beginEndPhaseDiscard(state: GameState, playerId: string): ZoneMo
   if (!player || state.currentPhase !== 'END' || state.playerOrder[state.currentTurnPlayerIndex] !== playerId) {
     return { ok: false, state, reason: 'Only the active player may begin End Phase discard selection' };
   }
-  if (state.pendingEndPhaseDiscardPlayerId || state.pendingDeckChoice || state.pendingDeckSearchVerification || player.hand.length <= 7) {
+  if (state.pendingEndPhaseDiscardPlayerId || state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification || player.hand.length <= 7) {
     return { ok: false, state, reason: 'End Phase discard selection is not required or is already pending' };
   }
   const revision = (state.stateRevision ?? 0) + 1;
@@ -586,7 +606,7 @@ export function discardToHandLimit(
   if (commandId && state.processedCommandIds?.includes(commandId)) {
     return { ok: false, state, reason: 'Duplicate End Phase discard command' };
   }
-  if (!player || state.pendingDeckChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId !== playerId || state.currentPhase !== 'END' ||
+  if (!player || state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId !== playerId || state.currentPhase !== 'END' ||
     state.playerOrder[state.currentTurnPlayerIndex] !== playerId) {
     return { ok: false, state, reason: 'No pending End Phase discard selection for this player' };
   }

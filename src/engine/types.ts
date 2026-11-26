@@ -269,6 +269,22 @@ export interface PendingDeckChoice {
   commandId?: string;
 }
 
+export interface PendingHellChoice {
+  effectKind: 'recover_from_hell' | 'summon_from_hell';
+  playerId: string;
+  actorId: string;
+  authorizedViewerId: string;
+  candidateInstanceIds: string[];
+  minSelect: number;
+  maxSelect: number;
+  cardType: 'Avatar' | 'Construct' | 'Magic';
+  names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }>;
+  destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish' | 'avatarZone';
+  rested?: boolean;
+  expectedRevision: number;
+  commandId?: string;
+}
+
 export interface GameState {
   id: string;
   mode: 'DUEL' | 'AD_MUA';
@@ -287,6 +303,8 @@ export interface GameState {
   pendingExitPrevention?: PendingExitPrevention;
   /** Private Deck operation choice; card identities are projected only to authorized viewers. */
   pendingDeckChoice?: PendingDeckChoice;
+  /** Private Hell recovery choice; card identities are projected only to authorized viewers. */
+  pendingHellChoice?: PendingHellChoice;
   /** Public confirmation required by Rule Book 3.2 p.3 when a Deck Search finds no target. */
   pendingDeckSearchVerification?: PendingDeckSearchVerification;
   /** Monotonic revision for command preconditions and duplicate-command rejection. */

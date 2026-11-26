@@ -249,7 +249,7 @@ export function openReactionWindow(
   pendingAction?: ReactionWindow['pendingAction']
 ): GameState {
   // Rule Book 3.2 p.18 defines priority for Duel only; do not invent a 3–4 player order.
-  if (state.playerOrder.length > 2 || state.reactionWindow || state.pendingDeckChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || !state.playerOrder.includes(trigger.actorId)) return state;
+  if (state.playerOrder.length > 2 || state.reactionWindow || state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || !state.playerOrder.includes(trigger.actorId)) return state;
   const turnOwnerId = state.playerOrder[state.currentTurnPlayerIndex];
   if (!turnOwnerId || turnOwnerId !== trigger.actorId) return state;
 
