@@ -353,20 +353,20 @@ These are text triage counts, not unique mechanics or verified cards. Adapter te
 - Named Hell recovery to hand and named Avatar special summon are bound to explicit instance IDs in the actor's Hell. The resolver rejects absent, wrong-type, wrong-name, duplicate, or insufficient selections and keeps all-or-nothing semantics. Other Hell-selection phrasing remains unsupported until its selector/destination behavior is represented.
 - Modification Magic equip restrictions implement Rule Book pp.13, 18 quoted-word versus exact-name matching. Illegal attempts send the card to its owner's Hell; recomputation rechecks an existing attachment continuously and sends it to Hell if the restriction ceases to hold. Unparseable restriction syntax fails closed.
 
-### Phase 4B-1: current 1,833-row audit
+### Phase 4B-2: current 1,833-row audit
 
 | Status | Rows |
 |---|---:|
-| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 73 |
+| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 79 |
 | PARSED_READY (including verified) | 226 |
-| PARSED_READY not yet verified | 153 |
+| PARSED_READY not yet verified | 147 |
 | UNSUPPORTED | 1,603 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
-The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 73 pass full-clause before/after Game State assertions, while 153 remain unverified. The Step 4B-1 delta is two newly verified timing rows: BT06-010 and ODY1-006, both GEM-paid Juti effects. The harness exercised timing/event behavior for 44 catalog rows total. Engine support now includes atomic Avatar/Construct GEM payment with matching-color/colorless GEM, zero-GEM rejection, exact-payment metadata and the Rule Book overpayment constraint; destruction events now execute Last Words from Hell; phase transition events are simulated through `turnEngine`. Scout and Combat Keyword harness simulations remain out of scope. The requested 211-row threshold is not met. Reproduce parsing counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
+The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 79 pass full-clause before/after Game State assertions, while 147 remain unverified. Step 4B-2 newly verifies six combat-keyword catalog rows through seeded attack/battle fixtures; the 4B-1 GEM-paid Juti, Last Words, and End/Draw/Main timing coverage remains. The harness exercised timing/event behavior for 44 catalog rows total. Combat keyword fixtures cover Unity, Human Shield, Egg Kick, Grit, Backstab and Duo when present in the parsed set. Scout player-choice AST changes remain out of scope for 4B-3. The requested 211-row threshold is not met. Reproduce parsing counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
 
-**Unverified blocker counts (overlapping):** timing/event context 78; keyword behavior 66; Scout choice resolution 58; generated plan-binding failure 26; no executable effect in a clause 21; no official catalog target fixture for `modify_power` 8 and `sacrifice_avatar` 2; typed trigger plan compile failure 6; LIFE timing outside active-field simulation 5; trigger fixture subject/actor mismatch 5; unavailable Hell selection 1. A row can have multiple blockers; counts are not an exclusive partition. No row was demoted from `PARSED_READY` to inflate the verified rate. Final validation results are recorded after running the Step 4B-1 check set.
+**Unverified blocker counts (overlapping):** timing/event context 75; keyword behavior 52; Scout choice resolution 58; generated plan-binding failure 20; no executable effect in a clause 15; no official catalog target fixture for `modify_power` 8 and `sacrifice_avatar` 2; typed trigger plan compile failure 6; LIFE timing outside active-field simulation 5; trigger fixture subject/actor mismatch 5; unavailable Hell selection 1. A row can have multiple blockers; counts are not an exclusive partition. No row was demoted from `PARSED_READY` to inflate the verified rate. Full Step 4B-2 validation passed.
 
 ### Phase 4B overlapping unsupported-reason counts
 
@@ -388,6 +388,6 @@ Counts below are overlapping pattern matches across exact database rows; duplica
 
 ### Phase 4B verification boundary
 
-`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 153 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
+`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 147 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
 
-**Step 4B-1 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed.
+**Step 4B-2 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed.

@@ -17,6 +17,8 @@ import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type Ef
 import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
 import { checkModificationEquip } from '../src/engine/equipLegality';
 import { moveCardBetweenZones, payGemAndPlayFromHand } from '../src/engine/gameRules';
+import { applyHumanShieldRedirect, declareCombatAttack, declareCombatAttackWithHelpers, declareDuo, resolveDeclaredBattle } from '../src/engine/combatKeywords';
+import { calculateNetPower as netPower } from '../src/engine/layers';
 import { finishEndPhaseTurn, transitionGamePhase } from '../src/engine/turnEngine';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
@@ -39,12 +41,12 @@ function recordUnverified(card: Card, reason: string) {
   unverifiedRows.set(key, existing);
 }
 
-function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardText>): string[] {
+function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardText>, combatKeywordVerified = false): string[] {
   const blockers = new Set<string>();
   if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction)) blockers.add('no executable effect in one or more clauses');
   if (parsed.clauses.some(clause => clause.unresolved.length > 0)) blockers.add('unresolved AST clause');
   if (parsed.clauses.some(clause => clause.timing.mode || clause.timing.event || clause.timing.frequency)) blockers.add('timing/event context not verified');
-  if (parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
+  if (!combatKeywordVerified && parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
   if (parsed.clauses.some(clause => /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) blockers.add('timing/event context not verified');
   if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) blockers.add('Scout requires an explicit player choice');
   if (!card.mainEffect.trim()) blockers.add('empty printed effect');
@@ -373,9 +375,139 @@ function stateWithoutConditions(input: GameState, conditions: EffectCondition[])
   return state;
 }
 
-function expectedToVerify(card: Card, parsed: ReturnType<typeof parseCardText>): boolean {
+function verifyCombatKeywordCard(card: Card, state: GameState): boolean {
+  const keywords = new Set(parseCardText(card).clauses.flatMap(clause => clause.keywordSpecs)
+    .filter(spec => spec.kind === 'COMBAT_KEYWORD').map(spec => spec.keyword));
+  if (keywords.size === 0) return false;
+  if (card.type !== 'Avatar') return false;
+
+  const source = instance('phase4-combat-source', 'p1', card);
+  const attackerCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.printId !== card.printId && candidate.power > 0);
+  if (!attackerCard) return false;
+  const attacker = instance('phase4-combat-attacker', 'p1', attackerCard);
+  const defenderCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0);
+  if (!defenderCard) return false;
+  const defender = instance('phase4-combat-defender', 'p2', defenderCard);
+  let exercised = false;
+
+  if (keywords.has('สามัคคี') || keywords.has('แทงหลัง')) {
+    state.currentPhase = 'BATTLE';
+    state.players.p1.avatarZone.push(attacker, source);
+    state.players.p2.avatarZone.push(defender);
+    const keyword = keywords.has('สามัคคี') ? 'สามัคคี' : 'แทงหลัง';
+    const declared = declareCombatAttackWithHelpers(state, attacker.instanceId,
+      { type: 'AVATAR', playerId: 'p2', instanceId: defender.instanceId },
+      [{ instanceId: source.instanceId, keyword }]);
+    expect(declared).toBeTruthy();
+    if (!declared) return false;
+    expect(declared.players.p1.avatarZone.find(item => item.instanceId === source.instanceId)?.isRested).toBe(true);
+    const boosted = declared.players.p1.avatarZone.find(item => item.instanceId === attacker.instanceId)!;
+    expect(netPower(boosted)).toBe((attacker.card.power ?? 0) + (source.card.power ?? 0) + (keyword === 'แทงหลัง' ? 1 : 0));
+    const battle = resolveDeclaredBattle(declared);
+    expect(battle.ok).toBe(true);
+    expect(battle.state.battleContext).toBeUndefined();
+    const helperAfterBattle = battle.state.players.p1.avatarZone.find(item => item.instanceId === source.instanceId);
+    const helperWasDestroyed = battle.state.players.p1.hell.some(item => item.instanceId === source.instanceId);
+    expect(helperAfterBattle?.isRested || helperWasDestroyed).toBe(true);
+    exercised = true;
+  }
+
+  if (keywords.has('โล่มนุษย์')) {
+    const shield = instance('phase4-combat-shield', 'p2', card);
+    const attacking = instance('phase4-shield-attacker', 'p1', attackerCard);
+    const target = instance('phase4-shield-target', 'p2', defenderCard);
+    const shieldState = makeState();
+    shieldState.currentPhase = 'BATTLE';
+    shieldState.players.p1.avatarZone.push(attacking);
+    shieldState.players.p2.avatarZone.push(target, shield);
+    const declared = declareCombatAttack(shieldState, attacking.instanceId,
+      { type: 'AVATAR', playerId: 'p2', instanceId: target.instanceId });
+    expect(declared).toBeTruthy();
+    if (!declared) return false;
+    const redirected = applyHumanShieldRedirect(declared, { type: 'AVATAR', playerId: 'p2', instanceId: target.instanceId });
+    expect(redirected.redirected).toBe(true);
+    expect(redirected.target).toEqual({ type: 'AVATAR', playerId: 'p2', instanceId: shield.instanceId });
+    expect(redirected.state.players.p2.avatarZone.find(item => item.instanceId === shield.instanceId)?.isRested).toBe(true);
+    const battle = resolveDeclaredBattle(declared);
+    expect(battle.ok).toBe(true);
+    expect(battle.state.battleContext).toBeUndefined();
+    exercised = true;
+  }
+
+  if (keywords.has('เตะไข่')) {
+    const egg = instance('phase4-egg-kick', 'p1', card);
+    const blocker = instance('phase4-egg-blocker', 'p2', defenderCard);
+    const life = instance('phase4-egg-life', 'p2', { ...base, type: 'Life' }, { isFaceUp: false });
+    const eggState = makeState();
+    eggState.currentPhase = 'BATTLE';
+    eggState.players.p1.avatarZone.push(egg);
+    eggState.players.p2.avatarZone.push(blocker);
+    eggState.players.p2.lifeDeck.push(life);
+    const declared = declareCombatAttack(eggState, egg.instanceId, { type: 'LIFE', playerId: 'p2' });
+    expect(declared).toBeTruthy();
+    if (!declared) return false;
+    const battle = resolveDeclaredBattle(declared);
+    expect(battle.ok).toBe(true);
+    expect(battle.state.players.p2.lifeDeck[0].isFaceUp).toBe(true);
+    expect(battle.state.gameEvents?.some(item => item.event.type === 'DAMAGE_DEALT')).toBe(true);
+    exercised = true;
+  }
+
+  if (keywords.has('ลูกฮึด')) {
+    const grit = instance('phase4-grit', 'p2', { ...card, power: 4 });
+    const attacker = instance('phase4-grit-attacker', 'p1', { ...attackerCard, power: 4 });
+    const equalAttacker = instance('phase4-grit-equal-attacker', 'p1', { ...attackerCard, power: 4 });
+    const normalDefenderCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 && !candidate.mainEffect.includes('ลูกฮึด'));
+    if (!normalDefenderCard) return false;
+    const normalDefender = instance('phase4-normal-defender', 'p2', { ...normalDefenderCard, power: 4 });
+    const gritState = makeState();
+    gritState.currentPhase = 'BATTLE';
+    gritState.players.p1.avatarZone.push(attacker);
+    gritState.players.p2.avatarZone.push(grit, normalDefender);
+    const gritAttack = declareCombatAttack(gritState, attacker.instanceId, { type: 'AVATAR', playerId: 'p2', instanceId: grit.instanceId });
+    expect(gritAttack).toBeTruthy();
+    if (!gritAttack) return false;
+    const gritResult = resolveDeclaredBattle(gritAttack);
+    expect(gritResult.state.players.p2.avatarZone.some(item => item.instanceId === grit.instanceId)).toBe(true);
+    const equalState = makeState();
+    equalState.currentPhase = 'BATTLE';
+    equalState.players.p1.avatarZone.push(equalAttacker);
+    equalState.players.p2.avatarZone.push(normalDefender);
+    const equalAttack = declareCombatAttack(equalState, equalAttacker.instanceId, { type: 'AVATAR', playerId: 'p2', instanceId: normalDefender.instanceId });
+    expect(equalAttack).toBeTruthy();
+    if (!equalAttack) return false;
+    const equalResult = resolveDeclaredBattle(equalAttack);
+    expect(equalResult.state.players.p1.hell.some(item => item.instanceId === equalAttacker.instanceId)).toBe(true);
+    expect(equalResult.state.players.p2.hell.some(item => item.instanceId === normalDefender.instanceId)).toBe(true);
+    exercised = true;
+  }
+
+  if (keywords.has('คู่หู')) {
+    const partnerName = parseCardText(card).clauses.flatMap(clause => clause.keywordSpecs)
+      .find(spec => spec.kind === 'COMBAT_KEYWORD' && spec.keyword === 'คู่หู')?.partnerName;
+    if (!partnerName) return false;
+    const partnerCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.name.includes(partnerName));
+    if (!partnerCard) return false;
+    const partnerState = makeState();
+    const duoSource = instance('phase4-duo-source', 'p1', card);
+    const partner = instance('phase4-duo-partner', 'p1', partnerCard);
+    partnerState.players.p1.avatarZone.push(duoSource, partner);
+    const paired = declareDuo(partnerState, duoSource.instanceId, partner.instanceId);
+    expect(paired).toBeTruthy();
+    if (!paired) return false;
+    expect(paired.players.p1.avatarZone).toEqual(expect.arrayContaining([
+      expect.objectContaining({ instanceId: duoSource.instanceId, duoWithInstanceId: partner.instanceId, controlChangeImmune: true }),
+      expect.objectContaining({ instanceId: partner.instanceId, duoWithInstanceId: duoSource.instanceId, controlChangeImmune: true })
+    ]));
+    exercised = true;
+  }
+
+  return exercised;
+}
+
+function expectedToVerify(card: Card, parsed: ReturnType<typeof parseCardText>, combatKeywordVerified = false): boolean {
   if (parsed.status !== 'PARSED_READY' || parsed.clauses.length === 0) return false;
-  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction || clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
+  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction && !(combatKeywordVerified && clause.keywordSpecs.length > 0) || clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 && !combatKeywordVerified || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
   if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) return false;
   return parsed.clauses.every(clause => clause.effects.length > 0 || clause.equipRestriction) && !!card.mainEffect.trim();
 }
@@ -610,6 +742,16 @@ describe('Phase 4B per-card Game State verification', () => {
     const equipVerified = verifyEquipRestrictions(card, parsed);
     if (!equipVerified) recordUnverified(card, 'equip restriction has no positive and negative official catalog target pair');
     const before = structuredClone(state);
+    const combatKeywordVerified = verifyCombatKeywordCard(card, makeState());
+    const keywordOnly = parsed.clauses.length > 0 && parsed.clauses.every(clause =>
+      clause.keywordSpecs.length > 0 && clause.effects.length === 0 && !clause.cost && !clause.timing.event &&
+      !clause.timing.mode && clause.conditions.length === 0 && clause.unresolved.length === 0);
+    if (keywordOnly) {
+      if (combatKeywordVerified && equipVerified && fixtureErrors.length === 0) {
+        verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      } else recordUnverified(card, 'combat keyword lifecycle fixture unavailable or failed');
+      return;
+    }
     if (parsed.clauses.length > 0 && parsed.clauses.every(clause => clause.equipRestriction && clause.effects.length === 0 && !clause.cost)) {
       if (equipVerified) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
       return;
@@ -650,7 +792,35 @@ describe('Phase 4B per-card Game State verification', () => {
         : ability.actorRelation === 'SELF' || ability.eventSubject === 'SOURCE' ? 'p1' : 'p2';
       const eventId = `phase4:${card.printId}:${catalog.indexOf(card)}:event`;
       let emitted: GameState;
-      if (ability.eventType === 'AVATAR_SUMMONED' && /^(?:พอดี\s+)?จุติ/u.test(triggerClause.source)) {
+      if (['ATTACK_DECLARED', 'BATTLE_ENDED', 'AVATAR_DESTROYED'].includes(ability.eventType)) {
+        if (card.type !== 'Avatar' || ability.eventSubject === 'SOURCE' && ability.eventType === 'AVATAR_DESTROYED') {
+          recordUnverified(card, 'combat trigger source cannot remain eligible in the battle fixture');
+          return;
+        }
+        const defenderCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 &&
+          !candidate.mainEffect.includes('ลูกฮึด'));
+        const attackerCard = catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power > (defenderCard?.power ?? -1))
+          .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0];
+        if (!defenderCard || !attackerCard) {
+          recordUnverified(card, 'combat trigger fixture has no official higher-POWER attacker and lower-POWER defender');
+          return;
+        }
+        state.currentPhase = 'BATTLE';
+        state.players.p1.avatarZone.push(source);
+        const attacker = instance(`${eventId}:attacker`, 'p1', attackerCard);
+        const defender = instance(`${eventId}:defender`, 'p2', defenderCard);
+        state.players.p1.avatarZone.push(attacker);
+        state.players.p2.avatarZone.push(defender);
+        const declared = declareCombatAttack(state, attacker.instanceId,
+          { type: 'AVATAR', playerId: 'p2', instanceId: defender.instanceId });
+        if (!declared) {
+          recordUnverified(card, 'battleResolver rejected the combat trigger declaration');
+          return;
+        }
+        emitted = resolveDeclaredBattle(declared).state;
+        const expectedEvent = ability.eventType;
+        expect(emitted.gameEvents?.some(item => item.event.type === expectedEvent)).toBe(true);
+      } else if (ability.eventType === 'AVATAR_SUMMONED' && /^(?:พอดี\s+)?จุติ/u.test(triggerClause.source)) {
         const paymentCards = exactPaymentCards(card, card.cost);
         if (!paymentCards) {
           recordUnverified(card, 'no official catalog GEM cards can exactly pay the summon Cost');
@@ -746,7 +916,7 @@ describe('Phase 4B per-card Game State verification', () => {
     const plan = toCardTextEffectPlan(parsed, 'p1', bindings, state);
     if (!plan) {
       expect(parsed.status).toBe('PARSED_READY');
-      for (const blocker of verificationBlockers(card, parsed)) recordUnverified(card, blocker);
+      for (const blocker of verificationBlockers(card, parsed, combatKeywordVerified)) recordUnverified(card, blocker);
       recordUnverified(card, 'effect plan did not compile with generated bindings');
       return;
     }
@@ -769,8 +939,8 @@ describe('Phase 4B per-card Game State verification', () => {
       expect(rejected.state).toBe(unmet);
     }
     assertEffectState(before, result.state, plan);
-    const blockers = verificationBlockers(card, parsed);
-    if (equipVerified && fixtureErrors.length === 0 && blockers.length === 0 && expectedToVerify(card, parsed)) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+    const blockers = verificationBlockers(card, parsed, combatKeywordVerified);
+    if (equipVerified && fixtureErrors.length === 0 && blockers.length === 0 && expectedToVerify(card, parsed, combatKeywordVerified)) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
     else blockers.forEach(blocker => recordUnverified(card, blocker));
   });
 
