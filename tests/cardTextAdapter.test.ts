@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEffectPlan } from '../src/engine/effectResolver';
-import { createNameReference, matchesCardName, parseCardText } from '../src/engine/cardTextAdapter';
+import { createNameReference, matchesCardName, parseCardText, toEffectDefinitions } from '../src/engine/cardTextAdapter';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
 const catalog = JSON.parse(readFileSync(new URL('../cards_clean.json', import.meta.url), 'utf8')) as Card[];
@@ -97,6 +97,27 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(abilityUse.magicUse.magicSubtypeOverride).toBeUndefined();
     expect(cardOverride.magicUse.magicSubtypeOverride).toBe('React');
     expect(cardOverride.magicUse.abilityConsumesMagicType).toBeUndefined();
+  });
+
+  it('converts an exact draw clause into a typed effect and resolves it atomically in Game State', () => {
+    const parsed = parseCardText({ ...byPrintId('SD01-001'), mainEffect: 'จั่วการ์ดจาก Deck เรา 1 ใบ' });
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(parsed.clauses[0].effects).toEqual([{ kind: 'draw_self', count: 1 }]);
+
+    const initial = gameState();
+    const result = resolveEffectPlan(initial, {
+      actorId: 'p1', effects: toEffectDefinitions(parsed.clauses.flatMap(clause => clause.effects), 'p1')
+    });
+    expect(result.ok).toBe(true);
+    expect(result.state.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand', 'p1-deck']);
+    expect(initial.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand']);
+  });
+
+  it('does not expose partial typed effects when a later clause is unsupported', () => {
+    const parsed = parseCardText({ ...byPrintId('SD01-001'), mainEffect: 'จั่วการ์ด 1 ใบ<br>เลือก Avatar 1 ใบ' });
+    expect(parsed.status).toBe('UNSUPPORTED');
+    expect(parsed.clauses.flatMap(clause => clause.effects)).toEqual([]);
+    expect(parsed.clauses[1].unresolved.length).toBeGreaterThan(0);
   });
 
   it('fails closed for ambiguous clauses and retains a specific reason', () => {

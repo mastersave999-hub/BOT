@@ -304,14 +304,14 @@ Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test file
 
 ## 16. Phase 3 — Card Text Adapter dry-run
 
-`src/engine/cardTextAdapter.ts` is a conservative structural adapter for Rule Book 3.2. It preserves printed card attributes; isolates inherent `#` Rule Text; separates colon-delimited cost/effect clauses; records the listed Thai keyword markers; preserves quoted name references as separated-word references and unquoted references as exact-name references; and keeps p.11 “ความสามารถนี้ถือเป็นการใช้ … Magic” separate from “โดยถือว่าเป็นการใช้ … Magic”. It does not promote a keyword or text match into an executable behavior. Costs, targets, choices, conditions, durations, or state-changing text without a typed, tested translation are rejected as `UNSUPPORTED`; explicit unresolved wording is `AMBIGUOUS`.
+`src/engine/cardTextAdapter.ts` preserves printed attributes, isolates inherent `#` Rule Text, separates colon-delimited clauses, records listed Thai keyword markers and quoted/exact name references, and distinguishes the two p.11 Magic-type statements. It now maps only the exact standalone self-draw grammar (`จั่วการ์ด X ใบ`, optionally `จาก Deck เรา`) to the Phase 2 typed `draw` effect. The effect adapter binds the acting player and the existing resolver enforces whole-plan atomicity. Costs, targets, choices, conditions, durations, keyword-trigger semantics, and unimplemented effect operations remain `UNSUPPORTED`; explicit unresolved wording remains `AMBIGUOUS`. If any clause is unsupported, typed effects are removed from the entire card result.
 
 ### Exact catalog coverage (rows with nonempty `mainEffect`)
 
 | Status | Rows |
 |---|---:|
-| PARSED_READY (structural parse only; not execution verification) | 0 |
-| UNSUPPORTED | 1,829 |
+| PARSED_READY (exact standalone draw grammar; not per-card verification) | 14 |
+| UNSUPPORTED | 1,815 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 | Per-card Game State verified | **0** |
@@ -335,10 +335,10 @@ The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among eff
 
 | Reason | Rows |
 |---|---:|
-| Free-form or unrecognized clause | 1,833 |
-| State-changing effect lacks a verified typed translation | 1,464 |
+| Free-form or unrecognized clause | 1,789 |
+| State-changing effect lacks a verified typed translation | 1,405 |
 | Cost needs typed atomic feasibility/payment handling | 1,349 |
-| Zone choice, search, or ordering | 619 |
+| Zone choice, search, or ordering | 605 |
 | Conditional expression | 603 |
 | Target selection/legality | 451 |
 | Duration | 377 |

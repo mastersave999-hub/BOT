@@ -1,4 +1,11 @@
 import type { Card, MagicSubtype } from './types';
+import type { EffectDefinition } from './effectResolver';
+
+export type CardTextEffect = { kind: 'draw_self'; count: number };
+
+export function toEffectDefinitions(effects: CardTextEffect[], actorId: string): EffectDefinition[] {
+  return effects.map(effect => ({ kind: 'draw', playerId: actorId, count: effect.count }));
+}
 
 export type CardTextStatus = 'PARSED_READY' | 'UNSUPPORTED' | 'AMBIGUOUS';
 export type CardTextKeyword =
@@ -16,6 +23,7 @@ export interface ParsedCardTextClause {
   keywords: CardTextKeyword[];
   quotedReferences: NameReference[];
   exactNameReferences: NameReference[];
+  effects: CardTextEffect[];
   unresolved: string[];
 }
 export interface CardTextAdapterResult {
@@ -84,7 +92,9 @@ function parseClause(source: string): ParsedCardTextClause {
   const exactNameReferences = [...split.effectText.matchAll(/ชื่อ\s+([^"“”,:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/g)]
     .map(match => createNameReference(match[1].trim(), false));
   const keywords = KEYWORDS.filter(keyword => source.includes(keyword));
-  const unresolved: string[] = KNOWN_UNRESOLVED
+  const draw = split.effectText.match(/^จั่วการ์ด(?:จาก\s+Deck(?:\s+เรา)?)?\s+(\d+)\s*ใบ$/);
+  const effects: CardTextEffect[] = draw ? [{ kind: 'draw_self', count: Number(draw[1]) }] : [];
+  const unresolved: string[] = effects.length > 0 ? [] : KNOWN_UNRESOLVED
     .filter(([, pattern]) => pattern.test(split.effectText))
     .map(([reason]) => reason);
   if (split.costText) {
@@ -98,13 +108,14 @@ function parseClause(source: string): ParsedCardTextClause {
     keywords,
     quotedReferences,
     exactNameReferences,
+    effects,
     unresolved: [...new Set(unresolved)]
   };
 }
 
 export function parseCardText(card: Card): CardTextAdapterResult {
   const source = (card.mainEffect ?? '').normalize('NFC').trim();
-  const lines = source.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const lines = source.replace(/<br\s*\/?>/gi, '\n').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const ruleTexts: string[] = [];
   const abilityLines: string[] = [];
   for (const line of lines) {
@@ -135,6 +146,7 @@ export function parseCardText(card: Card): CardTextAdapterResult {
   const status: CardTextStatus = AMBIGUOUS_WORDING.test(source) || reasons.some(reason => /conflicting|cannot disambiguate|ambiguous-rule/.test(reason))
     ? 'AMBIGUOUS'
     : reasons.length > 0 ? 'UNSUPPORTED' : 'PARSED_READY';
+  const resolvedClauses = status === 'PARSED_READY' ? clauses : clauses.map(clause => ({ ...clause, effects: [] }));
   return {
     status,
     ...(reasons.length ? { reason: [...new Set(reasons)].join('; ') } : {}),
@@ -146,7 +158,7 @@ export function parseCardText(card: Card): CardTextAdapterResult {
       isOnlyOne: card.isOnlyOne, isBias: card.isBias, isCollab: card.isCollab
     },
     ruleTexts,
-    clauses,
+    clauses: resolvedClauses,
     magicUse
   };
 }
