@@ -1,5 +1,6 @@
-import type { Card, GameState } from './types';
+import type { Card, CardInstance, GameState } from './types';
 import { validateGameState } from './gameRules';
+import { isNormalMagicTreatedAsReact } from './reactionEngine';
 
 const HIDDEN_PRIVATE_CARD: Card = {
   printId: 'hidden-private-card',
@@ -120,20 +121,78 @@ export function isGameStateValidForSync(state: GameState): boolean {
   return validateGameState(state) === null;
 }
 
+function collectPlayerCardInstances(player: GameState['players'][string]): CardInstance[] {
+  const result: CardInstance[] = [];
+  const pending = [
+    ...player.deck, ...player.hand, ...player.lifeDeck, ...player.avatarZone,
+    ...player.constructZone, ...player.magicZone, ...player.hell, ...player.darkDimension
+  ];
+  while (pending.length > 0) {
+    const card = pending.pop()!;
+    result.push(card);
+    pending.push(...card.attachedInstances);
+  }
+  return result;
+}
+
 export function isLegalGameStateSync(previous: GameState, incoming: GameState, senderPlayerId: string): boolean {
   if (!isGameStateValidForSync(incoming) || incoming.id !== previous.id || incoming.mode !== previous.mode ||
     JSON.stringify(incoming.playerOrder) !== JSON.stringify(previous.playerOrder) ||
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
   const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
-  if (!activePlayerId || senderPlayerId !== activePlayerId) return false;
+  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId) return false;
   const outgoingPlayer = previous.players[activePlayerId];
   const incomingOutgoingPlayer = incoming.players[activePlayerId];
+  const completedDrawPhase = previous.currentPhase === 'DRAW' && incoming.currentPhase === 'MAIN' &&
+    incoming.currentTurnPlayerIndex === previous.currentTurnPlayerIndex && incoming.turnNumber === previous.turnNumber;
+  if (completedDrawPhase) {
+    if (Object.values(incoming.players).some(player => player.usedMagicTypesThisTurn.size !== 0)) return false;
+  } else {
+    for (const [playerId, player] of Object.entries(previous.players)) {
+      const nextUsedTypes = incoming.players[playerId].usedMagicTypesThisTurn;
+      if ([...player.usedMagicTypesThisTurn].some(type => !nextUsedTypes.has(type))) return false;
+      if (playerId !== activePlayerId && [...nextUsedTypes].some(type => !player.usedMagicTypesThisTurn.has(type))) return false;
+    }
+  }
+  const hasAttached = (card: CardInstance, instanceId: string): boolean =>
+    card.attachedInstances.some(attached => attached.instanceId === instanceId || hasAttached(attached, instanceId));
+  const attachedToField = (instanceId: string) => incomingOutgoingPlayer.avatarZone.some(avatar => hasAttached(avatar, instanceId));
+  const activeInstances = collectPlayerCardInstances(incomingOutgoingPlayer);
+  for (const card of outgoingPlayer.hand) {
+    if (incomingOutgoingPlayer.hand.some(item => item.instanceId === card.instanceId) || card.card.type !== 'Magic') continue;
+    const enteredMagicZone = incomingOutgoingPlayer.magicZone.some(item => item.instanceId === card.instanceId);
+    const enteredLandZone = incoming.landMagicZone?.instanceId === card.instanceId;
+    const becameAttached = attachedToField(card.instanceId);
+    if (!enteredMagicZone && !enteredLandZone && !becameAttached) continue;
+    const printedType = card.card.subtype ?? 'Normal';
+    const treatedAsReact = printedType === 'Normal' && previous.currentPhase === 'BATTLE' && isNormalMagicTreatedAsReact(card.card);
+    const effectiveType = treatedAsReact ? 'React' : printedType;
+    if (previous.players[activePlayerId].usedMagicTypesThisTurn.has(effectiveType) ||
+      !incomingOutgoingPlayer.usedMagicTypesThisTurn.has(effectiveType)) return false;
+    if (printedType === 'Land' && !enteredLandZone) return false;
+    if (printedType === 'Modification' && !becameAttached) return false;
+    if (printedType !== 'Land' && printedType !== 'Modification' && !enteredMagicZone) return false;
+    if (enteredLandZone && card.card.subtype !== 'Land') return false;
+    if (!activeInstances.some(item => item.instanceId === card.instanceId)) return false;
+  }
+  if (incoming.pendingEndPhaseDiscardPlayerId) {
+    const withoutDiscardMetadata = (state: GameState) => Object.fromEntries(Object.entries(state).filter(([key]) =>
+      !['pendingEndPhaseDiscardPlayerId', 'pendingEndPhaseDiscardRevision', 'stateRevision'].includes(key)
+    ));
+    const expectedRevision = (previous.stateRevision ?? 0) + 1;
+    if (incoming.pendingEndPhaseDiscardPlayerId !== activePlayerId || previous.currentPhase !== 'END' || incoming.currentPhase !== 'END' ||
+      incoming.stateRevision !== expectedRevision || incoming.pendingEndPhaseDiscardRevision !== expectedRevision ||
+      JSON.stringify(withoutDiscardMetadata(previous)) !== JSON.stringify(withoutDiscardMetadata(incoming))) return false;
+  }
   const endedTurn = incoming.currentTurnPlayerIndex !== previous.currentTurnPlayerIndex || incoming.turnNumber !== previous.turnNumber;
   if (previous.currentPhase === 'END' && endedTurn && outgoingPlayer.hand.length > 7) {
-    const removedIds = outgoingPlayer.hand.filter(card => !incomingOutgoingPlayer?.hand.some(next => next.instanceId === card.instanceId)).map(card => card.instanceId);
-    const movedToHell = new Set(incomingOutgoingPlayer?.hell.map(card => card.instanceId) ?? []);
-    if (incomingOutgoingPlayer?.hand.length !== 7 || removedIds.length !== outgoingPlayer.hand.length - 7 || removedIds.some(id => !movedToHell.has(id))) return false;
+    const removedCards = outgoingPlayer.hand.filter(card => !incomingOutgoingPlayer?.hand.some(next => next.instanceId === card.instanceId));
+    const removedIds = removedCards.map(card => card.instanceId);
+    const cardsInHell = Object.values(incoming.players).flatMap(player => player.hell);
+    if (incomingOutgoingPlayer?.hand.length !== 7 || removedIds.length !== outgoingPlayer.hand.length - 7 || removedCards.some(card =>
+      !cardsInHell.some(moved => moved.instanceId === card.instanceId && moved.ownerId === card.ownerId && moved.controllerId === card.controllerId)
+    )) return false;
   }
   const firstPlayerFirstTurn = previous.turnNumber === 1 && activePlayerId === previous.playerOrder[0];
   if (previous.currentPhase === 'MAIN' && firstPlayerFirstTurn && incoming.currentPhase === 'BATTLE') return false;
@@ -158,6 +217,29 @@ export interface ReactionCommand {
   targetInstanceId?: string;
 }
 
+export interface EndPhaseDiscardCommand {
+  playerId: string;
+  commandId: string;
+  expectedRevision: number;
+  selectedInstanceIds: string[];
+}
+
+export function isEndPhaseDiscardCommandCurrent(
+  state: GameState,
+  command: EndPhaseDiscardCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const player = state.players[authenticatedPlayerId];
+  return !!player && command.playerId === authenticatedPlayerId && command.commandId.length > 0 && command.commandId.length <= 128 &&
+    Number.isSafeInteger(command.expectedRevision) && command.expectedRevision === state.stateRevision &&
+    state.pendingEndPhaseDiscardRevision === command.expectedRevision &&
+    state.pendingEndPhaseDiscardPlayerId === authenticatedPlayerId && state.currentPhase === 'END' &&
+    state.playerOrder[state.currentTurnPlayerIndex] === authenticatedPlayerId &&
+    !(state.processedCommandIds ?? []).includes(command.commandId) &&
+    Array.isArray(command.selectedInstanceIds) && new Set(command.selectedInstanceIds).size === command.selectedInstanceIds.length &&
+    command.selectedInstanceIds.every(id => typeof id === 'string' && player.hand.some(card => card.instanceId === id));
+}
+
 export function isReactionCommandCurrent(
   state: GameState,
   command: ReactionCommand,
@@ -178,11 +260,8 @@ export type NetMessage =
   | { type: 'REJECT'; reason: string }
   | { type: 'START'; state: GameState; myPlayerId: string }
   | { type: 'SYNC'; state: GameState; winner: string | null }
-  | {
-      type: 'REACTION_COMMAND';
-    command: ReactionCommand;
-
-    }
+  | { type: 'REACTION_COMMAND'; command: ReactionCommand }
+  | { type: 'END_PHASE_DISCARD'; command: EndPhaseDiscardCommand }
   | { type: 'PING' }
   | { type: 'LEAVE' };
 
@@ -270,6 +349,14 @@ export function decodeNetMessage(raw: unknown): NetMessage | null {
         (command.targetInstanceId !== undefined && typeof command.targetInstanceId !== 'string') ||
         (command.kind === 'PLAY' && typeof command.cardInstanceId !== 'string')
       ) return null;
+      return decoded as NetMessage;
+    }
+    if (message.type === 'END_PHASE_DISCARD') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if (typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
+        !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 || !Array.isArray(command.selectedInstanceIds) ||
+        !command.selectedInstanceIds.every(id => typeof id === 'string') || new Set(command.selectedInstanceIds).size !== command.selectedInstanceIds.length) return null;
       return decoded as NetMessage;
     }
     const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];

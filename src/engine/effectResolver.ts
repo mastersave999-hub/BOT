@@ -12,7 +12,7 @@ export type EffectCost =
 
 export type EffectDefinition =
   | { kind: 'draw'; playerId: string; count: number }
-  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' }
+  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
   | { kind: 'reset_power'; targetId: string }
   | { kind: 'destroy_avatar'; targetId: string }
   | { kind: 'bounce_avatar'; targetId: string }
@@ -300,7 +300,7 @@ export function resolveEffectPlan(
       return null;
     }
     return result.state;
-  }, plan.effects.map(effect => ({ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId, effectKind: effect.kind })));
+  }, plan.effects.map((effect, index) => ({ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId, effectKind: effect.kind, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:${plan.actorId}:${index}:${effect.kind}` })));
   if (transaction.ok === false) return fail(state, failure?.reason ?? transaction.reason);
   return { ok: true, state: transaction.state, logs: [] };
 }

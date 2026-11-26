@@ -1,5 +1,6 @@
 import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
-import { executeCardAbility, expireModifiersAt } from './abilityEngine';
+import { executeCardAbility, expireModifiersAt, clearEndOfTurnModifiers } from './abilityEngine';
+import { appendGameEvents } from './gameEvents';
 
 export function isFirstPlayerFirstTurn(state: GameState, playerId: string): boolean {
   return state.turnNumber === 1 && state.playerOrder[0] === playerId && state.playerOrder[state.currentTurnPlayerIndex] === playerId;
@@ -11,7 +12,15 @@ export function nextPhaseAfterMain(state: GameState, playerId: string): 'BATTLE'
 
 export function executeDrawPhase(inputState: GameState): GameState {
   const currentTurnPlayerId = inputState.playerOrder[inputState.currentTurnPlayerIndex];
-  const state = expireModifiersAt(inputState, 'DRAW_PHASE', currentTurnPlayerId);
+  const expiredState = expireModifiersAt(inputState, 'DRAW_PHASE', currentTurnPlayerId);
+  const state: GameState = {
+    ...expiredState,
+    players: Object.fromEntries(Object.entries(expiredState.players).map(([playerId, player]) => [playerId, {
+      ...player,
+      usedMagicTypesThisTurn: new Set<MagicSubtype>(),
+      reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }
+    }]))
+  };
   const player = state.players[currentTurnPlayerId];
 
   if (!player) throw new Error('Player not found');
@@ -49,15 +58,13 @@ export function executeDrawPhase(inputState: GameState): GameState {
   }));
   const remainingDeck = mainDeck.slice(drawCount);
 
-  // Win/Loss Condition: Main Deck reaches 0 immediately [RuleBook p.21]
-  if (mainDeck.length < drawCount) {
-    state.eventLog.push({
-      timestamp: Date.now(),
-      type: 'PLAYER_DECK_OUT',
-      description: `${player.name} ran out of cards in deck and lost the game.`,
-      actorId: player.id
-    });
-  }
+  // Win/Loss Condition: Main Deck reaches 0 immediately [RuleBook p.21].
+  const deckOutEvents = mainDeck.length < drawCount ? [{
+    timestamp: Date.now(),
+    type: 'PLAYER_DECK_OUT',
+    description: `${player.name} ran out of cards in deck and lost the game.`,
+    actorId: player.id
+  }] : [];
 
   const updatedHand = [...player.hand, ...cardsDrawn];
 
@@ -80,6 +87,7 @@ export function executeDrawPhase(inputState: GameState): GameState {
     },
     eventLog: [
       ...state.eventLog,
+      ...deckOutEvents,
       {
         timestamp: Date.now(),
         type: 'DRAW_PHASE_COMPLETE',
@@ -111,6 +119,34 @@ export function executeDrawPhase(inputState: GameState): GameState {
   }
 
   return nextState;
+}
+
+/** Final End Phase transition shared by offline and multiplayer discard commands. */
+export function finishEndPhaseTurn(state: GameState): GameState {
+  const activePlayerId = state.playerOrder[state.currentTurnPlayerIndex];
+  if (state.currentPhase !== 'END' || state.pendingEndPhaseDiscardPlayerId || !activePlayerId || state.playerOrder.length === 0 ||
+    (state.players[activePlayerId]?.hand.length ?? 0) > 7) return state;
+  const turnNumber = state.turnNumber + 1;
+  const nextIndex = (state.currentTurnPlayerIndex + 1) % state.playerOrder.length;
+  let nextState = clearEndOfTurnModifiers(state);
+  nextState = {
+    ...nextState,
+    currentTurnPlayerIndex: nextIndex,
+    currentPhase: 'DRAW',
+    turnNumber,
+    stateRevision: (state.stateRevision ?? 0) + 1
+  };
+  const nextPlayerId = nextState.playerOrder[nextIndex];
+  const nextPlayer = nextState.players[nextPlayerId];
+  nextState.eventLog = [
+    ...nextState.eventLog,
+    { timestamp: Date.now(), type: 'TURN_ENDED', description: `${state.players[activePlayerId]?.name ?? activePlayerId} ended the turn.`, actorId: activePlayerId },
+    { timestamp: Date.now(), type: 'TURN_STARTED', description: `${nextPlayer?.name ?? nextPlayerId} started turn ${turnNumber}.`, actorId: nextPlayerId }
+  ];
+  return appendGameEvents(nextState, [
+    { type: 'TURN_ENDED', playerId: activePlayerId, turnNumber: state.turnNumber, eventId: `${state.id}:turn-ended:${state.turnNumber}:${activePlayerId}` },
+    { type: 'TURN_STARTED', playerId: nextPlayerId, turnNumber, eventId: `${state.id}:turn-started:${turnNumber}:${nextPlayerId}` }
+  ]);
 }
 
 /**

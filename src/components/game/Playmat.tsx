@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { GameState, CardInstance, MagicSubtype, DeferredReactionAction } from '../../engine/types';
 import {
   isReactionCommandCurrent,
+  isEndPhaseDiscardCommandCurrent,
   isGameStateValidForSync,
   isLegalGameStateSync,
   redactLifeCardsForViewer,
@@ -23,7 +24,7 @@ import {
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
-import { executeDrawPhase, eliminatePlayer, isFirstPlayerFirstTurn, nextPhaseAfterMain } from '../../engine/turnEngine';
+import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain } from '../../engine/turnEngine';
 import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
 import {
   parseCardAbility,
@@ -34,7 +35,7 @@ import {
   expireModifiersAt
 } from '../../engine/abilityEngine';
 import { calculateNetPower } from '../../engine/layers';
-import { canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones } from '../../engine/gameRules';
+import { beginEndPhaseDiscard, discardToHandLimit, moveCardBetweenZones, validateAvatarZone, validateMagicPlay } from '../../engine/gameRules';
 import {
   getGemPaymentCardUnavailableReason,
   getSelectedGemTotal,
@@ -214,6 +215,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [pendingAbility, setPendingAbility] = useState<PendingAbilityAction | null>(null);
   const [pendingCost, setPendingCost] = useState<PendingCostPayment | null>(null);
   const [pendingEndPhaseDiscards, setPendingEndPhaseDiscards] = useState<string[] | null>(null);
+  const [submittedDiscardRevision, setSubmittedDiscardRevision] = useState<number | null>(null);
   const [showKeywordsModal, setShowKeywordsModal] = useState<boolean>(false);
   const [showEventLog, setShowEventLog] = useState<boolean>(false);
   const [showHellModal, setShowHellModal] = useState<'ME' | 'OPPONENT' | null>(null);
@@ -246,16 +248,37 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
   const isMyTurn = gameState.playerOrder[gameState.currentTurnPlayerIndex] === meId;
+  const isSubmittingEndPhaseDiscard = submittedDiscardRevision !== null && submittedDiscardRevision === gameState.pendingEndPhaseDiscardRevision;
 
   useEffect(() => {
     if (gameState.pendingEndPhaseDiscardPlayerId === meId && isMyTurn && !gameState.reactionWindow) {
       setPendingEndPhaseDiscards(current => current ?? []);
+      if (submittedDiscardRevision !== null && submittedDiscardRevision !== gameState.pendingEndPhaseDiscardRevision) {
+        setSubmittedDiscardRevision(null);
+      }
+    } else if (!gameState.pendingEndPhaseDiscardPlayerId) {
+      setPendingEndPhaseDiscards(null);
+      setSubmittedDiscardRevision(null);
     }
-  }, [gameState.pendingEndPhaseDiscardPlayerId, gameState.reactionWindow, isMyTurn, meId]);
+  }, [gameState.pendingEndPhaseDiscardPlayerId, gameState.pendingEndPhaseDiscardRevision, gameState.reactionWindow, isMyTurn, meId, submittedDiscardRevision]);
 
   useEffect(() => {
     if (!link) return;
     const offMessage = link.onMessage((msg, senderPlayerId) => {
+      if (msg.type === 'END_PHASE_DISCARD') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
+          !isEndPhaseDiscardCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        const discarded = discardToHandLimit(
+          gameState,
+          senderPlayerId,
+          msg.command.selectedInstanceIds,
+          msg.command.expectedRevision,
+          msg.command.commandId
+        );
+        if (!discarded.ok) return;
+        setGameState(finishEndPhaseTurn(discarded.state));
+        return;
+      }
       if (msg.type === 'REACTION_COMMAND') {
         if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId || msg.command.playerId === meId) return;
         const currentWindow = gameState.reactionWindow;
@@ -560,21 +583,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       } else if (action.nextPhase === 'DRAW') {
         const activePlayer = nextState.players[action.actorId];
         if (nextState.currentPhase === 'END' && (activePlayer?.hand.length ?? 0) > 7) {
-          const discardState = { ...nextState, pendingEndPhaseDiscardPlayerId: action.actorId };
-          setGameState(discardState);
+          const discardState = beginEndPhaseDiscard(nextState, action.actorId);
+          if (!discardState.ok) return;
+          setGameState(discardState.state);
           if (action.actorId === meId) setPendingEndPhaseDiscards(current => current ?? []);
           showNotification(`ผู้เล่นที่กำลังจบเทิร์นต้องเลือก ${(activePlayer?.hand.length ?? 0) - 7} ใบเพื่อทิ้ง`);
           return;
         }
-        nextState = clearEndOfTurnModifiers(nextState);
-        const nextIndex = (nextState.currentTurnPlayerIndex + 1) % nextState.playerOrder.length;
-        nextState = {
-          ...nextState,
-          currentTurnPlayerIndex: nextIndex,
-          currentPhase: 'DRAW',
-          turnNumber: nextState.turnNumber + 1
-        };
-        const nextPlayerName = nextState.players[nextState.playerOrder[nextIndex]].name;
+        nextState = finishEndPhaseTurn(nextState);
+        const nextPlayerId = nextState.playerOrder[nextState.currentTurnPlayerIndex];
+        const nextPlayerName = nextState.players[nextPlayerId]?.name ?? nextPlayerId;
         nextState = appendLogs(nextState, [`จบเทิร์นของ ${actorName} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', action.actorId);
         setGameState(nextState);
         if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
@@ -586,6 +604,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const handleReactionPass = () => {
+    if (gameState.pendingEndPhaseDiscardPlayerId) return;
     const window = gameState.reactionWindow;
     if (!window || window.priorityPlayerId !== meId) return;
     if (link && !isHost) {
@@ -612,6 +631,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const handleReactionCard = (handCard: CardInstance) => {
+    if (gameState.pendingEndPhaseDiscardPlayerId) return;
     const eligibility = getReactionEligibility(gameState, meId, handCard.card);
     if (!eligibility.eligible) {
       showNotification(eligibility.reason ?? 'การ์ดนี้ไม่สามารถตอบโต้การกระทำดังกล่าวได้');
@@ -672,7 +692,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Phase 1: Draw Phase Action
   const handleDrawPhase = () => {
-    if (gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'DRAW' || winnerName) return;
     let nextState = recomputeContinuousAuras(executeDrawPhase(gameState));
     if (nextState.players[meId].deck.length === 0 && gameState.players[meId].deck.length === 0) {
       if (gameState.mode === 'AD_MUA') {
@@ -688,34 +708,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const confirmEndPhaseDiscards = () => {
-    if (pendingEndPhaseDiscards === null) return;
-    const result = discardToHandLimit(gameState, meId, pendingEndPhaseDiscards);
+    if (pendingEndPhaseDiscards === null || gameState.pendingEndPhaseDiscardPlayerId !== meId || isSubmittingEndPhaseDiscard) return;
+    const expectedRevision = gameState.pendingEndPhaseDiscardRevision;
+    if (expectedRevision === undefined) return;
+    const commandId = globalThis.crypto.randomUUID();
+    if (link && !isHost) {
+      setSubmittedDiscardRevision(expectedRevision);
+      link.send({
+        type: 'END_PHASE_DISCARD',
+        command: { playerId: meId, commandId, expectedRevision, selectedInstanceIds: pendingEndPhaseDiscards }
+      });
+      return;
+    }
+    const result = discardToHandLimit(gameState, meId, pendingEndPhaseDiscards, expectedRevision, commandId);
     if (!result.ok) {
       showNotification(result.reason ?? 'เลือกการ์ดที่ต้องทิ้งให้ถูกต้อง');
       return;
     }
     setPendingEndPhaseDiscards(null);
-    const stateAfterDiscard = { ...result.state, pendingEndPhaseDiscardPlayerId: undefined };
-    let nextState = clearEndOfTurnModifiers(stateAfterDiscard);
-    const activeName = nextState.players[meId]?.name ?? 'ผู้เล่น';
-    const nextIndex = (nextState.currentTurnPlayerIndex + 1) % nextState.playerOrder.length;
-    nextState = {
-      ...nextState,
-      currentTurnPlayerIndex: nextIndex,
-      currentPhase: 'DRAW',
-      turnNumber: nextState.turnNumber + 1
-    };
-    const nextPlayerName = nextState.players[nextState.playerOrder[nextIndex]].name;
-    nextState = appendLogs(nextState, [`จบเทิร์นของ ${activeName} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', meId);
-    setGameState(nextState);
+    const nextState = finishEndPhaseTurn(result.state);
+    const nextPlayerId = nextState.playerOrder[nextState.currentTurnPlayerIndex];
+    const nextPlayerName = nextState.players[nextPlayerId]?.name ?? nextPlayerId;
+    setGameState(appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', meId));
     showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
     if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
   };
 
   // Advance Phases & AI Opponent Turn
   const handleNextPhase = () => {
-    if (gameState.reactionWindow || !isMyTurn || winnerName) return;
-    const skipsFirstBattle = gameState.currentPhase === 'MAIN' && isFirstPlayerFirstTurn(gameState, meId);
+    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || winnerName) return;
     const nextPhase = gameState.currentPhase === 'MAIN'
       ? nextPhaseAfterMain(gameState, meId)
       : gameState.currentPhase === 'BATTLE'
@@ -737,8 +758,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
 
     if (gameState.currentPhase === 'END' && me.hand.length > 7) {
-      setGameState(current => ({ ...current, pendingEndPhaseDiscardPlayerId: meId }));
-      setPendingEndPhaseDiscards(current => current ?? []);
+      const discardState = beginEndPhaseDiscard(gameState, meId);
+      if (!discardState.ok) {
+        showNotification(discardState.reason ?? 'เริ่มการเลือกการ์ดทิ้งไม่สำเร็จ');
+        return;
+      }
+      setGameState(discardState.state);
+      setPendingEndPhaseDiscards([]);
       showNotification(`เลือกการ์ด ${me.hand.length - 7} ใบเพื่อทิ้งก่อนจบเทิร์น`);
       return;
     }
@@ -757,25 +783,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       setGameState(prev => appendLogs({ ...prev, currentPhase: 'END' }, [`${me.name} เข้าสู่ End Phase`], 'PHASE_CHANGE'));
       showNotification('เข้าสู่ End Phase!');
     } else if (gameState.currentPhase === 'END') {
-      // Clear End of Turn temporary modifiers
-      let nextState = clearEndOfTurnModifiers(gameState);
-      const nextIndex = (nextState.currentTurnPlayerIndex + 1) % nextState.playerOrder.length;
-      const nextTurnNum = nextState.turnNumber + 1;
-      nextState = {
-        ...nextState,
-        currentTurnPlayerIndex: nextIndex,
-        currentPhase: 'DRAW',
-        turnNumber: nextTurnNum
-      };
-      const nextPlayerName = nextState.players[nextState.playerOrder[nextIndex]].name;
-      nextState = appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE');
-      setGameState(nextState);
+      const nextState = finishEndPhaseTurn(gameState);
+      const nextPlayerId = nextState.playerOrder[nextState.currentTurnPlayerIndex];
+      const nextPlayerName = nextState.players[nextPlayerId]?.name ?? nextPlayerId;
+      const loggedState = appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE');
+      setGameState(loggedState);
       showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
 
-      if (!isOnline) {
-        // Execute simple AI Opponent turn automatically after short delay
-        setTimeout(() => runAiOpponentTurn(nextState), 900);
-      }
+      if (!isOnline) setTimeout(() => runAiOpponentTurn(loggedState), 900);
     }
   };
 
@@ -871,12 +886,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Start playing a card from Hand (checks Cost first)
   const handleInitiatePlayCard = (handCard: CardInstance) => {
-    if (pendingEndPhaseDiscards !== null) {
-      setPendingEndPhaseDiscards(current => current?.includes(handCard.instanceId)
-        ? current.filter(id => id !== handCard.instanceId)
-        : [...(current ?? []), handCard.instanceId]);
+    if (gameState.pendingEndPhaseDiscardPlayerId) {
+      if (isSubmittingEndPhaseDiscard || gameState.pendingEndPhaseDiscardPlayerId !== meId || !me.hand.some(card => card.instanceId === handCard.instanceId)) return;
+      const selectedIds = pendingEndPhaseDiscards ?? [];
+      if (selectedIds.includes(handCard.instanceId)) {
+        setPendingEndPhaseDiscards(selectedIds.filter(id => id !== handCard.instanceId));
+      } else {
+        const requiredCount = Math.max(0, me.hand.length - 7);
+        if (selectedIds.length >= requiredCount) {
+          showNotification(`เลือกการ์ดได้ไม่เกิน ${requiredCount} ใบ`);
+          return;
+        }
+        setPendingEndPhaseDiscards([...selectedIds, handCard.instanceId]);
+      }
       return;
     }
+    if (pendingEndPhaseDiscards !== null) return;
     if (gameState.reactionWindow) {
       if (gameState.reactionWindow.priorityPlayerId === meId) {
         handleReactionCard(handCard);
@@ -890,15 +915,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const isReactMagic = handCard.card.type === 'Magic' && handCard.card.subtype === 'React';
     const normalTreatedAsReact = canUseNormalMagicAsReactOnOwnBattle(gameState, meId, handCard.card);
-    if (gameState.currentPhase !== 'MAIN' && !(gameState.currentPhase === 'BATTLE' && (isReactMagic || normalTreatedAsReact))) {
+    if (gameState.currentPhase !== 'MAIN' && !normalTreatedAsReact) {
       showNotification('สามารถอัญเชิญหรือใช้การ์ดได้ใน Main Phase (React Magic หรือ Normal ที่ระบุว่าเป็น React ใช้ได้ตามเงื่อนไข)');
       return;
     }
 
-    if (handCard.card.type === 'Avatar' && me.avatarZone.length >= 4) {
-      showNotification('Avatar Zone เต็มแล้ว (สูงสุด 4 ใบตามกฎทางการ)');
+    if (handCard.card.type === 'Avatar' && validateAvatarZone({ avatarZone: [...me.avatarZone, handCard] })) {
+      showNotification('Avatar Zone เต็มหรือมีชนิดการ์ดไม่ถูกต้องตามกฎ');
       return;
     }
 
@@ -916,8 +940,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     if (handCard.card.type === 'Magic') {
       const subtype = normalTreatedAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
-      if (!canUseMagicTypeThisTurn(me, subtype)) {
-        showNotification(`สามารถเล่น Magic ประเภท "${subtype}" ได้ประเภทละ 1 ครั้งต่อเทิร์น`);
+      const restriction = validateMagicPlay(gameState, meId, subtype, normalTreatedAsReact);
+      if (restriction) {
+        showNotification(restriction);
         return;
       }
     }
@@ -939,6 +964,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Finalize playing a card only after its Cost Step has been successfully completed.
   const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean, playAsReact = false) => {
+    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || !isMyTurn || winnerName) return;
+    const isReactPlay = handCard.card.type === 'Magic' && (playAsReact || handCard.card.subtype === 'React');
+    if (gameState.currentPhase !== 'MAIN' && !isReactPlay) {
+      showNotification('การ์ดนี้เล่นได้เฉพาะใน Main Phase');
+      return;
+    }
     const requiredCost = handCard.card.cost ?? 0;
     const requiresGemPayment =
       (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && requiredCost > 0;
@@ -1052,6 +1083,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     if (handCard.card.type === 'Magic') {
       const subtype = playAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
+      const restriction = validateMagicPlay(gameState, meId, subtype, playAsReact);
+      if (restriction) {
+        showNotification(restriction);
+        return;
+      }
       const newUsedTypes = new Set(updatedMe.usedMagicTypesThisTurn);
       newUsedTypes.add(subtype);
       updatedMe.usedMagicTypesThisTurn = newUsedTypes;
@@ -1138,6 +1174,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Handle clicking an Avatar on the field (for Ability Target OR Combat)
   const handleAvatarClick = (avatar: CardInstance, isMyAvatar: boolean) => {
+    if (gameState.pendingEndPhaseDiscardPlayerId) return;
     // 1. Resolve Pending Ability / Modification Equip Target
     if (pendingAbility) {
       if (pendingAbility.targetScope === 'OWN_AVATAR' && !isMyAvatar) {
@@ -1384,7 +1421,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Attack Opponent LIFE Zone Directly
   const handleAttackLifeZone = () => {
-    if (gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
+    if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
     if (!selectedAttackerId) {
       showNotification('กรุณาเลือก Avatar ของคุณที่จะโจมตีก่อน');
       return;
@@ -1444,6 +1481,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   // Toggle Construct Activation
   const handleConstructClick = (cons: CardInstance) => {
+    if (gameState.pendingEndPhaseDiscardPlayerId) return;
     if (gameState.reactionWindow || !isMyTurn || gameState.currentPhase !== 'MAIN') {
       setInspectedCard(cons);
       return;
@@ -1534,11 +1572,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         </div>
       </header>
 
-      {pendingEndPhaseDiscards !== null && (
-        <section aria-label="End Phase hand discard" className="z-30 flex flex-wrap items-center gap-2 border-b border-amber-400/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100">
-          <p className="mr-auto">เลือก {Math.max(0, me.hand.length - 7)} ใบเพื่อทิ้งลงนรก ({pendingEndPhaseDiscards.length} เลือกแล้ว)</p>
-          <button type="button" onClick={() => setPendingEndPhaseDiscards(null)} className="rounded border border-slate-500 px-3 py-1.5">ยกเลิก</button>
-          <button type="button" disabled={pendingEndPhaseDiscards.length !== Math.max(0, me.hand.length - 7)} onClick={confirmEndPhaseDiscards} className="rounded bg-amber-400 px-3 py-1.5 font-bold text-slate-950 disabled:opacity-50">ยืนยันการทิ้ง</button>
+      {gameState.pendingEndPhaseDiscardPlayerId === meId && pendingEndPhaseDiscards !== null && (
+        <section aria-label="End Phase hand discard" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-amber-400/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100">
+          <p className="mr-auto">เลือก {Math.max(0, me.hand.length - 7)} ใบเพื่อทิ้งลงนรก ({pendingEndPhaseDiscards.length} เลือกแล้ว){isSubmittingEndPhaseDiscard ? ' — กำลังรอการยืนยันจากเจ้าของห้อง' : ''}</p>
+          <button type="button" disabled={isSubmittingEndPhaseDiscard} onClick={() => setPendingEndPhaseDiscards([])} className="rounded border border-slate-500 px-3 py-1.5 disabled:opacity-50">ล้างที่เลือก</button>
+          <button type="button" disabled={isSubmittingEndPhaseDiscard || pendingEndPhaseDiscards.length !== Math.max(0, me.hand.length - 7)} onClick={confirmEndPhaseDiscards} className="rounded bg-amber-400 px-3 py-1.5 font-bold text-slate-950 disabled:opacity-50">{isSubmittingEndPhaseDiscard ? 'กำลังส่ง…' : 'ยืนยันการทิ้ง'}</button>
         </section>
       )}
 
@@ -1917,7 +1955,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           {/* ==================== PLAYER HAND TRAY ==================== */}
           <div className="mt-1.5 bg-slate-900/95 border border-slate-700 rounded-xl p-2 flex flex-col shrink-0">
             <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
-              <span className="font-bold text-amber-400">{pendingEndPhaseDiscards !== null ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards.length}/${Math.max(0, me.hand.length - 7)})` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — คลิกเพื่อเล่นลงสนาม`}</span>
+              <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — คลิกเพื่อเล่นลงสนาม`}</span>
               <span className="text-[10px]">กดปุ่ม <b className="text-amber-300">i</b> บนการ์ดเพื่อดูความสามารถก่อนลง</span>
             </div>
             <div className="flex items-center gap-2 overflow-x-auto pb-1">

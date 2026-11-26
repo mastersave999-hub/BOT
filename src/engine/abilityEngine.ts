@@ -505,27 +505,36 @@ export function executeCardAbility(
   return { state: nextState, logs };
 }
 
-/** Expires only the modifiers whose explicit timing matches this boundary. */
+/** Expires only matching durations at the requested player's boundary across every card zone. */
 export function expireModifiersAt(
   state: GameState,
   timing: 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE',
   playerId?: string
 ): GameState {
+  const expireCard = (card: CardInstance): CardInstance => ({
+    ...card,
+    layerModifiers: card.layerModifiers.filter(modifier => modifier.expiresAt !== timing),
+    attachedInstances: card.attachedInstances.map(expireCard)
+  });
   const newPlayers: Record<string, PlayerState> = {};
-  for (const pid of state.playerOrder) {
-    const p = state.players[pid];
-    if (!p) continue;
-    newPlayers[pid] = {
-      ...p,
-      avatarZone: p.avatarZone.map(a => ({
-        ...a,
-        layerModifiers: pid === playerId || playerId === undefined
-          ? a.layerModifiers.filter(m => m.expiresAt !== timing)
-          : a.layerModifiers
-      }))
-    };
+  for (const [pid, player] of Object.entries(state.players)) {
+    const mayExpire = playerId === undefined || pid === playerId;
+    newPlayers[pid] = mayExpire ? {
+      ...player,
+      deck: player.deck.map(expireCard),
+      hand: player.hand.map(expireCard),
+      lifeDeck: player.lifeDeck.map(expireCard),
+      avatarZone: player.avatarZone.map(expireCard),
+      constructZone: player.constructZone.map(expireCard),
+      magicZone: player.magicZone.map(expireCard),
+      hell: player.hell.map(expireCard),
+      darkDimension: player.darkDimension.map(expireCard)
+    } : player;
   }
-  return recomputeContinuousAuras({ ...state, players: newPlayers });
+  const landMagicZone = state.landMagicZone && (playerId === undefined || state.landMagicZone.controllerId === playerId)
+    ? expireCard(state.landMagicZone)
+    : state.landMagicZone;
+  return recomputeContinuousAuras({ ...state, players: newPlayers, landMagicZone });
 }
 
 export function clearEndOfTurnModifiers(state: GameState): GameState {

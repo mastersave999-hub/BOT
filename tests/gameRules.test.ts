@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Card, CardInstance, GameState, PlayerState } from '../src/engine/types';
-import { canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones, validateConstructZone, validateGameState } from '../src/engine/gameRules';
+import { beginEndPhaseDiscard, canUseMagicTypeThisTurn, discardToHandLimit, moveCardBetweenZones, validateConstructZone, validateGameState } from '../src/engine/gameRules';
 import { runGameTransaction } from '../src/engine/gameTransaction';
 import { redactLifeCardsForViewer } from '../src/engine/multiplayer';
 
@@ -85,23 +85,22 @@ describe('shared game rules', () => {
     expect(moved.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED']);
   });
 
-  it('discards exactly the selected excess hand cards to Hell and rejects invalid or repeated choices', () => {
+  it('discards exactly the selected excess hand cards after End Phase selection opens', () => {
     const hand = Array.from({ length: 9 }, (_, index) => instance(`h${index}`, 'p1', `Card ${index}`, 'Magic'));
-    const current = state(player('p1', { hand }));
-    expect(discardToHandLimit(current, 'p1', ['h0']).ok).toBe(false);
-    expect(discardToHandLimit(current, 'p1', ['h0', 'h0']).ok).toBe(false);
-    expect(discardToHandLimit(current, 'p1', ['missing', 'h1']).ok).toBe(false);
-    const result = discardToHandLimit(current, 'p1', ['h1', 'h7']);
+    const current = { ...state(player('p1', { hand })), currentPhase: 'END' as const };
+    const pending = beginEndPhaseDiscard(current, 'p1');
+    expect(pending.ok).toBe(true);
+    expect(discardToHandLimit(current, 'p1', ['h1', 'h7']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['h0']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['h0', 'h0']).ok).toBe(false);
+    expect(discardToHandLimit(pending.state, 'p1', ['missing', 'h1']).ok).toBe(false);
+    const result = discardToHandLimit(pending.state, 'p1', ['h1', 'h7']);
     expect(result.ok).toBe(true);
-    const pendingState = { ...current, currentPhase: 'END' as const, pendingEndPhaseDiscardPlayerId: 'p1' };
-    const pendingResult = discardToHandLimit(pendingState, 'p1', ['h1', 'h7']);
-    expect(pendingResult.ok).toBe(true);
-    expect(pendingResult.state.pendingEndPhaseDiscardPlayerId).toBeUndefined();
-    expect(pendingResult.state.players.p1.hand).toHaveLength(7);
+    expect(result.state.pendingEndPhaseDiscardPlayerId).toBeUndefined();
     expect(result.state.players.p1.hand).toHaveLength(7);
     expect(result.state.players.p1.hell.map(item => item.instanceId)).toEqual(['h1', 'h7']);
-    expect(discardToHandLimit(state(player('p1', { hand: hand.slice(0, 7) })), 'p1', []).ok).toBe(true);
-    expect(discardToHandLimit(state(player('p1', { hand: hand.slice(0, 6) })), 'p1', []).ok).toBe(true);
+    const exactlySeven = { ...state(player('p1', { hand: hand.slice(0, 7) })), currentPhase: 'END' as const };
+    expect(beginEndPhaseDiscard(exactlySeven, 'p1').ok).toBe(false);
   });
 
   it('rolls back nested mutations and emits no committed events on rejection or throw', () => {
