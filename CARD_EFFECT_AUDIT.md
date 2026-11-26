@@ -4,9 +4,11 @@
 
 ### Phase 4B Game State verification and adapter dry-run (Rule Book 3.2)
 
-The deterministic dry-run classifies every effect-bearing catalog row with `src/engine/cardTextAdapter.ts`; it is a parser audit, not a substitute for per-card runtime evidence. Run `npx tsx scripts/audit-card-text-adapter.ts` to reproduce the current totals. The official `cards_clean.json` database contains 2,014 rows, of which 1,833 have printed effect text (1,462 distinct effect-bearing `printId` values). Current Phase 4B results: **VERIFIED_WORKING 71, PARSED_READY 226 (including the 71 verified rows), UNSUPPORTED 1,603, AMBIGUOUS 4**. The suite attempts all 226 parser-ready database rows; 71 pass exact Game State assertions and 155 remain unverified. Unsupported plans remain fail-closed. Parser readiness is not verification, and repeated catalog rows are counted separately.
+The deterministic dry-run classifies every effect-bearing catalog row with `src/engine/cardTextAdapter.ts`; it is a parser audit, not a substitute for per-card runtime evidence. Run `npx tsx scripts/audit-card-text-adapter.ts` to reproduce the current totals. The official `cards_clean.json` database contains 2,014 rows, of which 1,833 have printed effect text (1,462 distinct effect-bearing `printId` values). Current Phase 4A Batch 4A results: **VERIFIED_WORKING 71, PARSED_READY 226 (including the 71 verified rows), UNSUPPORTED 1,603, AMBIGUOUS 4**. The suite attempts all 226 parser-ready database rows; 71 pass exact Game State assertions and 155 remain unverified. This triage run made no engine or fixture change and demoted no rows; no evidence justified promoting additional rows. The target of 211 verified rows is therefore not met. Unsupported plans remain fail-closed. Parser readiness is not verification, and repeated catalog rows are counted separately.
 
-| Phase 4B status | Rows |
+**Unverified-row blocker breakdown (overlapping reason counts, not unique row totals), from `npx vitest run tests/phase4CardVerification.test.ts`:** timing/event context 91; keyword behavior 83; explicit Scout choice 55 through trigger checks plus 3 through direct-plan checks; generated effect-plan binding failure 32; no executable effect in one or more clauses 21; no official target fixture for `modify_power` 8 and `sacrifice_avatar` 2; invalid Avatar Zone fixture rejected by engine validation 1; no official Avatar for a Hell selection 1. Multiple reasons can apply to one row. These are unresolved evidence/behavior gaps, not reasons to bypass assertions. Post-triage validation: `npx tsc --noEmit` passed; `npm test` passed (**20 files / 440 tests**); `npm run build` passed; `git diff --check` passed.
+
+| Phase 4A Batch 4A status | Rows |
 |---|---:|
 | VERIFIED_WORKING (subset of PARSED_READY; exact per-row state assertions) | 71 |
 | PARSED_READY (including VERIFIED_WORKING) | 226 |
@@ -89,7 +91,7 @@ The Phase 2.1 tests exercise shared rules and engine infrastructure against sele
 
 ## Per-record effect-to-mechanics mapping
 
-One row per catalog record with printed effect text (repeated printId values remain separate rows). `Mechanics` are text markers/categories to investigate, not proof an effect is parsed or functions. The candidate labels are heuristic only. `VERIFIED_WORKING` is used only on the 67 exact database rows whose Phase 4B harness executions passed named before/after Game State assertions; 155 other parser-ready rows are explicitly not yet verified.
+One row per catalog record with printed effect text (repeated printId values remain separate rows). `Mechanics` are text markers/categories to investigate, not proof an effect is parsed or functions. The candidate labels are heuristic only. `VERIFIED_WORKING` is used only on the 71 exact database rows whose Phase 4A Batch 4A harness executions passed named before/after Game State assertions; 155 other parser-ready rows are explicitly not yet verified.
 
 | DB row | Print ID | Card | Required mechanic categories (text-derived) | Triage status | Test evidence | Printed effect (verbatim) |
 |---:|---|---|---|---|---|---|
