@@ -1,5 +1,6 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
+import { recomputeContinuousEffects, expirePreventionShieldsAt } from './continuousEffects';
 
 type LayerMod = CardInstance['layerModifiers'][number];
 
@@ -261,10 +262,10 @@ export function recomputeContinuousAuras(state: GameState): GameState {
     };
   }
 
-  return {
+  return recomputeContinuousEffects({
     ...state,
     players: newPlayers
-  };
+  });
 }
 
 /**
@@ -411,7 +412,7 @@ export function expireModifiersAt(
   const landMagicZone = state.landMagicZone && (playerId === undefined || state.landMagicZone.controllerId === playerId)
     ? expireCard(state.landMagicZone)
     : state.landMagicZone;
-  return recomputeContinuousAuras({ ...state, players: newPlayers, landMagicZone });
+  return recomputeContinuousAuras(expirePreventionShieldsAt({ ...state, players: newPlayers, landMagicZone }, timing, playerId));
 }
 
 export function clearEndOfTurnModifiers(state: GameState): GameState {

@@ -1,5 +1,7 @@
 import type { CardInstance, GameState, PlayerState } from './types';
 import { appendGameEvents, type GameEvent } from './gameEvents';
+import { recomputeContinuousEffects } from './continuousEffects';
+import { preventDestruction } from './prevention';
 
 export type PlayerZone = 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension';
 
@@ -42,6 +44,14 @@ export function validateMagicPlay(state: GameState, playerId: string, subtype: N
   return null;
 }
 
+function validateCardMechanics(card: CardInstance): string | null {
+  if (card.continuousEffects?.some(effect => ![1, 2].includes(effect.layer) || !Number.isFinite(effect.powerMod))) return `${card.instanceId}: Invalid continuous effect`;
+  if (card.preventionShields?.some(shield => !shield.id || !['DAMAGE', 'DESTRUCTION', 'TARGETING'].includes(shield.kind) ||
+    (shield.amount !== undefined && (!Number.isFinite(shield.amount) || shield.amount <= 0)) ||
+    (shield.usesRemaining !== undefined && (!Number.isSafeInteger(shield.usesRemaining) || shield.usesRemaining < 0)))) return `${card.instanceId}: Invalid prevention shield`;
+  return null;
+}
+
 export function validateGameState(state: GameState): string | null {
   if (state.stateRevision !== undefined && (!Number.isSafeInteger(state.stateRevision) || state.stateRevision < 0)) return 'Invalid game state revision';
   if (state.processedCommandIds !== undefined && (!Array.isArray(state.processedCommandIds) ||
@@ -53,6 +63,9 @@ export function validateGameState(state: GameState): string | null {
     if (!(player.usedMagicTypesThisTurn instanceof Set) || [...player.usedMagicTypesThisTurn].some(type => !['Normal', 'Modification', 'React', 'Land'].includes(type))) {
       return `${playerId}: Invalid used Magic type state`;
     }
+    if (player.preventionShields?.some(shield => !shield.id || !['DAMAGE', 'DESTRUCTION', 'TARGETING'].includes(shield.kind) ||
+      (shield.amount !== undefined && (!Number.isFinite(shield.amount) || shield.amount <= 0)) ||
+      (shield.usesRemaining !== undefined && (!Number.isSafeInteger(shield.usesRemaining) || shield.usesRemaining < 0)))) return `${playerId}: Invalid prevention shield`;
     const avatarError = validateAvatarZone(player);
     if (avatarError) return `${playerId}: ${avatarError}`;
     const constructError = validateConstructZone(player);
@@ -63,6 +76,8 @@ export function validateGameState(state: GameState): string | null {
         while (pending.length > 0) {
           const current = pending.pop()!;
           if (seen.has(current.instanceId)) return `Duplicate card instance: ${current.instanceId}`;
+          const mechanicsError = validateCardMechanics(current);
+          if (mechanicsError) return mechanicsError;
           seen.add(current.instanceId);
           pending.push(...current.attachedInstances);
         }
@@ -74,6 +89,8 @@ export function validateGameState(state: GameState): string | null {
     while (pending.length > 0) {
       const current = pending.pop()!;
       if (seen.has(current.instanceId)) return `Duplicate card instance: ${current.instanceId}`;
+      const mechanicsError = validateCardMechanics(current);
+      if (mechanicsError) return mechanicsError;
       seen.add(current.instanceId);
       pending.push(...current.attachedInstances);
     }
@@ -124,6 +141,7 @@ export interface ZoneMoveRequest {
   effectMove?: boolean;
   /** Ability-authorized Deck ordering; ordinary player reordering remains forbidden. */
   deckPosition?: 'top' | 'bottom';
+  cause?: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' | 'OTHER';
 }
 
 export interface ZoneMoveResult { ok: boolean; state: GameState; reason?: string }
@@ -160,6 +178,10 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   if (request.destination === 'deck' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter the Main Deck' };
   if (request.destination === 'hand' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter a hand' };
   if (request.destination === 'magicZone' && card.card.type !== 'Magic' && card.card.type !== 'Avatar') return { ok: false, state, reason: 'Only Magic cards or relocated Avatars may enter Magic Zone' };
+  if (request.cause === 'EFFECT' || request.cause === 'COMBAT' || request.cause === 'PLAYER_ACTION') {
+    const prevention = preventDestruction(state, request.actorId, card.instanceId, request.cause);
+    if (prevention.prevented) return { ok: true, state: prevention.state, reason: 'Destruction was prevented' };
+  }
   const destinationPlayerId = request.destinationPlayerId ?? card.ownerId;
   if (request.destination !== 'landMagicZone' && request.destination !== 'removedFromGame' && !state.players[destinationPlayerId]) {
     return { ok: false, state, reason: 'Destination player does not exist' };
@@ -219,7 +241,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       players[owner.id] = { ...owner, hell: [...owner.hell, attached] };
     }
   }
-  const next = { ...state, players, landMagicZone };
+  const next = recomputeContinuousEffects({ ...state, players, landMagicZone });
   const error = validateGameState(next);
   if (error) return { ok: false, state, reason: error };
   const privateSource = sourceZone === 'deck' || sourceZone === 'hand' || (sourceZone === 'lifeDeck' && !card.isFaceUp);

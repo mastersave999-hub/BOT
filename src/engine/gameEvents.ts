@@ -15,7 +15,9 @@ type GameEventPayload =
   | { type: 'DECK_SEARCHED'; deckOwnerId: string; actorId: string; destination: 'hand' | 'hell' | 'deck'; instanceId?: string; found?: boolean }
   | { type: 'DECK_SEARCH_VERIFIED'; deckOwnerId: string; searcherId: string; verifierId: string }
   | { type: 'PLAYER_DECKED_OUT'; playerId: string }
-  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' };
+  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' }
+  | { type: 'ACTION_CANCELLED'; actorId: string; targetInstanceId: string; targetKind: 'MAGIC_PLAY' | 'ABILITY' | 'CHAIN_ENTRY'; eventId: string }
+  | { type: 'PREVENTION_APPLIED'; shieldId: string; kind: 'DAMAGE' | 'DESTRUCTION' | 'TARGETING'; actorId: string; targetId: string; targetPlayerId: string; preventedAmount: number; eventId: string };
 
 export type GameEvent = GameEventPayload & { eventId: string };
 

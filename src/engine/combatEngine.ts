@@ -89,7 +89,7 @@ export function attackLifeZone(
 ): { damageDealt: boolean; isGameOver: boolean; revealedCardId?: string; event: string } {
   const attackerPower = calculateNetPower(attacker);
 
-  // RuleBook p.25: Avatar with 0 POWER cannot deal damage to LIFE Card Zone
+  // Rule Book 3.2 p.25: Avatar with 0 POWER cannot deal damage to LIFE Card Zone
   if (attackerPower === 0) {
     return {
       damageDealt: false,
@@ -98,6 +98,26 @@ export function attackLifeZone(
     };
   }
 
+  const fullDamageShield = [...(defendingPlayer.preventionShields ?? [])]
+    .filter(shield => shield.kind === 'DAMAGE' && shield.usesRemaining !== 0 && (shield.amount === undefined || shield.amount >= 1))
+    .sort((left, right) => left.id.localeCompare(right.id))[0];
+  if (fullDamageShield) {
+    defendingPlayer.preventionShields = fullDamageShield.usesRemaining === undefined
+      ? defendingPlayer.preventionShields
+      : fullDamageShield.usesRemaining <= 1
+        ? defendingPlayer.preventionShields?.filter(shield => shield.id !== fullDamageShield.id)
+        : defendingPlayer.preventionShields?.map(shield => shield.id === fullDamageShield.id
+          ? { ...shield, usesRemaining: shield.usesRemaining - 1 }
+          : shield);
+    return {
+      damageDealt: false,
+      isGameOver: false,
+      event: `${attacker.card.name} dealt no damage: ${fullDamageShield.id} prevented the LIFE hit.`
+    };
+  }
+
+  // Rule Book 3.2 p.25 treats a successful LIFE attack as one revealed LIFE card.
+  // Fractional reductions are handled by preventDamage for numeric damage effects, not by this one-card action.
   // RuleBook p.21, p.25: If in Critical State (สถานะสาหัส), any successful damage results in loss!
   if (defendingPlayer.isCritical || defendingPlayer.lifeDeck.every(c => c.isFaceUp)) {
     return {

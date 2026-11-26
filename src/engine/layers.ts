@@ -5,25 +5,26 @@ export function calculateNetPower(avatar: CardInstance): number {
   let currentPower = avatar.card.power;
 
   // Layer 1: Direct stat modifications (self buffs, Modification Magic equip)
-  const layer1Mods = avatar.layerModifiers.filter(m => m.layer === 1);
+  const orderedModifiers = [...avatar.layerModifiers].sort((left, right) => left.layer - right.layer || left.sourceCardId.localeCompare(right.sourceCardId));
+  const layer1Mods = orderedModifiers.filter(m => m.layer === 1);
   for (const mod of layer1Mods) {
     currentPower += mod.powerMod;
   }
 
   // Layer 2: Indirect aura buffs (Land Magic, continuous allies)
-  const layer2Mods = avatar.layerModifiers.filter(m => m.layer === 2);
+  const layer2Mods = orderedModifiers.filter(m => m.layer === 2);
   for (const mod of layer2Mods) {
     currentPower += mod.powerMod;
   }
 
   // Layer 3: Snapshot Power established upon attack declaration
-  const layer3Mods = avatar.layerModifiers.filter(m => m.layer === 3);
+  const layer3Mods = orderedModifiers.filter(m => m.layer === 3);
   for (const mod of layer3Mods) {
     currentPower += mod.powerMod;
   }
 
   // Layer 4: Combat modifiers & React Magic active during combat
-  const layer4Mods = avatar.layerModifiers.filter(m => m.layer === 4);
+  const layer4Mods = orderedModifiers.filter(m => m.layer === 4);
   for (const mod of layer4Mods) {
     currentPower += mod.powerMod;
   }

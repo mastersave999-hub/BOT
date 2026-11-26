@@ -1,6 +1,7 @@
 import type { CardInstance, GameState } from './types';
 import { moveCardBetweenZones, validateGameState } from './gameRules';
 import { runGameTransaction } from './gameTransaction';
+import { preventTargeting } from './prevention';
 
 export type EffectCondition =
   | { kind: 'player_has_avatar'; playerId: string; nameIncludes: string }
@@ -101,10 +102,12 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     }
     return next;
   },
-  modify_power: ({ state, effect }) => {
+  modify_power: ({ state, plan, effect }) => {
     if (effect.kind !== 'modify_power' || !Number.isFinite(effect.amount)) return null;
     const found = findAvatar(state, effect.targetId);
     if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
     const player = state.players[found.playerId];
     const avatarZone = player.avatarZone.map(avatar => avatar.instanceId !== effect.targetId ? avatar : {
       ...avatar,
@@ -115,14 +118,16 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     });
     return { ...state, players: { ...state.players, [found.playerId]: { ...player, avatarZone } } };
   },
-  reset_power: ({ state, effect }) => {
+  reset_power: ({ state, plan, effect }) => {
     if (effect.kind !== 'reset_power') return null;
     const found = findAvatar(state, effect.targetId);
     if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
     const player = state.players[found.playerId];
     return { ...state, players: { ...state.players, [found.playerId]: {
       ...player, avatarZone: player.avatarZone.map(avatar => avatar.instanceId !== effect.targetId ? avatar : {
-        ...avatar, layerModifiers: avatar.layerModifiers.filter(modifier => modifier.sourceCardId.startsWith('aura-'))
+        ...avatar, layerModifiers: avatar.layerModifiers.filter(modifier => modifier.sourceCardId.startsWith('aura-') || modifier.sourceCardId.startsWith('continuous:'))
       })
     } } };
   },
@@ -130,9 +135,11 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (effect.kind !== 'destroy_avatar') return null;
     const found = findAvatar(state, effect.targetId);
     if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
     const movement = moveCardBetweenZones(state, {
       instanceId: effect.targetId, actorId: plan.actorId, destination: 'hell',
-      destinationPlayerId: found.avatar.ownerId, effectMove: true
+      destinationPlayerId: found.avatar.ownerId, effectMove: true, cause: 'EFFECT'
     });
     if (!movement.ok) return null;
     return movement.state;
@@ -141,6 +148,8 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (effect.kind !== 'bounce_avatar') return null;
     const found = findAvatar(state, effect.targetId);
     if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
     const movement = moveCardBetweenZones(state, {
       instanceId: effect.targetId, actorId: plan.actorId, destination: 'hand',
       destinationPlayerId: found.avatar.ownerId, effectMove: true
@@ -164,7 +173,7 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       for (const avatar of avatars) {
         const moved = moveCardBetweenZones(next, {
           instanceId: avatar.instanceId, actorId: plan.actorId, destination: 'hell',
-          destinationPlayerId: avatar.ownerId, effectMove: true
+          destinationPlayerId: avatar.ownerId, effectMove: true, cause: 'EFFECT'
         });
         if (!moved.ok) return null;
         next = moved.state;
