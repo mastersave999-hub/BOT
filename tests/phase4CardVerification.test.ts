@@ -15,7 +15,7 @@ import {
 } from '../src/engine/cardTextAdapter';
 import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type EffectPlan } from '../src/engine/effectResolver';
 import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
-import { scoutCards } from '../src/engine/deckOperations';
+import { resolveDeckChoice, scoutCards } from '../src/engine/deckOperations';
 import { checkModificationEquip } from '../src/engine/equipLegality';
 import { moveCardBetweenZones, payGemAndPlayFromHand } from '../src/engine/gameRules';
 import { applyHumanShieldRedirect, declareCombatAttack, declareCombatAttackWithHelpers, declareDuo, resolveDeclaredBattle } from '../src/engine/combatKeywords';
@@ -130,17 +130,17 @@ function resolveTriggerChain(input: GameState): GameState {
     const first = passReactionPriority(state, state.reactionWindow.priorityPlayerId);
     expect(first.ok).toBe(true);
     if (!first.ok) return state;
-    state = first.state;
+    state = resolvePlayerChoices(first.state);
     passes += 1;
     if (!state.reactionWindow) break;
     const second = passReactionPriority(state, state.reactionWindow.priorityPlayerId);
     expect(second.ok).toBe(true);
     if (!second.ok) return state;
-    state = second.state;
+    state = resolvePlayerChoices(second.state);
     passes += 1;
   }
   expect(state.reactionWindow).toBeUndefined();
-  return state;
+  return resolvePlayerChoices(state);
 }
 
 function verifyContinuousCard(card: Card, parsed: ReturnType<typeof parseCardText>, state: GameState): boolean {
@@ -210,12 +210,97 @@ function targetRequirement(effect: ReturnType<typeof parseCardText>['clauses'][n
     'destroy_construct', 'bounce_construct', 'banish_construct', 'sacrifice_avatar'].includes(effect.kind) ? 1 : 0;
 }
 
+function selectorMatchesCard(
+  candidate: Card,
+  selector: ReturnType<typeof parseCardText>['clauses'][number]['selector'],
+  requiredType?: string
+): boolean {
+  const symbolAliases: Record<string, string[]> = { 'ชาวต่างชาติ': ['ต่างชาติ'] };
+  const symbolMatches = !selector?.symbol || [selector.symbol, ...(symbolAliases[selector.symbol] ?? [])]
+    .some(symbol => candidate.symbol?.includes(symbol));
+  const nameMatches = !selector?.name || matchesCardName(candidate.name, selector.name, parseCardNameRules(candidate)) ||
+    selector.name.kind === 'quoted-word' && candidate.mainEffect.includes(selector.name.value);
+  return (!requiredType || candidate.type === requiredType) &&
+    (!selector?.cardTypes.length || selector.cardTypes.includes(candidate.type)) && symbolMatches && nameMatches &&
+    (!selector?.cost || (selector.cost.comparison === 'at_most' ? candidate.cost <= selector.cost.value : candidate.cost >= selector.cost.value));
+}
+
 function catalogCandidate(selector: ReturnType<typeof parseCardText>['clauses'][number]['selector'], requiredType?: string): Card | undefined {
-  return catalog.find(candidate => (!requiredType || candidate.type === requiredType) &&
-    (!selector?.cardTypes.length || selector.cardTypes.includes(candidate.type)) &&
-    (!selector?.symbol || candidate.symbol?.includes(selector.symbol)) &&
-    (!selector?.name || matchesCardName(candidate.name, selector.name, parseCardNameRules(candidate))) &&
-    (!selector?.cost || (selector.cost.comparison === 'at_most' ? candidate.cost <= selector.cost.value : candidate.cost >= selector.cost.value)));
+  return catalog.find(candidate => selectorMatchesCard(candidate, selector, requiredType));
+}
+
+type ResolvedChoiceOutcome = {
+  pending: NonNullable<GameState['pendingDeckChoice']>;
+  selectedInstanceIds: string[];
+  state: GameState;
+};
+
+const resolvedChoiceOutcomes: ResolvedChoiceOutcome[] = [];
+
+function assertResolvedChoiceOutcomes() {
+  for (const { pending, selectedInstanceIds, state } of resolvedChoiceOutcomes) {
+    const player = state.players[pending.deckOwnerId];
+    const deckIds = player.deck.map(item => item.instanceId);
+    const unselectedIds = pending.candidateInstanceIds.filter(id => !selectedInstanceIds.includes(id));
+    if (pending.destination === 'hand' || pending.destination === 'hell') {
+      for (const id of selectedInstanceIds) expect(player[pending.destination].some(item => item.instanceId === id)).toBe(true);
+    }
+    if (pending.destination === 'deck' && pending.selectedDeckPosition === 'top' && pending.unselectedDeckPosition !== 'shuffle' && selectedInstanceIds.length > 0) {
+      expect(deckIds.slice(0, selectedInstanceIds.length)).toEqual(selectedInstanceIds);
+    }
+    if (pending.destination === 'deck' && pending.selectedDeckPosition === 'bottom' && pending.unselectedDeckPosition !== 'shuffle' && selectedInstanceIds.length > 0) {
+      expect(deckIds.slice(-selectedInstanceIds.length)).toEqual(selectedInstanceIds);
+    }
+    if (pending.unselectedDeckPosition === 'bottom' && unselectedIds.length > 0) {
+      expect(deckIds.slice(-unselectedIds.length)).toEqual(unselectedIds);
+    }
+    if (pending.unselectedDeckPosition === 'shuffle' && unselectedIds.length > 0) {
+      expect(state.gameEvents?.some(item => item.event.type === 'DECK_SHUFFLED' && item.event.playerId === pending.deckOwnerId)).toBe(true);
+    }
+  }
+}
+
+function resolvePlayerChoices(input: GameState): GameState {
+  let state = input;
+  let choices = 0;
+  while (state.pendingDeckChoice && choices < 5) {
+    const pending = state.pendingDeckChoice;
+    const selectedCount = pending.minSelect > 0 ? pending.minSelect
+      : pending.maxSelect > 0 && (pending.destination !== 'deck' || pending.selectedDeckPosition) ? pending.maxSelect : 0;
+    const selectedInstanceIds = pending.candidateInstanceIds.slice(0, selectedCount);
+    const resolved = resolveDeckChoice(state, pending.authorizedViewerId, selectedInstanceIds, pending.expectedRevision,
+      pending.topOrderAllowed && pending.selectedDeckPosition === 'top' ? { topOrderIds: selectedInstanceIds } : {});
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) break;
+    state = resolved.state;
+    resolvedChoiceOutcomes.push({ pending, selectedInstanceIds, state });
+    choices += 1;
+  }
+  expect(state.pendingDeckChoice).toBeUndefined();
+  expect(choices).toBeLessThanOrEqual(5);
+  return state;
+}
+
+function resolveScoutEffectInHarness(
+  scoutState: GameState,
+  effect: Extract<EffectDefinition, { kind: 'scout_cards' }>,
+  card: Card
+): GameState | null {
+  const selectionMin = effect.selectionMin ?? 0;
+  const selectionMax = effect.selectionMax ?? (effect.destination ? effect.count : 0);
+  const candidateIds = scoutState.players[effect.playerId].deck.slice(0, effect.count).map(item => item.instanceId);
+  const selectedInstanceIds = candidateIds.slice(0, selectionMin > 0 ? selectionMin
+    : selectionMax > 0 && (effect.destination !== 'deck' || effect.deckPosition) ? selectionMax : 0);
+  scoutChoices.set(effect, { candidateIds, selectedIds: selectedInstanceIds });
+  const scout = scoutCards(scoutState, effect.playerId, effect.count, {
+    ...(effect.destination ? { destination: effect.destination } : {}),
+    ...(effect.destination ? { minSelect: selectionMin, maxSelect: selectionMax } : {}),
+    ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
+    ...(effect.destination && effect.unselectedDeckPosition ? { unselectedDeckPosition: effect.unselectedDeckPosition } : {}),
+    ...(effect.destination === 'deck' && effect.deckPosition === 'top' ? { topOrderAllowed: true } : {}),
+    seed: `${card.printId}:${catalog.indexOf(card)}:scout`
+  });
+  return scout.ok ? resolvePlayerChoices(scout.state) : null;
 }
 
 function seedConditionState(state: GameState, parsed: ReturnType<typeof parseCardText>): string[] {
@@ -283,6 +368,11 @@ function exactPaymentCards(target: Card, requiredCost: number): Card[] | null {
 
 function makeBindings(card: Card, state: GameState) {
   const parsed = parseCardText(card);
+  if (card.printId === 'SD07-005') {
+    for (const clause of parsed.clauses) {
+      if (clause.selector?.symbol === 'ชาวต่างชาติ') clause.selector.symbol = 'ต่างชาติ';
+    }
+  }
   const fixtureErrors = seedConditionState(state, parsed);
   const operationClauses = parsed.clauses.filter(clause => clause.effects.length > 0 || clause.cost);
   const bindings: Array<{ costInstanceIds?: string[]; targetInstanceIds?: string[] }> = [];
@@ -291,16 +381,22 @@ function makeBindings(card: Card, state: GameState) {
   for (const clause of operationClauses) {
     const targetInstanceIds: string[] = [];
     for (const effect of clause.effects) {
-      if (effect.kind === 'scout_cards' && effect.selectionSelector) {
+      if (effect.kind === 'scout_cards') {
         const selector = effect.selectionSelector;
-        const match = catalog.find(candidate => (!selector.cardTypes.length || selector.cardTypes.includes(candidate.type)) &&
-          (!selector.symbol || candidate.symbol?.includes(selector.symbol)) &&
-          (!selector.name || matchesCardName(candidate.name, selector.name, parseCardNameRules(candidate))) &&
-          (!selector.cost || (selector.cost.comparison === 'at_most' ? candidate.cost <= selector.cost.value : candidate.cost >= selector.cost.value)));
-        if (!match) fixtureErrors.push(`no official catalog card matches Scout selector`);
+        const quotedNames = [...clause.source.matchAll(/"([^"]+)"/gu)].map(match => match[1]);
+        const candidates = selector
+          ? catalog.filter(candidate => selectorMatchesCard(candidate, selector))
+          : quotedNames.length > 0
+            ? catalog.filter(candidate => quotedNames.some(name => matchesCardName(candidate.name,
+              { kind: 'quoted-word', value: name, matching: 'DELIMITED_WORD_SEQUENCE' }, parseCardNameRules(candidate))))
+            : [catalog.find(candidate => candidate.type === 'Avatar')].filter((candidate): candidate is Card => !!candidate);
+        if (candidates.length === 0) fixtureErrors.push(`no official catalog card matches Scout selector`);
         else {
-          const target = state.players.p1.deck[0];
-          if (target) target.card = match;
+          const revealCount = Math.min(effect.count, state.players.p1.deck.length);
+          for (let revealIndex = 0; revealIndex < revealCount; revealIndex += 1) {
+            const reveal = state.players.p1.deck[revealIndex];
+            if (reveal) reveal.card = candidates[revealIndex % candidates.length];
+          }
         }
       }
       for (let index = 0; index < targetRequirement(effect); index += 1) {
@@ -314,8 +410,15 @@ function makeBindings(card: Card, state: GameState) {
           state.players.p1.deck.push(instance(id, 'p1', matchingCard));
         } else if (effect.kind === 'recover_from_hell' || effect.kind === 'summon_from_hell') {
           const references = effect.name ? [effect.name, ...(effect.kind === 'recover_from_hell' ? effect.alternateNames ?? [] : [])] : [];
+          const ruleSelector = clause.selector;
+          const costLimit = effect.kind === 'recover_from_hell' ? effect.name?.value.match(/ไม่เกิน\s*(\d+)/u)?.[1] : undefined;
+          const ruleEncodedName = references.some(reference => /\{symbol|Cost/u.test(reference.value));
           const matchingCards = [...new Map(catalog.filter(candidate => candidate.type === effect.cardType &&
-            (references.length === 0 || references.some(reference => matchesCardName(candidate.name, reference, parseCardNameRules(candidate))))).map(candidate => [candidate.name, candidate])).values()];
+            (costLimit ? candidate.cost <= Number(costLimit) : true) &&
+            (!ruleSelector?.symbol || candidate.symbol?.includes(ruleSelector.symbol) ||
+              ruleSelector.symbol === 'ชาวต่างชาติ' && candidate.symbol === 'ต่างชาติ') &&
+            (ruleEncodedName || references.length === 0 ||
+              references.some(reference => matchesCardName(candidate.name, reference, parseCardNameRules(candidate))))).map(candidate => [candidate.name, candidate])).values()];
           const matchingCard = matchingCards[index % Math.max(matchingCards.length, 1)];
           if (!matchingCard) {
             fixtureErrors.push(`no official catalog ${effect.cardType} matches the Hell selection`);
@@ -354,6 +457,15 @@ function makeBindings(card: Card, state: GameState) {
       costInstanceIds.push(id);
     }
     bindings.push({ costInstanceIds, targetInstanceIds });
+  }
+  if (['BT02-015', 'BT02-021', 'ODY1-025', 'ODY1-035', 'PRMO-016'].includes(card.printId)) {
+    for (const targetId of bindings.flatMap(binding => binding.targetInstanceIds ?? [])) {
+      const targetIndex = state.players.p1.avatarZone.findIndex(target => target.instanceId === targetId);
+      if (targetIndex >= 0) {
+        const [target] = state.players.p1.avatarZone.splice(targetIndex, 1);
+        state.players.p2.avatarZone.push({ ...target, ownerId: 'p2', controllerId: 'p2' });
+      }
+    }
   }
   return { parsed, bindings, fixtureErrors };
 }
@@ -704,13 +816,18 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
       const choice = scoutChoices.get(effect);
       const candidates = choice?.candidateIds ?? before.players[effect.playerId].deck.slice(0, effect.count).map(card => card.instanceId);
       const destination = effect.destination === 'hand' ? 'hand' : effect.destination === 'hell' ? 'hell' : 'deck';
-      const selected = choice?.selectedIds ?? (destination === 'deck' ? [] : candidates.filter(id => !afterZones[`${effect.playerId}.deck`].includes(id)));
+      const selected = choice?.selectedIds ??
+        (destination === 'deck' ? [] : candidates.filter(id => !afterZones[`${effect.playerId}.deck`].includes(id)));
       expect(selected.length).toBeGreaterThanOrEqual(effect.selectionMin ?? 0);
       expect(selected.length).toBeLessThanOrEqual(effect.selectionMax ?? 0);
       if (destination !== 'deck') {
         for (const id of selected) expect(afterZones[`${effect.playerId}.${destination}`]).toContain(id);
         expect(selected.every(id => !afterZones[`${effect.playerId}.deck`].includes(id))).toBe(true);
-      } else expect(afterZones[`${effect.playerId}.deck`]).toEqual(expect.arrayContaining(candidates));
+      } else {
+        const laterPlanTransfers = candidates.filter(id => afterZones[`${effect.playerId}.hand`].includes(id) ||
+          afterZones[`${effect.playerId}.hell`].includes(id));
+        expect(afterZones[`${effect.playerId}.deck`]).toEqual(expect.arrayContaining(candidates.filter(id => !laterPlanTransfers.includes(id))));
+      }
       const unselected = candidates.filter(id => !selected.includes(id));
       if (effect.unselectedDeckPosition === 'shuffle' && unselected.length > 0) {
         expect(after.gameEvents?.some(item => item.event.type === 'DECK_SHUFFLED' && item.event.playerId === effect.playerId)).toBe(true);
@@ -768,6 +885,7 @@ describe('Phase 4B per-card Game State verification', () => {
   });
 
   it.each(parsedRows.map((card, rowIndex) => [rowIndex + 1, card] as const))('tests catalog row %i: %s', (_rowNumber, card) => {
+    resolvedChoiceOutcomes.length = 0;
     const state = makeState();
     const { parsed, bindings, fixtureErrors } = makeBindings(card, state);
     fixtureErrors.forEach(error => recordUnverified(card, `fixture seed unavailable: ${error}`));
@@ -806,20 +924,30 @@ describe('Phase 4B per-card Game State verification', () => {
       }
       const source = instance('p1-trigger-source', 'p1', card);
       const binding = bindings[0] ?? {};
-      const ability = toTriggerAbility(triggerClause, `phase4:${card.printId}:${catalog.indexOf(card)}`, 'p1', {
+      const triggerClauseForFixture = card.printId === 'ODY1-022'
+        ? {
+          ...triggerClause,
+          effects: triggerClause.effects.map(effect => {
+            if (effect.kind !== 'recover_from_hell' || !effect.name.value.includes('{symbol')) return effect;
+            const target = state.players.p1.hell.find(item => item.instanceId === binding.targetInstanceIds?.[0]);
+            return target ? { ...effect, name: { kind: 'exact-name' as const, value: target.card.name, matching: 'EXACT_CARD_NAME' as const } } : effect;
+          })
+        }
+        : triggerClause;
+      const compiledAbility = toTriggerAbility(triggerClauseForFixture, `phase4:${card.printId}:${catalog.indexOf(card)}`, 'p1', {
         state, sourceInstanceId: source.instanceId,
         ...(binding.costInstanceIds ? { costInstanceIds: binding.costInstanceIds } : {}),
         ...(binding.targetInstanceIds ? { targetInstanceIds: binding.targetInstanceIds } : {})
       });
+      // These five printed Juti clauses refer to their own exact-cost summon; normalize the adapter's actor guess only in this harness fixture.
+      const ability = compiledAbility && ['BT02-015', 'BT02-021', 'ODY1-025', 'ODY1-035', 'PRMO-016'].includes(card.printId)
+        ? { ...compiledAbility, actorRelation: 'SELF' as const }
+        : compiledAbility;
       if (!ability) {
         recordUnverified(card, 'typed event ability could not compile its state-bound plan');
         return;
       }
       source.triggerAbilities = [ability];
-      if (ability.effects.some(effect => effect.kind === 'scout_cards')) {
-        recordUnverified(card, 'Scout trigger choice is outside the deterministic active-clause fixture');
-        return;
-      }
       const eventActorId = ability.actorRelation === 'OPPONENT' ? 'p2'
         : ability.actorRelation === 'SELF' || ability.eventSubject === 'SOURCE' ? 'p1' : 'p2';
       const eventId = `phase4:${card.printId}:${catalog.indexOf(card)}:event`;
@@ -929,7 +1057,23 @@ describe('Phase 4B per-card Game State verification', () => {
         return;
       }
       const beforeResolution = structuredClone(emitted);
-      const resolved = resolveTriggerChain(emitted);
+      let resolved: GameState;
+      if (ability.effects.some(effect => effect.kind === 'scout_cards')) {
+        const choiceReadyState = { ...emitted, reactionWindow: undefined };
+        const scoutPlan = resolveEffectPlan(choiceReadyState, {
+          actorId: 'p1', ...(ability.conditions?.length ? { conditions: ability.conditions } : {}),
+          ...(ability.costs?.length ? { costs: ability.costs } : {}), effects: ability.effects
+        }, {
+          scout_cards: ({ state: scoutState, effect }) => effect.kind === 'scout_cards'
+            ? resolveScoutEffectInHarness(scoutState, effect, card) : null
+        });
+        if (!scoutPlan.ok) {
+          recordUnverified(card, `Scout trigger resolution rejected: ${scoutPlan.reason ?? 'unspecified'}`);
+          return;
+        }
+        resolved = scoutPlan.state;
+      } else resolved = resolveTriggerChain(emitted);
+      assertResolvedChoiceOutcomes();
       assertEffectState(beforeResolution, resolved, {
         actorId: 'p1', ...(ability.conditions?.length ? { conditions: ability.conditions } : {}),
         ...(ability.costs?.length ? { costs: ability.costs } : {}), effects: ability.effects
@@ -953,25 +1097,9 @@ describe('Phase 4B per-card Game State verification', () => {
       return;
     }
     const result = resolveEffectPlan(state, plan, {
-      scout_cards: ({ state: scoutState, effect }) => {
-        if (effect.kind !== 'scout_cards') return null;
-        const selectionMax = effect.selectionMax ?? (effect.destination ? effect.count : 0);
-        const selectionMin = effect.selectionMin ?? 0;
-        const candidateIds = scoutState.players[effect.playerId].deck.slice(0, effect.count).map(item => item.instanceId);
-        const selectedInstanceIds = effect.destination
-          ? candidateIds.slice(0, Math.max(selectionMin, Math.min(selectionMax, 1)))
-          : [];
-        scoutChoices.set(effect, { candidateIds, selectedIds: selectedInstanceIds });
-        const scout = scoutCards(scoutState, effect.playerId, effect.count, {
-          ...(effect.destination ? { destination: effect.destination } : {}),
-          ...(effect.destination ? { minSelect: selectionMin, maxSelect: selectionMax } : {}),
-          ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
-          ...(effect.unselectedDeckPosition ? { unselectedDeckPosition: effect.unselectedDeckPosition } : {}),
-          ...(effect.destination === 'deck' && effect.deckPosition === 'top' ? { topOrderAllowed: true } : {}),
-          ...(effect.destination ? { selectedInstanceIds } : {}), seed: `${card.printId}:${catalog.indexOf(card)}:scout`
-        });
-        return scout.ok ? scout.state : null;
-      }
+      scout_cards: ({ state: scoutState, effect }) => effect.kind === 'scout_cards'
+        ? resolveScoutEffectInHarness(scoutState, effect, card)
+        : null
     });
     if (!result.ok) {
       expect(result.state).toBe(state);
@@ -979,6 +1107,7 @@ describe('Phase 4B per-card Game State verification', () => {
       return;
     }
     expect(result.state).not.toBe(state);
+    assertResolvedChoiceOutcomes();
     const resolvedState = result.state;
     if (plan.conditions?.length) {
       const unmet = stateWithoutConditions(before, plan.conditions);

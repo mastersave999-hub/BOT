@@ -353,20 +353,20 @@ These are text triage counts, not unique mechanics or verified cards. Adapter te
 - Named Hell recovery to hand and named Avatar special summon are bound to explicit instance IDs in the actor's Hell. The resolver rejects absent, wrong-type, wrong-name, duplicate, or insufficient selections and keeps all-or-nothing semantics. Other Hell-selection phrasing remains unsupported until its selector/destination behavior is represented.
 - Modification Magic equip restrictions implement Rule Book pp.13, 18 quoted-word versus exact-name matching. Illegal attempts send the card to its owner's Hell; recomputation rechecks an existing attachment continuously and sends it to Hell if the restriction ceases to hold. Unparseable restriction syntax fails closed.
 
-### Phase 4B-3: current 1,833-row audit
+### Phase 4B-4: current 1,833-row audit
 
 | Status | Rows |
 |---|---:|
-| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 82 |
+| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 117 |
 | PARSED_READY (including verified) | 226 |
-| PARSED_READY not yet verified | 144 |
+| PARSED_READY not yet verified | 109 |
 | UNSUPPORTED | 1,603 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
-The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 82 pass before/after Game State assertions, while 144 remain unverified. Eight catalog rows were newly promoted through valid plan bindings and target fixtures (BT05-003, BT07-017, ODY1-001, ODY1-002, ODY1-003, PRMO-085, KD02-004 and RM01-002); five previously verified trigger rows no longer pass the current event-fixture assertions and are listed as unverified in the card audit. No Scout card was newly promoted. The 4B-1/4B-2 GEM-paid Juti, Last Words, combat keyword and supported timing scenarios remain represented. The requested 211-row threshold is not met. Reproduce parser counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
+The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 117 pass before/after Game State assertions, while 109 remain unverified. Thirty-five records were newly promoted after bounded harness-only Scout choice submission, selector-valid Deck/Hell fixtures, and corrections to the five named summon-trigger fixtures (BT02-015, BT02-021, ODY1-025, ODY1-035, PRMO-016). Scout choices are submitted with the standard `resolveDeckChoice` operation; `effectResolver.ts` retains its pending-choice pause behavior. The 4B-1/4B-2 GEM-paid Juti, Last Words, combat keyword and supported timing scenarios remain represented. The requested 211-row threshold is not met. Reproduce parser counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
 
-**Unverified blocker counts (overlapping):** timing/event context 96; keyword behavior 74; Scout trigger choice outside the active-clause fixture 29; generated plan-binding failure 13; no executable effect in a clause 15; no official catalog target fixture for `modify_power` 1; typed trigger plan compile failure 3; LIFE timing outside active-field simulation 5; trigger fixture subject/actor mismatch 5; Scout resolution rejection 4; no official Scout selector fixture 2; unavailable Hell selection 1. A row can have multiple blockers; counts are not an exclusive partition. These counts are from the Phase 4B-3 test harness, not mutually exclusive card totals.
+**Unverified blocker counts (overlapping):** timing/event context 100; keyword behavior 78; no executable effect in a clause 15; effect plan did not compile with generated bindings 14; typed trigger plan compile failure 2; LIFE timing outside active-field simulation 5. Scout choice/rejection/selector-fixture and trigger subject/actor-mismatch blockers are no longer reported separately. A row can have multiple blockers; counts are not an exclusive partition. These counts are from the Phase 4B-4 test harness, not mutually exclusive card totals.
 
 ### Phase 4B overlapping unsupported-reason counts
 
@@ -388,6 +388,6 @@ Counts below are overlapping pattern matches across exact database rows; duplica
 
 ### Phase 4B verification boundary
 
-`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 144 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
+`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 109 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, unresolved multi-clause effects and typed trigger-plan failures. The 1,603 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
 
-**Step 4B-3 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed.
+**Step 4B-4 validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed; and the 1,833-row adapter audit returned **PARSED_READY 226 / UNSUPPORTED 1,603 / AMBIGUOUS 4**.
