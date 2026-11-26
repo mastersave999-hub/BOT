@@ -11,8 +11,12 @@ export type TransactionResult =
 export function runGameTransaction(
   original: GameState,
   operation: (draft: GameState) => GameState | null,
-  events: GameEvent[] = []
+  events: GameEvent[] = [],
+  options: { allowPendingPlayerChoice?: boolean } = {}
 ): TransactionResult {
+  if ((original.pendingDeckChoice || original.pendingDeckSearchVerification) && !options.allowPendingPlayerChoice) {
+    return { ok: false, state: original, code: 'OPERATION_REJECTED', reason: 'A Deck operation choice is pending' };
+  }
   const initialError = validateGameState(original);
   if (initialError) return { ok: false, state: original, code: 'INVALID_INITIAL_STATE', reason: initialError };
   try {

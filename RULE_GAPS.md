@@ -1,7 +1,7 @@
 # Battle of Talingchan — Rule Gaps (Phase 1.5)
 
 **Authority:** Battle of Talingchan Rule Book Version 3.2 (`rulebook_raw.txt`, 25 numbered pages).
-**Inspection baseline:** Phase 1.5 branch `v0/reaction-window-phase1`, commit `c92cd772715495d450eb1fe76441438e09cbe723`. Current Phase 2.2 status is recorded in the section below.
+**Inspection baseline:** Phase 1.5 branch `v0/reaction-window-phase1`, commit `c92cd772715495d450eb1fe76441438e09cbe723`. Phase 2.2 is merged; current Phase 2A Deck Operations status is recorded below.
 **Scope:** This file is a concise index, not a substitute for source evidence. The full rule-to-engine matrix, test evidence, card statistics, ambiguities and Phase 2 dependency roadmap are in [`RULE_ENGINE_GAP_ANALYSIS.md`](RULE_ENGINE_GAP_ANALYSIS.md). The complete record-level card/effect mapping is in [`CARD_EFFECT_AUDIT.md`](CARD_EFFECT_AUDIT.md).
 
 ## Status definitions
@@ -30,7 +30,7 @@ Do not infer card correctness from parser/text matching. No catalog card is mark
 | Control change and owner routing | pp.6, 9, 18, 20 | Owner/controller fields exist; no typed control-change movement | **Unsupported** |
 | Continuous layers and duration | pp.15–17, 21 | POWER aura subset exists; full layer semantics, snapshot and end-of-battle expiration absent | **Partial** |
 | Trigger timing | pp.5, 7–8, 12, 22–24 | A small set of trigger labels and LIFE queue exist; no general event/timing queue | **Partial** |
-| Search, Scout and Mill | pp.3, 7, 13–14 | No typed private Deck operation, exact quoted-name semantics, or shuffle/search/scout/mill pipeline | **Unsupported** |
+| Search, Scout and Mill | pp.3, 7, 13–14 | `deckOperations.ts` provides typed shuffle/search/scout/mill, pending choices, privacy projection and transactions | **Core operations tested; card-text parsing/trigger integration remains unsupported** |
 | Combat / Construct combat | pp.22–25 | Avatar comparison helper and LIFE helper exist; no complete combat transaction or Construct combat | **Partial / missing** |
 | Multiplayer authority and 3+ priority | pp.18–19, official book describes two-player response priority | PeerJS host-authoritative client; 3+ reaction windows deliberately disabled | 3+ order is **Unsupported** (the official Rule Book is silent); client host is not trusted authority |
 
@@ -68,7 +68,16 @@ Baseline `npm test` on the Phase 1.5 inspected commit: **10 test files, 72 tests
 - **Partial — first turn:** first player turn one skips Battle; Game State, next-turn and SYNC gating are tested. Snapshot restoration is covered for reaction windows and pending discard; live peer transport behavior is not asserted.
 - **Complete for Phase 2.2 state/multiplayer scope; Rule ambiguity — End Phase:** exact distinct IDs and current revision are checked, duplicate commands are rejected, the host handles the active peer command, and state snapshots restore while discard is pending. Rule Book 3.2 does not specify destination; routing to owner Hell is only an application convention. Browser interaction, transport-level reconnect, and rejection acknowledgement are not verified.
 - **Complete — shared Phase 2.2 infrastructure:** targeted supported engine mutations use validated transactions and centralized movement; attached-card exits, hidden movement metadata, nested rollback, ordered/deduplicated events, recursion limits, and full-state snapshot restoration are covered by Game State assertions. The event layer is infrastructure, not Trigger Effects.
-- **Unsupported:** Control Change, Search, Scout, Mill, Token destination-then-removal, and Trigger Effects are not claimed as implemented. Ad-Mua three-plus-player Reaction priority remains unsupported by the official book and disabled.
+- **Unsupported:** Control Change, Token destination-then-removal, Trigger Effects, Prevention, Cancellation, and Phase 3 card-text parsing remain unimplemented. Search/Scout/Mill now have typed core operations only; catalog text is not parsed or wired to these APIs. Ad-Mua three-plus-player Reaction priority remains unsupported by the official book and disabled.
 - **Catalog cards:** no individual card was promoted to Working or Verified. No claim is made that all 1,833 printed-effect records were tested.
 
 Final Phase 2.2 validation: `npm test` passed **12 files / 97 tests**; `npx tsc --noEmit`, `npm run build`, and `git diff --check` all passed. See `RULE_ENGINE_GAP_ANALYSIS.md` for the source-backed matrix and `CARD_EFFECT_AUDIT.md` for per-record status limits.
+
+## Phase 2A — Deck Operations
+
+- **Implemented core APIs:** seeded/live `shuffleDeck`, `millCards`, authorized/revisioned `scoutCards`, and typed `searchDeck`; see `src/engine/deckOperations.ts` and `tests/deckOperations.test.ts`.
+- **Verified rule details:** Mill below N mills the remaining cards; p.21 says reaching zero Deck is an immediate loss, so the operation reports deck-out rather than waiting for a failed draw. Search shuffles after a match or no match; a no-match result blocks actions until an opponent verifies it (p.3).
+- **Privacy:** unauthorized projections hide Deck identities, Scout candidates and private Search result/success fields. Cards moved into Hell are public.
+- **Not implemented:** control change, trigger resolution for “when scouted/milled,” prevention, cancellation, Phase 3 text parsing, and integration of every card-text effect with these primitives. No individual catalog card is verified by these core tests.
+- **Rule boundary:** arbitrary top-deck ordering is prohibited; top-order selection is supported only when explicitly authorized by an effect. Search matching grammar/partial exact-count behavior and 3+ player no-target verifier selection are not fully specified by v3.2; see the analysis for conservative API handling.
+- **Validation:** `npx tsc --noEmit`, `npm run build`, and `git diff --check` passed; `npm test` passed **13 files / 105 tests**.

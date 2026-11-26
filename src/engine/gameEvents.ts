@@ -9,6 +9,12 @@ type GameEventPayload =
   | { type: 'ATTACK_DECLARED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'BATTLE_ENDED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'TURN_STARTED' | 'TURN_ENDED'; playerId: string; turnNumber: number }
+  | { type: 'DECK_SHUFFLED'; playerId: string; cardCount: number }
+  | { type: 'DECK_MILLED'; playerId: string; cardInstanceIds: string[] }
+  | { type: 'DECK_SCOUTED'; deckOwnerId: string; viewerId: string; cardInstanceIds: string[] }
+  | { type: 'DECK_SEARCHED'; deckOwnerId: string; actorId: string; destination: 'hand' | 'hell' | 'deck'; instanceId?: string; found?: boolean }
+  | { type: 'DECK_SEARCH_VERIFIED'; deckOwnerId: string; searcherId: string; verifierId: string }
+  | { type: 'PLAYER_DECKED_OUT'; playerId: string }
   | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' };
 
 export type GameEvent = GameEventPayload & { eventId: string };

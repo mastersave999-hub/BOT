@@ -160,6 +160,29 @@ export interface PlayerState {
   usedMagicTypesThisTurn: Set<MagicSubtype>; // Max 1 per Magic Type per turn
 }
 
+export interface PendingDeckSearchVerification {
+  deckOwnerId: string;
+  searcherId: string;
+  verifierPlayerIds: string[];
+  expectedRevision: number;
+}
+
+export interface PendingDeckChoice {
+  kind: 'SCOUT' | 'SEARCH';
+  deckOwnerId: string;
+  actorId: string;
+  authorizedViewerId: string;
+  candidateInstanceIds: string[];
+  minSelect: number;
+  maxSelect: number;
+  destination: 'hand' | 'hell' | 'deck';
+  selectedDeckPosition?: 'top' | 'bottom';
+  unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle';
+  topOrderAllowed?: boolean;
+  expectedRevision: number;
+  commandId?: string;
+}
+
 export interface GameState {
   id: string;
   mode: 'DUEL' | 'AD_MUA';
@@ -175,6 +198,10 @@ export interface GameState {
   pendingEndPhaseDiscardPlayerId?: string;
   /** Revision captured when End Phase discard selection opens; commands must match it. */
   pendingEndPhaseDiscardRevision?: number;
+  /** Private Deck operation choice; card identities are projected only to authorized viewers. */
+  pendingDeckChoice?: PendingDeckChoice;
+  /** Public confirmation required by Rule Book 3.2 p.3 when a Deck Search finds no target. */
+  pendingDeckSearchVerification?: PendingDeckSearchVerification;
   /** Monotonic revision for command preconditions and duplicate-command rejection. */
   stateRevision?: number;
   /** Recent idempotency keys for accepted multiplayer commands. */
