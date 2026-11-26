@@ -6,7 +6,7 @@ import { moveCardBetweenZones } from '../src/engine/gameRules';
 import { validateMagicPlay } from '../src/engine/gameRules';
 import { validateDeck } from '../src/engine/deckValidator';
 import { calculateEffectiveSymbol, calculateNetPower } from '../src/engine/layers';
-import { beginReactionCard, canCancelMagicCard, resolveReactionCard } from '../src/engine/reactionEngine';
+import { beginReactionCard, canCancelMagicCard, cancelReactionTarget, resolveReactionCard } from '../src/engine/reactionEngine';
 import { payCombatKeyword } from '../src/engine/combatKeywords';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
@@ -207,6 +207,20 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(matchesCardName('Sea Temple', createNameReference('Black Marsh', false), primaryRules)).toBe(true);
     expect(parseCardText(secondary).attributes.ruleTextProtected).toBe(true);
     expect(parseCardText(dualPrimary).attributes.ruleTextProtected).toBe(true);
+
+    const abilityNegationState = gameState();
+    abilityNegationState.players.p1.avatarZone.push({ ...instance('p1-alias', 'p1'), card: secondary });
+    abilityNegationState.reactionWindow = {
+      id: 'alias-negation-window', trigger: { type: 'ABILITY_USED', actorId: 'p1' }, turnOwnerId: 'p1',
+      priorityPlayerId: 'p2', passedPlayerIds: [], priorityOrder: ['p2', 'p1'], revision: 0,
+      chain: [{ entryType: 'ACTIVATED_ABILITY', sourceCardId: 'p1-alias', controllerId: 'p1', triggerId: 'alias-activated',
+        effects: [], cancelled: false, eventId: 'alias-ability-event', respondedTo: { type: 'ABILITY_USED', actorId: 'p1', sourceInstanceId: 'p1-alias' } }]
+    };
+    const negated = cancelReactionTarget(abilityNegationState, 'p2', { kind: 'CHAIN_ENTRY', instanceId: 'p1-alias' });
+    expect(negated.ok).toBe(true);
+    expect(negated.state.reactionWindow?.chain?.[0]).toMatchObject({ cancelled: true });
+    const stillAliased = negated.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-alias')!;
+    expect(matchesCardName(stillAliased.card.name, createNameReference('Camp Name', true), parseCardNameRules(stillAliased.card))).toBe(true);
 
     const mainDeck = [
       ...Array.from({ length: 4 }, () => secondary),
