@@ -4,16 +4,16 @@
 
 ### Phase 4B Game State verification and adapter dry-run (Rule Book 3.2)
 
-The deterministic dry-run classifies every effect-bearing catalog row with `src/engine/cardTextAdapter.ts`; it is a parser audit, not a substitute for per-card runtime evidence. Run `npx tsx scripts/audit-card-text-adapter.ts` to reproduce parser totals. The official `cards_clean.json` database contains 2,014 rows, of which 1,833 have printed effect text (1,462 distinct effect-bearing `printId` values). Phase 4C totals are **VERIFIED_WORKING 117, PARSED_READY 226 (including the 117 verified rows), UNSUPPORTED 1,603, AMBIGUOUS 4**; 109 parser-ready rows remain unverified. Batch 4C added a typed, fail-closed conditional count AST for explicit Avatar Zone, hand-size, and LIFE count thresholds, with Game State enforcement and fixture support. No official catalog row newly qualifies under that narrow grammar: the remaining conditional cluster mostly describes event provenance, costs, or conditional multi-step effects and remains unsupported. The 1,833-row totals count repeated catalog rows separately. Parser readiness is not verification.
+The deterministic dry-run classifies every effect-bearing catalog row with `src/engine/cardTextAdapter.ts`; it is a parser audit, not a substitute for per-card runtime evidence. Run `npx tsx scripts/audit-card-text-adapter.ts` to reproduce parser totals. The official `cards_clean.json` database contains 2,014 rows, of which 1,833 have printed effect text (1,462 distinct effect-bearing `printId` values). Batch 4C-2 audit totals are **VERIFIED_WORKING 117, PARSED_READY 231 (including the 117 verified rows), UNSUPPORTED 1,598, AMBIGUOUS 4**; 114 parser-ready rows remain unverified. This batch adds typed explicit Hell recovery routing to Hand, Deck top/bottom, and Banish destinations, and recognizes additional Modification equipped-aura clauses. Existing owner-routed field exits send attached Modifications to Hell. Five additional catalog rows are parser-ready; no new row was promoted to VERIFIED_WORKING. The remaining unparsed patterns include Hell recursion 309, equip restriction 33, continuous POWER/Symbol 170, and End Phase self-exit 37. The 1,833-row totals count repeated catalog rows separately. Parser readiness is not verification.
 
 **Unverified-row blocker breakdown (overlapping reason counts, not unique row totals), from the Phase 4B-4 harness:** timing/event context 100; keyword behavior 78; no executable effect in one or more clauses 15; effect plan did not compile with generated bindings 14; LIFE timing outside active-field simulation 5; typed trigger plan compile failure 2. Scout choice/rejection/selector-fixture and trigger subject/actor-mismatch blockers are no longer reported separately; remaining rows may still carry other blockers. Multiple reasons can apply to one row. The 35 new verified records include Scout choice cases, five event-trigger fixture corrections (BT02-015, BT02-021, ODY1-025, ODY1-035, PRMO-016), and the Hell-selection fixture (ODY1-022). Phase 4B-4 validation passed: `npx tsc --noEmit`; `npm test` (20 files / 442 tests); `npm run build`; `git diff --check`; and `npx tsx scripts/audit-card-text-adapter.ts` (2,014 records, 1,833 effect-bearing rows; PARSED_READY 226, UNSUPPORTED 1,603, AMBIGUOUS 4).
 
 | Phase 4B-4 status | Rows |
 |---|---:|
 | VERIFIED_WORKING (subset of PARSED_READY; exact per-row state assertions) | 117 |
-| PARSED_READY (including VERIFIED_WORKING) | 226 |
-| PARSED_READY not yet verified | 109 |
-| UNSUPPORTED | 1,603 |
+| PARSED_READY (including VERIFIED_WORKING) | 231 |
+| PARSED_READY not yet verified | 114 |
+| UNSUPPORTED | 1,598 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
@@ -30,7 +30,7 @@ The deterministic dry-run classifies every effect-bearing catalog row with `src/
 
 Top fail-closed reason categories from the Phase 4B audit (overlapping reason counts, not unique-card totals): no complete mapped effect clause 1,504; targeted/zone-changing operation without a complete bound plan 1,113; condition expression gap 439; unrecognized cost syntax 171; inherent `#` Rule Text without an executable spec 103; continuous board condition gap 47; cost primitive outside the atomic resolver 47; unsupported multi-player resolution 35; explicit ambiguity marker 4. These categories overlap and can coexist.
 
-Batch 4C dry-run did not change the catalog classification totals. Top remaining unparsed clause clusters (overlapping row counts; repeated print IDs count as separate rows): Hell recovery/summon/banish 310; continuous POWER/Symbol modifiers 170; end-of-turn self-exit/removal 37; Modification equip restriction 38; cancellation 44; opponent Magic use 10; conditional `ถ้า...:` clauses 18; opponent Avatar summon reaction 2; destruction prevention 2; “ability counts as Normal Magic” 0. Rule Text modifiers, multi-effect choice branches, triggered event conditions, and ownership/timing interactions still block whole-card parsing. These counts describe text clusters, not fully supported rules.
+Batch 4C-2 dry-run totals: VERIFIED_WORKING 117 / PARSED_READY 231 / UNSUPPORTED 1,598 / AMBIGUOUS 4. Top remaining unparsed clause clusters (overlapping rows): Hell recovery/summon/banish 309; continuous POWER/Symbol modifiers 170; end-of-turn self-exit/removal 37; Modification equip restriction 33; cancellation 44; opponent Magic use 10; conditional `ถ้า...:` clauses 18; opponent Avatar summon reaction 2; destruction prevention 2; “ability counts as Normal Magic” 0. The broader Hell and End Phase clusters still include multi-step, conditional, selector, and timing interactions that remain fail-closed. These counts describe unparsed text clusters, not fully supported rules.
 
 Audited all 2,014 catalog records in `cards_clean.json`: 1,633 unique `printId` values and 1,833 effect-bearing rows. Rule Book 3.2 (`rulebook_raw.txt`) remains authoritative. `VERIFIED_WORKING` is reserved for the 117 exact rows marked in the record table below; their deterministic tests assert before/after Game State changes, including Phase 4B-4 player-choice resolution and legal target fixtures. No card is promoted because of text matching, parser readiness, or a synthetic helper test. All other rows remain `PARSED_READY`, `UNSUPPORTED`, or `AMBIGUOUS` according to the current adapter result.
 
@@ -91,7 +91,7 @@ The Phase 2.1 tests exercise shared rules and engine infrastructure against sele
 
 ## Per-record effect-to-mechanics mapping
 
-One row per catalog record with printed effect text (repeated printId values remain separate rows). `Mechanics` are text markers/categories to investigate, not proof an effect is parsed or functions. The candidate labels are heuristic only. `VERIFIED_WORKING` is used only on the 117 exact database rows whose Phase 4B-4 harness executions passed named before/after Game State assertions; 109 other parser-ready rows are explicitly not yet verified.
+One row per catalog record with printed effect text (repeated printId values remain separate rows). `Mechanics` are text markers/categories to investigate, not proof an effect is parsed or functions. The candidate labels are heuristic only. `VERIFIED_WORKING` is used only on the 117 exact database rows whose Phase 4B-4 harness executions passed named before/after Game State assertions; 114 other parser-ready rows are explicitly not yet verified.
 
 | DB row | Print ID | Card | Required mechanic categories (text-derived) | Triage status | Test evidence | Printed effect (verbatim) |
 |---:|---|---|---|---|---|---|

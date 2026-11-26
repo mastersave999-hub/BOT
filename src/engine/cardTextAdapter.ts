@@ -11,7 +11,7 @@ export type CardTextEffect =
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
   | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
-  | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name: NameReference; alternateNames?: NameReference[]; count: number; destination: 'hand' }
+  | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name: NameReference; alternateNames?: NameReference[]; count: number; destination: 'hand' | 'deck_top' | 'deck_bottom' | 'banish' }
   | { kind: 'summon_from_hell'; cardType: 'Avatar'; name?: NameReference; count: 1; rested: boolean }
   | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
@@ -312,7 +312,10 @@ function parseClause(source: string): ParsedCardTextClause {
   const quotedReferences = [...split.effectText.matchAll(/"([^\"]+)"/g)].map(match => createNameReference(match[1], true));
   const exactNameReferences = [...split.effectText.matchAll(/ชื่อ\s+([^\"“”{},:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/g)].map(match => createNameReference(match[1].trim(), false));
   const timing = parseTiming(source);
-  const continuousAura = timing.mode === 'CONTINUOUS' && parseContinuousPowerEffects(source).length > 0;
+  const modificationAura = /Avatar[^\n]*สวมใส่การ์ดใบนี้[^\n]*(?:POWER\s*[+-]\s*\d+|เปลี่ยน\s*Symbol)/i.test(source) &&
+    /Modification|POWER|Symbol/i.test(source);
+  const continuousAura = (timing.mode === 'CONTINUOUS' || modificationAura) &&
+    (parseContinuousPowerEffects(source).length > 0 || modificationAura);
   const equipRestriction = parseEquipRestriction(source);
   const partnerName = source.match(/คู่หู\s*[-–:]\s*([^\n(]+)/)?.[1]?.trim();
   const keywordSpecs: CardTextKeywordSpec[] = keywords.map(keyword => {
@@ -347,7 +350,7 @@ function parseClause(source: string): ParsedCardTextClause {
     const setPower = part.match(/POWER\s*(?:เท่ากับ|เป็น)\s*(\d+)\b/i);
     const symbolChange = part.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+จนจบ(?:การต่อสู้|การโจมตี|เทิร์น)|\s+จนถึง Draw Phase ถัดไป|$)/i);
     const search = part.match(/นำ\s+(Avatar|Construct|Magic)\s+ชื่อ\s+(?:\"([^\"]+)\"|([^\s]+(?:\s+[^\s]+)*?))\s+(\d+)\s*ใบจาก\s+Deck\s+ขึ้นมือ(?:\s+หลังจากนั้นสับ\s+Deck)?/i);
-    const recovery = part.match(/^นำ\s+(Avatar|Construct|Magic)\s+(?:ชื่อ\s*)?([\s\S]+?)\s+(?:ได้สูงสุด\s*)?(\d+)\s*ใบ\s*จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา)\s*(?:ขึ้นมือ|กลับขึ้นมือ)$/i);
+    const recovery = part.match(/^(?:นำ|เลือก(?:หยิบ)?|เนรเทศ)\s+(Avatar|Construct|Magic)\s+(?:ชื่อ\s*)?([\s\S]+?)\s+(?:ได้สูงสุด\s*)?(\d+)\s*ใบ\s*จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา|ของฝ่ายเรา)?\s*(ขึ้นมือ|กลับขึ้นมือ|กลับเข้า\s*Deck|ไว้บนสุดของ\s*Deck|ไว้ใต้\s*Deck|เนรเทศ)?$/i);
     const hellSummon = part.match(/^อัญเชิญ\s+Avatar\s+(?:ชื่อ\s*)?(?:\"([^\"]+)\"|“([^”]+)”|([^,]+?))\s+จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา)(?:\s+ลง\s+Avatar Zone)?(?:\s+ในสภาพ(นอน|ตื่น))?$/i);
     const movementTarget = /Avatar/.test(part) && /ตัวนั้น|ใบนั้น|Avatar\s+1\s*ใบ/.test(part);
     const destroy = movementTarget && /ทำลาย\s*(?:Avatar|การ์ดใบนี้)/.test(part);
@@ -367,15 +370,18 @@ function parseClause(source: string): ParsedCardTextClause {
     else if (destroyConstruct) effects.push({ kind: 'destroy_construct', target: 'selected_construct' });
     else if (constructTarget && /กลับขึ้นมือ/.test(part)) effects.push({ kind: 'bounce_construct', target: 'selected_construct' });
     else if (constructTarget && /เนรเทศ/.test(part)) effects.push({ kind: 'banish_construct', target: 'selected_construct' });
-    else if (deckReturn) effects.push({ kind: 'return_to_deck', target: 'selected_card',
+    else if (deckReturn && !recovery) effects.push({ kind: 'return_to_deck', target: 'selected_card',
       count: Number(deckReturn[0].match(/(\d+)\s*ใบ/)?.[1] ?? 1),
       position: /กลับเข้า\s*Deck/.test(deckReturn[0]) ? 'shuffle' : /บนสุด/.test(deckReturn[0]) ? 'top' : 'bottom' });
     else if (recovery) {
       const recoveryNames = [...recovery[2].matchAll(/["“]([^"”]+)["”]/g)].map(match => createNameReference(match[1].trim(), true));
       const names = recoveryNames.length ? recoveryNames : [createNameReference(recovery[2].trim(), false)];
+      const destination = /บนสุด/.test(recovery[4] ?? '') ? 'deck_top'
+        : /ใต้\s*Deck/.test(recovery[4] ?? '') ? 'deck_bottom'
+          : /เนรเทศ/.test(recovery[4] ?? '') || /^เนรเทศ/u.test(part) ? 'banish' : 'hand';
       effects.push({ kind: 'recover_from_hell', cardType: recovery[1] as 'Avatar' | 'Construct' | 'Magic',
         name: names[0], ...(names.length > 1 ? { alternateNames: names.slice(1) } : {}),
-        count: Number(recovery[3]), destination: 'hand' });
+        count: Number(recovery[3]), destination });
     }
     else if (hellSummon) effects.push({ kind: 'summon_from_hell', cardType: 'Avatar',
       name: createNameReference((hellSummon[1] ?? hellSummon[2] ?? hellSummon[3]).trim(), !!(hellSummon[1] || hellSummon[2])),

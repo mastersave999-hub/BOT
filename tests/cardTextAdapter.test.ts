@@ -625,6 +625,21 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(criticalResult.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
   });
 
+  it('parses explicit Hell recovery destinations without conflating their zone semantics', () => {
+    const card = byPrintId('SD01-001');
+    const cases = [
+      ['นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา ขึ้นมือ', 'hand'],
+      ['นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา ไว้บนสุดของ Deck', 'deck_top'],
+      ['นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา ไว้ใต้ Deck', 'deck_bottom'],
+      ['เนรเทศ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเรา', 'banish']
+    ] as const;
+    for (const [text, destination] of cases) {
+      const parsed = parseCardText({ ...card, mainEffect: text });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].effects[0]).toMatchObject({ kind: 'recover_from_hell', count: 1, destination });
+    }
+  });
+
   it('binds named Hell recovery and special summon to a selected owned card', () => {
     const base = byPrintId('SD01-001');
     const recover = parseCardText({ ...base, mainEffect: 'นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเราขึ้นมือ' });

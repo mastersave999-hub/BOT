@@ -36,7 +36,7 @@ export type EffectDefinition =
   | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom'; selectionMin?: number; selectionMax?: number; unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle' }
   | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
-  | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck' | 'hand' }
+  | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish' }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
   | { kind: 'cancel_chain_entry'; targetId: string }
@@ -420,13 +420,16 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (cards.some(card => !card || card.card.type === 'Life')) return null;
     let next = state;
     for (const card of cards as CardInstance[]) {
+      const toDeck = effect.destination === 'deck_top' || effect.destination === 'deck_bottom';
       const moved = moveCardBetweenZones(next, {
-        instanceId: card.instanceId, actorId: plan.actorId, destination: effect.destination,
-        destinationPlayerId: getOriginalOwnerId(card), effectMove: true
+        instanceId: card.instanceId, actorId: plan.actorId,
+        destination: toDeck ? 'deck' : effect.destination === 'banish' ? 'darkDimension' : 'hand',
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true,
+        ...(toDeck ? { deckPosition: effect.destination === 'deck_top' ? 'top' as const : 'bottom' as const } : {})
       });
       if (!moved.ok) return null;
       next = moved.state;
-      if (effect.destination === 'deck') {
+      if (toDeck) {
         const owner = next.players[getOriginalOwnerId(card)];
         next = { ...next, players: { ...next.players, [owner.id]: {
           ...owner, deck: owner.deck.map(item => item.instanceId === card.instanceId ? { ...item, isFaceUp: false } : item)

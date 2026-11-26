@@ -809,8 +809,12 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
         expectedZones[`${effect.playerId}.deck`] = afterZones[`${effect.playerId}.deck`];
       } else expect(afterZones[`${effect.playerId}.deck`]).toEqual(expectedZones[`${effect.playerId}.deck`]);
     } else if (effect.kind === 'recover_from_hell') {
-      for (const id of effect.instanceIds) moveExpected(id, `${effect.playerId}.hand`);
-      expect(afterZones[`${effect.playerId}.hand`]).toEqual(expectedZones[`${effect.playerId}.hand`]);
+      const destination = effect.destination === 'banish' ? 'darkDimension'
+        : effect.destination === 'hand' ? 'hand' : 'deck';
+      const deckPosition = effect.destination === 'deck_top' ? 'top' : 'bottom';
+      for (const id of effect.instanceIds) moveExpected(id, `${effect.playerId}.${destination}`,
+        destination === 'deck' ? deckPosition : undefined);
+      expect(afterZones[`${effect.playerId}.${destination}`]).toEqual(expectedZones[`${effect.playerId}.${destination}`]);
       expect(afterZones[`${effect.playerId}.hell`]).toEqual(expectedZones[`${effect.playerId}.hell`]);
     } else if (effect.kind === 'summon_from_hell') {
       moveExpected(effect.instanceId, `${effect.playerId}.avatarZone`);
@@ -859,7 +863,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
 describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
     expect(effectRows).toHaveLength(1833);
-    expect(parsedRows).toHaveLength(226);
+    expect(parsedRows).toHaveLength(231);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 

@@ -28,6 +28,29 @@ describe('typed effect resolver', () => {
     expect(result.state.players.p2.avatarZone[0].layerModifiers[0].powerMod).toBe(3);
   });
 
+  it('recovers selected Hell cards to hand, top/bottom of Deck, and Banish Zone', () => {
+    const destinations = [
+      { destination: 'hand' as const, zone: 'hand' as const },
+      { destination: 'deck_top' as const, zone: 'deck' as const, position: 'top' as const },
+      { destination: 'deck_bottom' as const, zone: 'deck' as const, position: 'bottom' as const },
+      { destination: 'banish' as const, zone: 'darkDimension' as const }
+    ];
+    for (const [index, destination] of destinations.entries()) {
+      const initial = gameState();
+      const target = instance(`p1-hell-${index}`, 'p1');
+      initial.players.p1.hell.push(target);
+      const result = resolveEffectPlan(initial, { actorId: 'p1', effects: [{
+        kind: 'recover_from_hell', playerId: 'p1', count: 1, instanceIds: [target.instanceId],
+        destination: destination.destination
+      }] });
+      expect(result.ok).toBe(true);
+      expect(result.state.players.p1.hell.some(card => card.instanceId === target.instanceId)).toBe(false);
+      expect(result.state.players.p1[destination.zone].some(card => card.instanceId === target.instanceId)).toBe(true);
+      if (destination.position === 'top') expect(result.state.players.p1.deck[0].instanceId).toBe(target.instanceId);
+      if (destination.position === 'bottom') expect(result.state.players.p1.deck.at(-1)?.instanceId).toBe(target.instanceId);
+    }
+  });
+
   it('executes ordered operations against the updated staged Game State', () => {
     const initial = gameState();
     const result = resolveEffectPlan(initial, {
