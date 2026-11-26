@@ -60,6 +60,19 @@ export function restoreOwnLifeCardsFromSetup(
 }
 
 export function redactLifeCardsForViewer(state: GameState, viewerId: string): GameState {
+  const inspectedCardIds = state.pendingDeckChoice?.authorizedViewerId === viewerId
+    ? new Set(state.pendingDeckChoice.candidateInstanceIds)
+    : new Set<string>();
+  const gameEvents = state.gameEvents?.map(({ sequence, event }) => {
+    if (event.type === 'DECK_SCOUTED' && event.viewerId !== viewerId) {
+      return { sequence, event: { ...event, cardInstanceIds: [] } };
+    }
+    if (event.type === 'DECK_SEARCHED' && event.destination !== 'hell' && event.actorId !== viewerId) {
+      const { instanceId: _privateInstanceId, found: privateFound, ...publicEvent } = event;
+      return { sequence, event: event.found === false ? { ...publicEvent, found: false } : publicEvent };
+    }
+    return { sequence, event };
+  });
   return {
     ...state,
     players: Object.fromEntries(
@@ -70,13 +83,19 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
           : {
               ...player,
               hand: player.hand.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
-              deck: player.deck.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
+              deck: player.deck.map(card => inspectedCardIds.has(card.instanceId)
+                ? card
+                : { ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false }),
               lifeDeck: player.lifeDeck.map(card =>
                 card.isFaceUp ? card : { ...card, card: FACE_DOWN_LIFE_CARD }
               )
             }
       ])
-    )
+    ),
+    pendingDeckChoice: state.pendingDeckChoice && state.pendingDeckChoice.authorizedViewerId !== viewerId
+      ? { ...state.pendingDeckChoice, candidateInstanceIds: [], minSelect: 0, maxSelect: 0 }
+      : state.pendingDeckChoice,
+    ...(gameEvents ? { gameEvents } : {})
   };
 }
 
@@ -141,7 +160,7 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
   const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
-  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId) return false;
+  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification) return false;
   const outgoingPlayer = previous.players[activePlayerId];
   const incomingOutgoingPlayer = incoming.players[activePlayerId];
   const completedDrawPhase = previous.currentPhase === 'DRAW' && incoming.currentPhase === 'MAIN' &&

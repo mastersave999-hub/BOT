@@ -30,6 +30,7 @@ export function validateMagicPlay(state: GameState, playerId: string, subtype: N
   if (!player) return 'Player does not exist';
   if (state.playerOrder[state.currentTurnPlayerIndex] !== playerId) return 'Only the active player may play a Magic card';
   if (state.pendingEndPhaseDiscardPlayerId) return 'End Phase discard selection is pending';
+  if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return 'A Deck operation choice is pending';
   if (subtype === 'React') {
     if (convertedNormalToReact && (state.currentPhase !== 'BATTLE' || state.reactionWindow)) return 'Converted Normal Magic may only use React timing during your Battle Phase';
     if (!convertedNormalToReact && !state.reactionWindow) return 'React Magic requires a valid response window';
@@ -77,6 +78,29 @@ export function validateGameState(state: GameState): string | null {
       pending.push(...current.attachedInstances);
     }
   }
+  if ([state.pendingDeckChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if (state.pendingDeckSearchVerification) {
+    const pending = state.pendingDeckSearchVerification;
+    if (!state.players[pending.deckOwnerId] || !state.players[pending.searcherId] || !Array.isArray(pending.verifierPlayerIds) ||
+      pending.verifierPlayerIds.length === 0 || !Number.isSafeInteger(pending.expectedRevision) ||
+      new Set(pending.verifierPlayerIds).size !== pending.verifierPlayerIds.length ||
+      pending.verifierPlayerIds.some(id => !state.players[id] || id === pending.searcherId) || pending.expectedRevision !== state.stateRevision) {
+      return 'Invalid pending Deck Search verification';
+    }
+  }
+  if (state.pendingDeckChoice) {
+    const pending = state.pendingDeckChoice;
+    const owner = state.players[pending.deckOwnerId];
+    if (!owner || !state.players[pending.actorId] || !state.players[pending.authorizedViewerId] ||
+      !['SCOUT', 'SEARCH'].includes(pending.kind) || !['hand', 'hell', 'deck'].includes(pending.destination) ||
+      !Array.isArray(pending.candidateInstanceIds) || !Number.isSafeInteger(pending.expectedRevision) || pending.expectedRevision !== state.stateRevision ||
+      !Number.isSafeInteger(pending.minSelect) || !Number.isSafeInteger(pending.maxSelect) ||
+      pending.minSelect < 0 || pending.maxSelect < pending.minSelect || pending.maxSelect > pending.candidateInstanceIds.length ||
+      new Set(pending.candidateInstanceIds).size !== pending.candidateInstanceIds.length ||
+      pending.candidateInstanceIds.some(id => typeof id !== 'string' || !owner.deck.some(card => card.instanceId === id))) {
+      return 'Invalid pending Deck operation choice';
+    }
+  }
   if (state.pendingEndPhaseDiscardPlayerId) {
     const playerId = state.pendingEndPhaseDiscardPlayerId;
     const player = state.players[playerId];
@@ -98,6 +122,8 @@ export interface ZoneMoveRequest {
   destinationPlayerId?: string;
   /** Explicitly allow a move initiated by an effect rather than the current controller. */
   effectMove?: boolean;
+  /** Ability-authorized Deck ordering; ordinary player reordering remains forbidden. */
+  deckPosition?: 'top' | 'bottom';
 }
 
 export interface ZoneMoveResult { ok: boolean; state: GameState; reason?: string }
@@ -108,6 +134,7 @@ const ZONES: readonly PlayerZone[] = ['deck', 'hand', 'lifeDeck', 'avatarZone', 
 export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest): ZoneMoveResult {
   const invalid = validateGameState(state);
   if (invalid) return { ok: false, state, reason: invalid };
+  if (state.pendingDeckChoice || state.pendingDeckSearchVerification) return { ok: false, state, reason: 'A Deck operation choice is pending' };
   let card: CardInstance | undefined;
   let sourcePlayerId: string | undefined;
   let sourceZone: PlayerZone | undefined;
@@ -125,6 +152,7 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   if (!card || (!isLand && !sourcePlayerId) || (!request.effectMove && card.controllerId !== request.actorId)) {
     return { ok: false, state, reason: 'Card not found or actor is not its controller' };
   }
+  if (request.deckPosition && (!request.effectMove || request.destination !== 'deck')) return { ok: false, state, reason: 'Only an explicit effect may set Deck position' };
   if (request.destination === 'landMagicZone' && (card.card.type !== 'Magic' || card.card.subtype !== 'Land')) return { ok: false, state, reason: 'Only Land Magic cards may enter Land Magic Zone' };
   if (request.destination === 'constructZone' && card.card.type !== 'Construct') return { ok: false, state, reason: 'Only Construct cards may enter Construct Zone' };
   if (request.destination === 'avatarZone' && card.card.type !== 'Avatar' && card.card.type !== 'Token') return { ok: false, state, reason: 'Only Avatars and Tokens may enter Avatar Zone' };
@@ -179,7 +207,10 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       const err = validateConstructZone({ constructZone: [...currentZone, destinationCard] });
       if (err) return { ok: false, state, reason: err };
     }
-    players[destinationPlayerId] = { ...destinationPlayer, [request.destination]: [...currentZone, destinationCard] };
+    const destinationCards = request.destination === 'deck' && request.deckPosition === 'top'
+      ? [destinationCard, ...currentZone]
+      : [...currentZone, destinationCard];
+    players[destinationPlayerId] = { ...destinationPlayer, [request.destination]: destinationCards };
   }
   for (const attached of detachedAttachments) {
     const owner = players[attached.ownerId];
@@ -228,7 +259,7 @@ export function beginEndPhaseDiscard(state: GameState, playerId: string): ZoneMo
   if (!player || state.currentPhase !== 'END' || state.playerOrder[state.currentTurnPlayerIndex] !== playerId) {
     return { ok: false, state, reason: 'Only the active player may begin End Phase discard selection' };
   }
-  if (state.pendingEndPhaseDiscardPlayerId || player.hand.length <= 7) {
+  if (state.pendingEndPhaseDiscardPlayerId || state.pendingDeckChoice || state.pendingDeckSearchVerification || player.hand.length <= 7) {
     return { ok: false, state, reason: 'End Phase discard selection is not required or is already pending' };
   }
   const revision = (state.stateRevision ?? 0) + 1;
@@ -252,7 +283,7 @@ export function discardToHandLimit(
   if (commandId && state.processedCommandIds?.includes(commandId)) {
     return { ok: false, state, reason: 'Duplicate End Phase discard command' };
   }
-  if (!player || state.pendingEndPhaseDiscardPlayerId !== playerId || state.currentPhase !== 'END' ||
+  if (!player || state.pendingDeckChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId !== playerId || state.currentPhase !== 'END' ||
     state.playerOrder[state.currentTurnPlayerIndex] !== playerId) {
     return { ok: false, state, reason: 'No pending End Phase discard selection for this player' };
   }
