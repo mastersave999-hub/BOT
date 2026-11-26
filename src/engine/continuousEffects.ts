@@ -1,6 +1,8 @@
 import type { CardInstance, ContinuousPowerEffect, GameState, PlayerState, PreventionShield } from './types';
 import { calculateEffectiveSymbol } from './layers';
 import { parseCardText } from './cardTextAdapter';
+import { appendGameEvents, type GameEvent } from './gameEvents';
+import { checkModificationEquip } from './equipLegality';
 
 function flattenFieldCard(card: CardInstance): CardInstance[] {
   return [card, ...card.attachedInstances.flatMap(flattenFieldCard)];
@@ -107,9 +109,54 @@ function recalculatePlayer(state: GameState, player: PlayerState, sources: CardI
   };
 }
 
+function enforceModificationEquipLegality(state: GameState): GameState {
+  const players = { ...state.players };
+  const events: GameEvent[] = [];
+  for (const playerId of state.playerOrder) {
+    const player = players[playerId];
+    if (!player) continue;
+    const avatarZone = player.avatarZone.map(avatar => {
+      const kept: CardInstance[] = [];
+      for (const attached of avatar.attachedInstances) {
+        if (attached.card.type !== 'Magic' || attached.card.subtype !== 'Modification') {
+          kept.push(attached);
+          continue;
+        }
+        const legality = checkModificationEquip(attached.card, avatar.card);
+        if (legality.legal) {
+          kept.push(attached);
+          continue;
+        }
+        const ownerId = attached.originalOwnerId ?? attached.ownerId;
+        const owner = players[ownerId];
+        if (!owner) {
+          kept.push(attached);
+          continue;
+        }
+        players[ownerId] = { ...owner, hell: [...owner.hell, { ...attached, attachedInstances: [] }] };
+        events.push({
+          type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId, controllerId: attached.controllerId,
+          from: `${playerId}:attached:${avatar.instanceId}`, to: `${ownerId}:hell`, actorId: avatar.controllerId,
+          eventId: `${state.id}:${state.gameEvents?.length ?? 0}:equip-illegal:${attached.instanceId}:${avatar.instanceId}`
+        });
+        events.push({
+          type: 'CARD_LEFT_FIELD', instanceId: attached.instanceId, ownerId, controllerId: attached.controllerId,
+          actorId: avatar.controllerId,
+          eventId: `${state.id}:${state.gameEvents?.length ?? 0}:equip-illegal-left:${attached.instanceId}:${avatar.instanceId}`
+        });
+      }
+      return kept.length === avatar.attachedInstances.length ? avatar : { ...avatar, attachedInstances: kept };
+    });
+    players[playerId] = { ...players[playerId], avatarZone };
+  }
+  const next = { ...state, players };
+  return events.length ? appendGameEvents(next, events) : next;
+}
+
 /** Rebuilds only derived source-based modifiers; printed card.power is never mutated. */
 export function recomputeContinuousEffects(state: GameState): GameState {
-  const activeCards = activeFieldCards(state);
+  const legallyEquippedState = enforceModificationEquipLegality(state);
+  const activeCards = activeFieldCards(legallyEquippedState);
   const sources = activeCards.filter(card => card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
   const activeSourceIds = new Set(activeCards.map(card => card.instanceId));
   const cleanShields = (card: CardInstance): CardInstance => {
@@ -141,9 +188,9 @@ export function recomputeContinuousEffects(state: GameState): GameState {
     hell: player.hell.map(cleanShields),
     darkDimension: player.darkDimension.map(cleanShields)
   });
-  const cleanedPlayers = Object.fromEntries(Object.entries(state.players).map(([id, player]) => [id, cleanPlayer(player)]));
-  const cleanedLand = state.landMagicZone ? cleanShields(state.landMagicZone) : null;
-  const cleanedState = { ...state, players: cleanedPlayers, landMagicZone: cleanedLand };
+  const cleanedPlayers = Object.fromEntries(Object.entries(legallyEquippedState.players).map(([id, player]) => [id, cleanPlayer(player)]));
+  const cleanedLand = legallyEquippedState.landMagicZone ? cleanShields(legallyEquippedState.landMagicZone) : null;
+  const cleanedState = { ...legallyEquippedState, players: cleanedPlayers, landMagicZone: cleanedLand };
   const cleanedSources = activeFieldCards(cleanedState).filter(card => card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
   const players = Object.fromEntries(Object.entries(cleanedState.players).map(([id, player]) => [id, recalculatePlayer(cleanedState, player, cleanedSources)]));
   return { ...cleanedState, players };

@@ -343,4 +343,49 @@ The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among eff
 | Cost primitive outside the atomic resolver | 47 |
 | Explicit ambiguity marker | 4 |
 
-These are text triage counts, not unique mechanics or verified cards. Adapter tests cover representative catalog rows and name/Magic semantics; Phase 2 resolver tests remain separate typed-Game-State tests. **Phase 3 is READY TO MERGE for the explicitly requested final three adapter items. Phase 4 per-card Game State verified remains 0 and has not started.** This readiness does not claim complete support for all 1,833 effect-bearing rows.
+These are text triage counts, not unique mechanics or verified cards. Adapter tests cover representative catalog rows and name/Magic semantics; Phase 2 resolver tests remain separate typed-Game-State tests. **At the Phase 3 PR #20 merge checkpoint**, the adapter was READY TO MERGE and per-card Game State verification remained 0. Current Phase 4A status follows.
+
+## 17. Phase 4A — Per-card verification and high-impact patterns
+
+### Rule Book 3.2-backed implementation
+
+- The parser/plan boundary now supports a finite, fail-closed condition AST for controlled Avatar name (quoted word sequence or exact name), effective Symbol, typed/named Hell-count minimums, and player Critical status. Conditions are preflighted before costs/effects; a false condition returns the original state unchanged. Any unrecognized conditional syntax remains `UNSUPPORTED`.
+- Named Hell recovery to hand and named Avatar special summon are bound to explicit instance IDs in the actor's Hell. The resolver rejects absent, wrong-type, wrong-name, duplicate, or insufficient selections and keeps all-or-nothing semantics. Other Hell-selection phrasing remains unsupported until its selector/destination behavior is represented.
+- Modification Magic equip restrictions implement Rule Book pp.13, 18 quoted-word versus exact-name matching. Illegal attempts send the card to its owner's Hell; recomputation rechecks an existing attachment continuously and sends it to Hell if the restriction ceases to hold. Unparseable restriction syntax fails closed.
+
+### Current 1,833-row audit
+
+| Status | Rows |
+|---|---:|
+| VERIFIED_WORKING (exact individual row state tests) | 18 |
+| PARSED_READY (not automatically verified) | 229 |
+| UNSUPPORTED | 1,600 |
+| AMBIGUOUS | 4 |
+| **Total effect-bearing rows** | **1,833** |
+
+The Phase 3 baseline had 231 `PARSED_READY` rows. Phase 4 added one narrowly bound Hell recovery mapping while strict multi-player text checks demoted three formerly ready records; the remaining adapter output is 229 ready. The deterministic suite runs each of those 229 records and fail-closed tests for the 35 overlapping multi-player reason rows. Exactly 18 records pass the additional full-clause, event-free, exact before/after verification gate; the other 211 ready rows are not promoted. Row-level evidence and IDs are in `CARD_EFFECT_AUDIT.md`.
+
+### Current overlapping unsupported-reason counts
+
+| Reason | Rows |
+|---|---:|
+| No complete mapped effect clause | 1,522 |
+| Targeted/zone-changing operation without a complete bound plan | 1,117 |
+| Condition expression gap | 439 |
+| Unrecognized cost syntax | 171 |
+| Inherent `#` Rule Text without executable spec | 103 |
+| Cost primitive outside the atomic resolver | 47 |
+| Multi-player target resolution not represented by the supported plan | 35 |
+| Explicit ambiguity marker | 4 |
+
+### Priority deck archetypes
+
+- **Verified direct draw effects:** `ความเจริญ` rows `BT01-038`, `CC01-056`, `ODY1-068`, `PRMO-019`, `KD01-013`, `KD03-012`, `KD04-018`, `APFD-001`, and `B2SA-008` (including repeated database rows), plus the other exact records listed as `VERIFIED_WORKING` in `CARD_EFFECT_AUDIT.md`.
+- **Parsed but not individually verified:** `อุบัติเหตุ!!!` printings; the effect body is parsed, but the Avatar-summon event/target lifecycle is not proven end-to-end by Phase 4A.
+- **Still unsupported:** `ลูเซเน่ โพลีกอน`, `อีสานสลิงเกอร์ เปอร์`, `โคกอีสานนูน` (the catalog name nearest the requested `โคกอีสานมูล`), `ชายจากอนาคต`, `หมอมาแล้วววว`, `อย่าให้มีครั้งที่ 2`, `ความกล้าหาญ`, `ไปเลยมอนตี้`, and `มนุษย์ดัดแปลง`; their event/cancellation/prevention/combat/continuous or multi-step equip plans are not fully bound. No `อีสานสลิงเกอร์ บิ๊ก` exact card name was found in `cards_clean.json`.
+
+### Phase 4A verification boundary
+
+The 18 verified rows are restricted to direct, complete, event-free plans whose printed clause set is exercised through the typed resolver with exact zone/stat assertions. This is not an assertion that all 229 parser-ready rows or all 1,833 catalog effects work. Triggered Magic timing, Scout choices, complex multi-player instructions, unsupported costs, and unsupported rule text stay fail-closed or unverified. Reproduce counts with `npx tsx scripts/audit-card-text-adapter.ts`; the Phase 4 suite is `tests/phase4CardVerification.test.ts`.
+
+**Phase 4A validation:** `npx tsc --noEmit`, `npm test` (**20 files / 441 tests**), `npm run build`, and `git diff --check` passed. The game preview opened to the playable board at 346×503 in dark mode; no browser errors were reported.

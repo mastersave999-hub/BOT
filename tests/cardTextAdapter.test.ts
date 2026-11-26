@@ -41,7 +41,7 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(parsed.ruleTexts).toContain('การ์ดใบนี้ไม่สามารถลงสนามจากบนมือได้');
     expect(parsed.clauses.some(clause => clause.source.includes('ธรณีสูบ') && clause.effectText.includes('อัญเชิญ'))).toBe(true);
     expect(parsed.status).toBe('UNSUPPORTED');
-    expect(parsed.reason).toContain('typed');
+    expect(parsed.reason).toContain('condition expression');
   });
 
   it('compiles and executes Thai destroy, bounce, banish, and mill clauses in Game State', () => {
@@ -555,6 +555,76 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(hidePlan?.effects[0]).toMatchObject({ kind: 'flip_life', face: 'down', allowWhileCritical: false });
     const hidden = resolveEffectPlan(critical, hidePlan!);
     expect(hidden.ok).toBe(true);
-    expect(hidden.state.players.p2.lifeDeck[0].isFaceUp).toBe(false);
+      expect(hidden.state.players.p2.lifeDeck[0].isFaceUp).toBe(false);
+    });
+
+  it('parses and enforces explicit Avatar name, Symbol, Hell-count, and Critical conditions atomically', () => {
+    const base = byPrintId('SD01-001');
+    const state = gameState();
+    const cases = [
+      ['ถ้าบน Avatar Zone ฝ่ายเรามี Avatar "พระอิศวร" : จั่วการ์ด 1 ใบ', 'avatar_name'],
+      ['ถ้า Avatar {symbol เทพ} บน Avatar Zone ฝ่ายเรา : จั่วการ์ด 1 ใบ', 'avatar_symbol'],
+      ['ถ้าในนรกเรามี Avatar "พระอิศวร" 1 ใบหรือมากกว่า : จั่วการ์ด 1 ใบ', 'hell_count'],
+      ['ถ้าเราอยู่ในสถานะสาหัส : จั่วการ์ด 1 ใบ', 'critical'],
+    ] as const;
+
+    for (const [text, conditionKind] of cases) {
+      const parsed = parseCardText({ ...base, mainEffect: text });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].conditions[0]?.kind).toBe(conditionKind);
+      const plan = toEffectPlan(parsed.clauses[0], 'p1', [], state);
+      expect(plan?.conditions).toHaveLength(1);
+      const result = resolveEffectPlan(state, plan!);
+      if (conditionKind === 'hell_count' || conditionKind === 'critical') {
+        expect(result.ok).toBe(false);
+        expect(result.state).toBe(state);
+      } else {
+        expect(result.ok).toBe(true);
+        expect(result.state.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand', 'p1-deck']);
+      }
+    }
+
+    const hellState = gameState();
+    hellState.players.p1.hell.push({ ...instance('p1-hell-avatar', 'p1'), card: base });
+    const hellParsed = parseCardText({ ...base, mainEffect: cases[2][0] });
+    const hellResult = resolveEffectPlan(hellState, toEffectPlan(hellParsed.clauses[0], 'p1', [], hellState)!);
+    expect(hellResult.ok).toBe(true);
+    expect(hellResult.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
+
+    const criticalState = gameState();
+    criticalState.players.p1.isCritical = true;
+    const criticalParsed = parseCardText({ ...base, mainEffect: cases[3][0] });
+    const criticalResult = resolveEffectPlan(criticalState, toEffectPlan(criticalParsed.clauses[0], 'p1', [], criticalState)!);
+    expect(criticalResult.ok).toBe(true);
+    expect(criticalResult.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
+  });
+
+  it('binds named Hell recovery and special summon to a selected owned card', () => {
+    const base = byPrintId('SD01-001');
+    const recover = parseCardText({ ...base, mainEffect: 'นำ Avatar ชื่อ "พระอิศวร" 1 ใบจากนรกเราขึ้นมือ' });
+    expect(recover.status).toBe('PARSED_READY');
+    expect(recover.clauses[0].effects[0]).toMatchObject({ kind: 'recover_from_hell', count: 1, destination: 'hand' });
+
+    const recoveryState = gameState();
+    recoveryState.players.p1.hell.push(instance('p1-recover', 'p1'));
+    const recoveryPlan = toEffectPlan(recover.clauses[0], 'p1', [], recoveryState, ['p1-recover']);
+    expect(recoveryPlan).not.toBeNull();
+    const recovered = resolveEffectPlan(recoveryState, recoveryPlan!);
+    expect(recovered.ok).toBe(true);
+    expect(recovered.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-recover');
+    expect(recovered.state.players.p1.hell.map(card => card.instanceId)).not.toContain('p1-recover');
+
+    const summon = parseCardText({ ...base, mainEffect: 'อัญเชิญ Avatar ชื่อ "พระอิศวร" จากนรกเรา ลง Avatar Zone ในสภาพนอน' });
+    expect(summon.status).toBe('PARSED_READY');
+    expect(summon.clauses[0].effects[0]).toMatchObject({ kind: 'summon_from_hell', rested: true });
+    const summonState = gameState();
+    summonState.players.p1.hell.push(instance('p1-summon', 'p1'));
+    const summonPlan = toEffectPlan(summon.clauses[0], 'p1', [], summonState, ['p1-summon']);
+    expect(summonPlan).not.toBeNull();
+    const summoned = resolveEffectPlan(summonState, summonPlan!);
+    expect(summoned.ok).toBe(true);
+    expect(summoned.state.players.p1.avatarZone.map(card => card.instanceId)).toContain('p1-summon');
+    expect(summoned.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-summon')?.isRested).toBe(true);
+    expect(summoned.state.players.p1.hell.map(card => card.instanceId)).not.toContain('p1-summon');
   });
 });

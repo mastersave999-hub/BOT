@@ -38,6 +38,8 @@ import {
   expireModifiersAt
 } from '../../engine/abilityEngine';
 import { calculateNetPower } from '../../engine/layers';
+import { checkModificationEquip } from '../../engine/equipLegality';
+import { appendGameEvents } from '../../engine/gameEvents';
 import { beginEndPhaseDiscard, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateAvatarZone, validateMagicPlay } from '../../engine/gameRules';
 import {
   getGemPaymentCardUnavailableReason,
@@ -1199,6 +1201,30 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       }
 
       if (pendingAbility.triggerType === 'EQUIP_MODIFICATION') {
+        const legality = checkModificationEquip(pendingAbility.sourceCard.card, avatar.card);
+        if (!legality.legal) {
+          const requestedOwnerId = pendingAbility.sourceCard.originalOwnerId ?? pendingAbility.sourceCard.ownerId;
+          const owner = gameState.players[requestedOwnerId] ?? me;
+          const ownerId = owner.id;
+          const rejected = appendGameEvents({
+            ...gameState,
+            players: {
+              ...gameState.players,
+              [ownerId]: { ...owner, hell: [...owner.hell, { ...pendingAbility.sourceCard, originalOwnerId: ownerId, controllerId: ownerId }] }
+            }
+          }, [{
+            type: 'CARD_MOVED', instanceId: pendingAbility.sourceCard.instanceId, ownerId, controllerId: ownerId,
+            from: `${meId}:hand`, to: `${ownerId}:hell`, actorId: meId,
+            eventId: `${gameState.id}:${gameState.gameEvents?.length ?? 0}:equip-illegal-play:${pendingAbility.sourceCard.instanceId}:${avatar.instanceId}`
+          }]);
+          const nextState = appendLogs(recomputeContinuousAuras(rejected), [
+            `${pendingAbility.sourceCard.card.name}: ${legality.reason ?? 'เป้าหมายสวมใส่ไม่ได้'} จึงส่งการ์ดลงนรก`
+          ], 'EQUIP', meId);
+          setGameState(nextState);
+          setPendingAbility(null);
+          showNotification(legality.reason ?? 'เป้าหมายสวมใส่ไม่ได้ การ์ดถูกส่งลงนรก');
+          return;
+        }
         let nextState = { ...gameState };
         const updatedAvatars = me.avatarZone.map(a =>
           a.instanceId === avatar.instanceId

@@ -1,5 +1,5 @@
 import type { Card, ContinuousPowerEffect, MagicSubtype } from './types';
-import { resolveEffectPlan, type EffectCost, type EffectDefinition, type EffectPlan } from './effectResolver';
+import { resolveEffectPlan, type EffectCondition, type EffectCost, type EffectDefinition, type EffectPlan } from './effectResolver';
 import type { GameState } from './types';
 import type { TriggerAbility } from './triggerEngine';
 import type { GameEvent } from './gameEvents';
@@ -11,6 +11,8 @@ export type CardTextEffect =
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
   | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
+  | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name: NameReference; count: number; destination: 'hand' }
+  | { kind: 'summon_from_hell'; cardType: 'Avatar'; name?: NameReference; count: 1; rested: boolean }
   | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
   | { kind: 'return_to_deck'; target: 'selected_card'; count: number; position: 'shuffle' | 'top' | 'bottom' }
@@ -32,6 +34,11 @@ export type NameReference =
   | { kind: 'quoted-word'; value: string; matching: 'DELIMITED_WORD_SEQUENCE' }
   | { kind: 'exact-name'; value: string; matching: 'EXACT_CARD_NAME' };
 export type CardTextZone = 'บนสนาม' | 'ในนรก' | 'จาก Deck' | 'บนมือ' | 'LIFE';
+export type CardTextCondition =
+  | { kind: 'avatar_name'; controller: 'self' | 'opponent'; name: NameReference }
+  | { kind: 'avatar_symbol'; controller: 'self' | 'opponent'; symbol: string }
+  | { kind: 'hell_count'; controller: 'self' | 'opponent'; minimum: number; cardType?: string; nameIncludes?: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
+  | { kind: 'critical'; controller: 'self' | 'opponent' };
 export type CardTextSelector = {
   controller: 'self' | 'opponent' | 'either';
   cardTypes: string[];
@@ -61,6 +68,7 @@ export interface ParsedCardTextClause {
   keywordSpecs: CardTextKeywordSpec[];
   timing: CardTextTiming;
   cost?: CardTextCost;
+  conditions: CardTextCondition[];
   selector?: CardTextSelector;
   duration?: CardTextDuration;
   quotedReferences: NameReference[];
@@ -99,6 +107,8 @@ const EVENT_HEADERS: Array<[RegExp, string]> = [
 ];
 
 function splitCostEffect(source: string): { costText?: string; effectText: string; separator: ':' | null } {
+  const conditionalPrefix = source.match(/^(?:ถ้า|หาก)\s*([\s\S]+?)\s*:\s*([\s\S]+)$/);
+  if (conditionalPrefix) return { effectText: conditionalPrefix[2].trim(), separator: null };
   let quoted = false;
   for (let index = 0; index < source.length; index += 1) {
     if (source[index] === '"') quoted = !quoted;
@@ -200,8 +210,38 @@ function parseCost(source: string): CardTextCost | undefined {
   return undefined;
 }
 
+function parseConditionAtom(source: string): CardTextCondition | undefined {
+  const controller: CardTextCondition['controller'] = /ฝ่ายตรงข้าม|ของอีกฝ่าย|นรกอีกฝ่าย/.test(source) ? 'opponent' : 'self';
+  if (/สถานะ\s*สาหัส/.test(source) && !/ไม่อยู่|ไม่ได้อยู่/.test(source)) return { kind: 'critical', controller };
+
+  const hell = source.match(/(?:ในนรก|นรก)(?:ฝ่ายเรา|ของเรา|เรา|ฝ่ายตรงข้าม|ของอีกฝ่าย)?[\s\S]*?(Avatar|Construct|Magic)?\s*(?:ชื่อ\s*)?["“]([^"”]+)["”]\s*(\d+)\s*ใบ\s*(?:หรือมากกว่า|ขึ้นไป)/);
+  if (hell) return {
+    kind: 'hell_count', controller, minimum: Number(hell[3]),
+    ...(hell[1] ? { cardType: hell[1] } : {}), nameIncludes: hell[2], matching: 'DELIMITED_WORD_SEQUENCE'
+  };
+  const anyHellCount = source.match(/(?:ในนรก|นรก)(?:ฝ่ายเรา|ของเรา|เรา|ฝ่ายตรงข้าม|ของอีกฝ่าย)?[\s\S]*?(\d+)\s*ใบ\s*(?:หรือมากกว่า|ขึ้นไป)/);
+  if (anyHellCount) return { kind: 'hell_count', controller, minimum: Number(anyHellCount[1]) };
+
+  const boardCondition = /Avatar Zone|บนสนาม/.test(source);
+  const symbol = source.match(/\{\s*[Ss]ymbol\s+([^}]+)\}/)?.[1]?.trim();
+  if (boardCondition && symbol && /Avatar/.test(source)) return { kind: 'avatar_symbol', controller, symbol };
+  const quotedName = source.match(/Avatar\s+(?:ชื่อ\s*)?["“]([^"”]+)["”]/)?.[1]?.trim();
+  if (boardCondition && quotedName) return { kind: 'avatar_name', controller, name: createNameReference(quotedName, true) };
+  return undefined;
+}
+
+function parseConditionPrefix(source: string): CardTextCondition[] {
+  const match = source.match(/^(?:ถ้า|หาก)\s*([\s\S]+?)\s*:\s*[\s\S]+$/);
+  if (!match) return [];
+  const atoms = match[1].split(/\s+และ\s+/).map(value => value.trim()).filter(Boolean);
+  const conditions = atoms.map(parseConditionAtom);
+  return conditions.every((condition): condition is CardTextCondition => condition !== undefined) ? conditions : [];
+}
+
 function parseClause(source: string): ParsedCardTextClause {
   const split = splitCostEffect(source);
+  const conditionalPrefix = /^(?:ถ้า|หาก)\s*[\s\S]+?\s*:\s*[\s\S]+$/.test(source);
+  const conditions = parseConditionPrefix(source);
   const keywords = KEYWORDS.filter(keyword => source.includes(keyword));
   const quotedReferences = [...split.effectText.matchAll(/"([^\"]+)"/g)].map(match => createNameReference(match[1], true));
   const exactNameReferences = [...split.effectText.matchAll(/ชื่อ\s+([^\"“”{},:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/g)].map(match => createNameReference(match[1].trim(), false));
@@ -224,6 +264,8 @@ function parseClause(source: string): ParsedCardTextClause {
   const effectText = split.effectText.replace(/ความสามารถนี้ถือเป็นการใช้\s+(?:Normal|Modification|React|Land)\s+Magic|โดยถือว่าเป็นการใช้\s+(?:Normal|Modification|React|Land)\s+Magic/gi, '').trim();
   const effects: CardTextEffect[] = [];
   const unresolved: string[] = [];
+  if (/ผู้เล่นทุกคน|ผู้เล่นแต่ละคน/.test(effectText)) unresolved.push('multi-player target resolution is not represented by the supported plan');
+  if (conditionalPrefix && conditions.length === 0) unresolved.push('condition expression is not fully represented by the supported condition AST');
   const standaloneKeywordDefinition = keywords.some(keyword => ['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) &&
     !split.costText && !split.separator && /^\s*(?:สามัคคี|โล่มนุษย์|เตะไข่|ลูกฮึด|แทงหลัง|คู่หู)(?:\s*\([^)]*\)|\s*[-–:]\s*[^\n]+)?\s*$/.test(effectText);
   const parts = standaloneKeywordDefinition || continuousAura ? [] : effectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
@@ -234,6 +276,8 @@ function parseClause(source: string): ParsedCardTextClause {
     const setPower = part.match(/POWER\s*(?:เท่ากับ|เป็น)\s*(\d+)\b/i);
     const symbolChange = part.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+จนจบ(?:การต่อสู้|การโจมตี|เทิร์น)|\s+จนถึง Draw Phase ถัดไป|$)/i);
     const search = part.match(/นำ\s+(Avatar|Construct|Magic)\s+ชื่อ\s+(?:\"([^\"]+)\"|([^\s]+(?:\s+[^\s]+)*?))\s+(\d+)\s*ใบจาก\s+Deck\s+ขึ้นมือ(?:\s+หลังจากนั้นสับ\s+Deck)?/i);
+    const recovery = part.match(/^นำ\s+(Avatar|Construct|Magic)\s+(?:ชื่อ\s*)?(?:\"([^\"]+)\"|“([^”]+)”|([^,]+?))\s+(\d+)\s*ใบ\s*จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา)\s*(?:ขึ้นมือ|กลับขึ้นมือ)$/i);
+    const hellSummon = part.match(/^อัญเชิญ\s+Avatar\s+(?:ชื่อ\s*)?(?:\"([^\"]+)\"|“([^”]+)”|([^,]+?))\s+จาก(?:ใน)?นรก(?:เรา|ฝ่ายเรา)(?:\s+ลง\s+Avatar Zone)?(?:\s+ในสภาพ(นอน|ตื่น))?$/i);
     const movementTarget = /Avatar/.test(part) && /ตัวนั้น|ใบนั้น|Avatar\s+1\s*ใบ/.test(part);
     const destroy = movementTarget && /ทำลาย\s*(?:Avatar|การ์ดใบนี้)/.test(part);
     const bounce = movementTarget && /กลับขึ้นมือ/.test(part);
@@ -254,6 +298,12 @@ function parseClause(source: string): ParsedCardTextClause {
     else if (deckReturn) effects.push({ kind: 'return_to_deck', target: 'selected_card',
       count: Number(deckReturn[0].match(/(\d+)\s*ใบ/)?.[1] ?? 1),
       position: /กลับเข้า\s*Deck/.test(deckReturn[0]) ? 'shuffle' : /บนสุด/.test(deckReturn[0]) ? 'top' : 'bottom' });
+    else if (recovery) effects.push({ kind: 'recover_from_hell', cardType: recovery[1] as 'Avatar' | 'Construct' | 'Magic',
+      name: createNameReference((recovery[2] ?? recovery[3] ?? recovery[4]).trim(), !!(recovery[2] || recovery[3])),
+      count: Number(recovery[5]), destination: 'hand' });
+    else if (hellSummon) effects.push({ kind: 'summon_from_hell', cardType: 'Avatar',
+      name: createNameReference((hellSummon[1] ?? hellSummon[2] ?? hellSummon[3]).trim(), !!(hellSummon[1] || hellSummon[2])),
+      count: 1, rested: hellSummon[4] === 'นอน' });
     else if (sacrificeEffect && /Avatar/.test(part)) effects.push({ kind: 'sacrifice_avatar', target: 'selected_avatar' });
     else if (scout) effects.push({ kind: 'scout_cards', count: Number(scout[1]),
       ...( /ขึ้นมือ/.test(part) ? { destination: 'hand' as const } : /ลงนรก/.test(part) ? { destination: 'hell' as const } : /ไว้บนสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'top' as const } : /ไว้ใต้\s*Deck|ล่างสุด/.test(part) ? { destination: 'deck' as const, deckPosition: 'bottom' as const } : {}) });
@@ -289,7 +339,7 @@ function parseClause(source: string): ParsedCardTextClause {
   if (/(?:เลือก|POWER|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText) && !effects.length && !keywordOnly && !continuousAura) unresolved.push('targeted or zone-changing operation lacks a complete executable plan');
   return {
     source, ...(split.costText ? { costText: split.costText } : {}), effectText: split.effectText,
-    costEffectSeparator: split.separator, keywords, keywordSpecs, timing, ...(cost ? { cost } : {}),
+    costEffectSeparator: split.separator,     keywords, keywordSpecs, timing, ...(cost ? { cost } : {}), conditions,
     ...(parseSelector(effectText) ? { selector: parseSelector(effectText) } : {}), ...(duration ? { duration } : {}),
     quotedReferences, exactNameReferences, effects, unresolved: [...new Set(unresolved)]
   };
@@ -328,6 +378,14 @@ export function toEffectDefinitions(
       return { kind: 'search_to_hand', playerId: actorId, instanceIds, name: effect.name.value,
         matching: effect.name.matching, cardType: effect.cardType, shuffle: effect.shuffle };
     }
+    if (effect.kind === 'recover_from_hell') {
+      const instanceIds = targetInstanceIds.slice(targetIndex, targetIndex + effect.count);
+      targetIndex += effect.count;
+      return { kind: 'recover_from_hell', playerId: actorId, instanceIds, count: effect.count, destination: effect.destination };
+    }
+    if (effect.kind === 'summon_from_hell') return {
+      kind: 'summon_from_hell', playerId: actorId, instanceId: targetInstanceIds[targetIndex++], rested: effect.rested
+    };
     const targetId = targetInstanceIds[targetIndex++] ?? '';
     if (effect.kind === 'set_power') return {
       kind: 'set_power', targetId, value: effect.value,
@@ -357,25 +415,46 @@ export function toEffectPlan(
 ): EffectPlan | null {
   if (clause.unresolved.length || clause.effects.length === 0) return null;
   const requiredBindings = clause.effects.reduce((total, effect) => total +
-    (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' ? effect.count : effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'sacrifice_avatar' ? 1 : 0), 0);
+    (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' || effect.kind === 'recover_from_hell' ? effect.count :
+      effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'sacrifice_avatar' || effect.kind === 'summon_from_hell' ? 1 : 0), 0);
   if (targetInstanceIds.length !== requiredBindings || new Set(targetInstanceIds).size !== targetInstanceIds.length) return null;
   if (requiredBindings > 0) {
     if (!state) return null;
     const selector = clause.selector;
     let bindingIndex = 0;
     for (const effect of clause.effects) {
-      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'return_to_deck' || effect.kind === 'sacrifice_avatar') {
-        const targetCount = effect.kind === 'return_to_deck' ? effect.count : 1;
+      if (effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' || effect.kind === 'return_to_deck' || effect.kind === 'sacrifice_avatar' || effect.kind === 'recover_from_hell' || effect.kind === 'summon_from_hell') {
+        const targetCount = effect.kind === 'return_to_deck' || effect.kind === 'recover_from_hell' ? effect.count : 1;
         const targetIds = targetInstanceIds.slice(bindingIndex, bindingIndex + targetCount);
         bindingIndex += targetCount;
         const fieldAndPrivateCards = Object.values(state.players).flatMap(player => [...player.avatarZone, ...player.constructZone, ...player.magicZone, ...player.hand, ...player.hell, ...player.deck]);
-        const requiredType = effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' ? 'Construct' : effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'sacrifice_avatar' || effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' ? 'Avatar' : undefined;
+        const requiredType = effect.kind === 'destroy_construct' || effect.kind === 'bounce_construct' || effect.kind === 'banish_construct' ? 'Construct' : effect.kind === 'recover_from_hell' ? effect.cardType : effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar' || effect.kind === 'sacrifice_avatar' || effect.kind === 'modify_power' || effect.kind === 'set_power' || effect.kind === 'change_symbol' || effect.kind === 'summon_from_hell' ? 'Avatar' : undefined;
         const targets = targetIds.map(targetId => fieldAndPrivateCards.find(card => card.instanceId === targetId));
-        if (targets.some(target => !target || (requiredType && target.card.type !== requiredType) || (selector?.cardTypes.length && !selector.cardTypes.includes(target.card.type)) ||
+        const matchesZoneSelector = (targetId: string) => {
+          if (!selector?.zones.length) return true;
+          const zone = state.playerOrder.flatMap(playerId => {
+            const player = state.players[playerId];
+            if (!player) return [];
+            return (['avatarZone', 'constructZone', 'magicZone', 'hell', 'deck', 'hand', 'lifeDeck'] as const)
+              .filter(zoneName => player[zoneName].some(card => card.instanceId === targetId));
+          })[0];
+          const zoneLabel: CardTextZone | undefined = zone === 'avatarZone' || zone === 'constructZone' || zone === 'magicZone'
+            ? 'บนสนาม' : zone === 'hell' ? 'ในนรก' : zone === 'deck' ? 'จาก Deck' : zone === 'hand' ? 'บนมือ' : zone === 'lifeDeck' ? 'LIFE' : undefined;
+          return !!zoneLabel && selector.zones.includes(zoneLabel);
+        };
+        if (targets.some((target, index) => !target || (requiredType && target.card.type !== requiredType) || (selector?.cardTypes.length && !selector.cardTypes.includes(target.card.type)) ||
           (selector?.symbol !== undefined && !target.card.symbol?.includes(selector.symbol)) ||
+          (selector?.name && !matchesCardName(target.card.name, selector.name, parseCardNameRules(target.card))) ||
+          (selector?.cost && (selector.cost.comparison === 'at_most' ? target.card.cost > selector.cost.value : target.card.cost < selector.cost.value)) ||
+          !matchesZoneSelector(targetIds[index]) ||
           (selector?.controller === 'self' && target.controllerId !== actorId) ||
           (selector?.controller === 'opponent' && target.controllerId === actorId) ||
           (effect.kind === 'sacrifice_avatar' && target.controllerId !== actorId))) return null;
+        if ((effect.kind === 'recover_from_hell' || effect.kind === 'summon_from_hell') && targetIds.some(targetId => {
+          const card = state.players[actorId]?.hell.find(item => item.instanceId === targetId);
+          const reference = effect.name;
+          return !card || (reference && !matchesCardName(card.card.name, reference, parseCardNameRules(card.card)));
+        })) return null;
       } else if (effect.kind === 'search_deck_to_hand') {
         const player = state.players[actorId];
         const selected = targetInstanceIds.slice(bindingIndex, bindingIndex + effect.count);
@@ -418,7 +497,25 @@ export function toEffectPlan(
     if (!player || (lifeEffect.face === 'down' && player.isCritical && !lifeEffect.allowWhileCritical) ||
       player.lifeDeck.filter(card => card.isFaceUp !== (lifeEffect.face === 'up')).length < lifeEffect.count) return null;
   }
-  return { actorId, costs, effects: toEffectDefinitions(clause.effects, actorId, targetInstanceIds, targetPlayerId) };
+  const conditions: EffectCondition[] = [];
+  for (const condition of clause.conditions) {
+    const playerId = condition.controller === 'self'
+      ? actorId
+      : state?.playerOrder.find(id => id !== actorId);
+    if (!playerId) return null;
+    if (condition.kind === 'avatar_name') conditions.push({
+      kind: 'player_has_avatar', playerId, nameIncludes: condition.name.value, matching: condition.name.matching === 'EXACT_CARD_NAME' ? 'EXACT_CARD_NAME' : 'DELIMITED_WORD_SEQUENCE'
+    });
+    else if (condition.kind === 'avatar_symbol') conditions.push({ kind: 'player_has_avatar_symbol', playerId, symbol: condition.symbol });
+    else if (condition.kind === 'hell_count') conditions.push({
+      kind: 'player_hell_count', playerId, minimum: condition.minimum,
+      ...(condition.cardType ? { cardType: condition.cardType } : {}),
+      ...(condition.nameIncludes ? { nameIncludes: condition.nameIncludes } : {}),
+      ...(condition.matching ? { matching: condition.matching } : {})
+    });
+    else conditions.push({ kind: 'player_is_critical', playerId });
+  }
+  return { actorId, costs, ...(conditions.length ? { conditions } : {}), effects: toEffectDefinitions(clause.effects, actorId, targetInstanceIds, targetPlayerId) };
 }
 
 export function activateRegisteredCardTextAbility(
