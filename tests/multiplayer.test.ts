@@ -3,6 +3,7 @@ import {
   decodeNetMessage,
   encodeNetMessage,
   isReactionCommandCurrent,
+  isExitPreventionCommandCurrent,
   isGameStateValidForSync,
   isLegalGameStateSync,
   redactLifeCardsForViewer,
@@ -250,6 +251,54 @@ describe('multiplayer LIFE card privacy', () => {
     if (!accepted.ok || !accepted.state.reactionWindow) return;
     expect(accepted.state.reactionWindow.revision).toBe(5);
     expect(isReactionCommandCurrent(accepted.state, received.command, 'player-2')).toBe(false);
+  });
+
+  it('syncs exit-prevention commands only for the authorized player at the exact pending revision', () => {
+    const state = makeState();
+    state.stateRevision = 7;
+    const target = {
+      ...makeLifeInstance('player-1', 4),
+      instanceId: 'exit-avatar',
+      card: { ...makeCard('Exit Avatar', 'exit-avatar'), type: 'Avatar' as const },
+      preventionShields: [{ id: 'activated-shield', kind: 'DESTRUCTION' as const, mode: 'ACTIVATED' as const }]
+    };
+    state.players['player-1'].avatarZone = [target];
+    state.pendingExitPrevention = {
+      targetCardId: target.instanceId,
+      destination: 'hell',
+      actorId: 'player-2',
+      preventionPlayerId: 'player-1',
+      cause: 'EFFECT',
+      expectedRevision: 7,
+      usedActivatedPrevention: false
+    };
+    const useCommand = {
+      kind: 'USE_EXIT_PREVENTION' as const,
+      playerId: 'player-1',
+      commandId: 'use-exit-1',
+      expectedRevision: 7,
+      sourceCardId: 'activated-shield'
+    };
+    const declineCommand = {
+      kind: 'DECLINE_EXIT_PREVENTION' as const,
+      playerId: 'player-1',
+      commandId: 'decline-exit-1',
+      expectedRevision: 7
+    };
+    for (const command of [useCommand, declineCommand]) {
+      const decoded = decodeNetMessage(encodeNetMessage({ type: 'EXIT_PREVENTION_COMMAND', command }));
+      expect(decoded?.type).toBe('EXIT_PREVENTION_COMMAND');
+      expect(isExitPreventionCommandCurrent(state, command, 'player-1')).toBe(true);
+      expect(isExitPreventionCommandCurrent(state, command, 'player-2')).toBe(false);
+      expect(isExitPreventionCommandCurrent(state, { ...command, expectedRevision: 6 }, 'player-1')).toBe(false);
+      expect(isExitPreventionCommandCurrent({ ...state, stateRevision: 8 }, command, 'player-1')).toBe(false);
+    }
+    expect(decodeNetMessage(JSON.stringify({
+      type: 'EXIT_PREVENTION_COMMAND',
+      command: { ...useCommand, expectedRevision: undefined }
+    }))).toBeNull();
+    state.processedCommandIds = ['use-exit-1'];
+    expect(isExitPreventionCommandCurrent(state, useCommand, 'player-1')).toBe(false);
   });
 
   it('redacts setup LIFE cards before peer transmission and restores the owner copy', () => {

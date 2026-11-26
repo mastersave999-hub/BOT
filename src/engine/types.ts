@@ -180,6 +180,7 @@ export type ReactionChainEntry =
       cancelled: boolean;
       eventId: string;
       respondedTo: ReactionTrigger;
+      exitPreventionTargetId?: string;
     };
 
 export interface ReactionWindow {
@@ -231,7 +232,7 @@ export interface PendingExitPrevention {
   deckPosition?: 'top' | 'bottom';
   cause: 'EFFECT' | 'COMBAT' | 'PLAYER_ACTION' | 'OTHER';
   expectedRevision: number;
-  usedActivatedPrevention: false;
+  usedActivatedPrevention: boolean;
 }
 
 export interface PendingDeckSearchVerification {

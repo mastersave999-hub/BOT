@@ -256,6 +256,19 @@ describe('Ability Engine', () => {
     expect(globallyDestroyed.state.players.p2.hell.map(card => card.instanceId)).toEqual(expect.arrayContaining(['target', 'attached-mod']));
   });
 
+  it('routes ability-driven field exits through the shared optional prevention window', () => {
+    const source = makeInstance(makeCard({ mainEffect: 'จุติ : เลือก Avatar 1 ใบ ทำลาย Avatar ตัวนั้น' }), 'p1', 'ability-exit-source');
+    const target = makeInstance(makeCard({ name: 'Protected target' }), 'p2', 'ability-exit-target');
+    target.preventionShields = [{ id: 'ability-exit-shield', kind: 'DESTRUCTION', mode: 'ACTIVATED', usesRemaining: 1 }];
+    const p1 = { id: 'p1', name: 'P1', seat: 0, deck: [], hand: [], lifeDeck: [], avatarZone: [source], constructZone: [], magicZone: [], hell: [], darkDimension: [], isCritical: false, reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }, usedMagicTypesThisTurn: new Set() };
+    const p2 = { ...p1, id: 'p2', name: 'P2', seat: 1, avatarZone: [target] };
+    const state: GameState = { id: 'ability-exit', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0, currentPhase: 'MAIN', turnNumber: 1, roundNumber: 1, landMagicZone: null, players: { p1, p2 }, eventLog: [] };
+
+    const result = executeCardAbility(state, 'p1', source, 'SUMMON_JUTI', target.instanceId);
+    expect(result.state.pendingExitPrevention?.targetCardId).toBe(target.instanceId);
+    expect(result.state.players.p2.avatarZone.map(card => card.instanceId)).toContain(target.instanceId);
+  });
+
   it('refuses an unsupported conditional instead of partially drawing', () => {
     const conditional = makeInstance(makeCard({
       mainEffect: 'จุติ : ถ้า Avatar Zone ฝ่ายเรามี Avatar ชื่อ "เงื่อนไข" จั่วการ์ด 1 ใบ'

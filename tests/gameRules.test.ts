@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Card, CardInstance, GameState, PlayerState } from '../src/engine/types';
 import { beginEndPhaseDiscard, canUseMagicTypeThisTurn, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateConstructZone, validateGameState } from '../src/engine/gameRules';
+import { cancelReactionTarget, passReactionPriority } from '../src/engine/reactionEngine';
 import { runGameTransaction } from '../src/engine/gameTransaction';
 import { redactLifeCardsForViewer } from '../src/engine/multiplayer';
 
@@ -113,6 +114,7 @@ describe('shared game rules', () => {
       { destination: 'hell' as const, cause: 'COMBAT' as const },
       { destination: 'hell' as const, cause: 'EFFECT' as const },
       { destination: 'hand' as const, cause: 'EFFECT' as const },
+      { destination: 'hand' as const },
       { destination: 'darkDimension' as const, cause: 'EFFECT' as const }
     ];
     for (const [index, route] of routes.entries()) {
@@ -123,10 +125,51 @@ describe('shared game rules', () => {
       expect(opened.state.pendingExitPrevention?.usedActivatedPrevention).toBe(false);
       const used = useExitPrevention(opened.state, 'p1', 'activated');
       expect(used.ok).toBe(true);
-      expect(used.state.pendingExitPrevention).toBeUndefined();
+      expect(used.state.pendingExitPrevention?.usedActivatedPrevention).toBe(true);
+      expect(used.state.reactionWindow?.chain?.at(-1)).toMatchObject({ entryType: 'ACTIVATED_ABILITY', exitPreventionTargetId: target.instanceId });
+      expect(used.state.reactionWindow?.priorityPlayerId).toBe('p2');
       expect(used.state.players.p1.avatarZone).toHaveLength(1);
       expect(useExitPrevention(used.state, 'p1', 'activated').ok).toBe(false);
+      if (!used.state.reactionWindow) throw new Error('Expected exit-prevention Reaction Window');
+      const opponentPassed = passReactionPriority(used.state, 'p2');
+      expect(opponentPassed.ok).toBe(true);
+      if (!opponentPassed.ok) return;
+      const ownerPassed = passReactionPriority(opponentPassed.state, 'p1');
+      expect(ownerPassed.ok).toBe(true);
+      if (!ownerPassed.ok) return;
+      expect(ownerPassed.state.pendingExitPrevention).toBeUndefined();
+      expect(ownerPassed.state.players.p1.avatarZone).toHaveLength(1);
+      expect(ownerPassed.state.preventionAttempts).toContain(`rules:${used.state.pendingExitPrevention?.expectedRevision}:${target.instanceId}`);
     }
+  });
+
+  it('resumes a paused field exit when the opponent cancels activated prevention on the LIFO Chain', () => {
+    const target = {
+      ...instance('cancel-target', 'p1', 'Cancel Target', 'Avatar'),
+      preventionShields: [{ id: 'activated-cancel', kind: 'DESTRUCTION' as const, mode: 'ACTIVATED' as const, usesRemaining: 1 }]
+    };
+    const current = state(player('p1', { avatarZone: [target] }));
+    const opened = moveCardBetweenZones(current, {
+      instanceId: target.instanceId, actorId: 'p2', destination: 'hell', effectMove: true, cause: 'EFFECT'
+    });
+    const activated = useExitPrevention(opened.state, 'p1', 'activated-cancel');
+    expect(activated.ok).toBe(true);
+    expect(activated.state.reactionWindow?.chain).toHaveLength(1);
+    const cancelled = cancelReactionTarget(activated.state, 'p2', { kind: 'CHAIN_ENTRY', instanceId: 'activated-cancel' });
+    expect(cancelled.ok).toBe(true);
+    if (!cancelled.ok) return;
+    const opponentPassed = passReactionPriority(cancelled.state, 'p2');
+    expect(opponentPassed.ok).toBe(true);
+    if (!opponentPassed.ok) return;
+    const activePlayerPassed = passReactionPriority(opponentPassed.state, 'p1');
+    expect(activePlayerPassed.ok).toBe(true);
+    if (!activePlayerPassed.ok) return;
+    expect(activePlayerPassed.state.pendingExitPrevention).toBeUndefined();
+    expect(activePlayerPassed.state.reactionWindow).toBeUndefined();
+    expect(activePlayerPassed.state.players.p1.avatarZone).toHaveLength(0);
+    expect(activePlayerPassed.state.players.p1.hell.map(card => card.instanceId)).toContain(target.instanceId);
+    expect(activePlayerPassed.state.players.p1.avatarZone[0]?.preventionShields).toBeUndefined();
+    expect(useExitPrevention(activePlayerPassed.state, 'p1', 'activated-cancel').ok).toBe(false);
   });
 
   it('declining commits the paused movement and routes attached Modification Magic to Hell', () => {

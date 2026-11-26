@@ -1,6 +1,6 @@
 import { executeCardAbility, getUnsupportedEffectReason, parseCardAbility } from './abilityEngine';
 import { resolveEffectPlan } from './effectResolver';
-import { canUseMagicTypeThisTurn } from './gameRules';
+import { canUseMagicTypeThisTurn, resolveExitPreventionChainEntry } from './gameRules';
 import type {
   Card,
   CardInstance,
@@ -431,6 +431,12 @@ export function cancelReactionTarget(
 }
 
 function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: ReactionChainEntry) {
+  if (entry.entryType === 'ACTIVATED_ABILITY' && entry.exitPreventionTargetId) {
+    const result = resolveExitPreventionChainEntry(state, entry.exitPreventionTargetId, !entry.cancelled);
+    return { state: result.state, logs: [entry.cancelled
+      ? `${entry.triggerId}: prevention cancelled; field exit resumed`
+      : `${entry.triggerId}: prevention resolved; field exit prevented`] };
+  }
   if (entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') {
     if (entry.cancelled) return { state, logs: [`${entry.triggerId}: trigger cancelled`] };
     const resolved = resolveEffectPlan(state, { actorId: entry.controllerId, effects: entry.effects });
