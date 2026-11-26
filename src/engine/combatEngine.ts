@@ -11,9 +11,10 @@ export interface CombatResult {
 
 export function resolveAvatarCombat(
   attacker: CardInstance,
-  defender: CardInstance
+  defender: CardInstance,
+  attackPowerOverride?: number
 ): CombatResult {
-  const attackerPower = calculateNetPower(attacker);
+  const attackerPower = attackPowerOverride ?? calculateNetPower(attacker);
   const defenderPower = calculateNetPower(defender);
   const events: string[] = [];
 

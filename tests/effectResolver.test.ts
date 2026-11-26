@@ -43,8 +43,8 @@ describe('typed effect resolver', () => {
     expect(result.state.players.p2.hell[0].layerModifiers[0].powerMod).toBe(3);
     expect(initial.players.p2.avatarZone).toHaveLength(1);
     expect(initial.players.p2.hell).toHaveLength(0);
-    expect(result.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED', 'EFFECT_RESOLVED', 'EFFECT_RESOLVED']);
-    expect(result.state.gameEvents?.map(item => item.sequence)).toEqual([0, 1, 2]);
+    expect(result.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED', 'CARD_LEFT_FIELD', 'EFFECT_RESOLVED', 'EFFECT_RESOLVED']);
+    expect(result.state.gameEvents?.map(item => item.sequence)).toEqual([0, 1, 2, 3]);
   });
 
   it('rejects invalid target, failed condition, and insufficient costs with unchanged state', () => {

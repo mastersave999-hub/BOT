@@ -89,7 +89,7 @@ describe('Rule Book 3.2 combat keywords', () => {
   it('allows Egg Kick to select LIFE past enemy Avatars, but not ordinary attacks', () => {
     const attacker = makeInstance('attacker', 'p1');
     const defender = makeInstance('defender', 'p2');
-    const current = game(player('p1', { avatarZone: [attacker] }), player('p2', { avatarZone: [defender] }));
+    const current = { ...game(player('p1', { avatarZone: [attacker] }), player('p2', { avatarZone: [defender] })), currentPhase: 'BATTLE' as const };
     expect(canDeclareAttack(current, 'attacker', { type: 'LIFE', playerId: 'p2' })).toBe(false);
     attacker.card.mainEffect = 'เตะไข่';
     expect(canDeclareAttack(current, 'attacker', { type: 'LIFE', playerId: 'p2' })).toBe(true);
@@ -98,7 +98,7 @@ describe('Rule Book 3.2 combat keywords', () => {
   it('rests the attacker, snapshots POWER, and emits ATTACK_DECLARED', () => {
     const attacker = makeInstance('attacker', 'p1', 'Avatar', 4);
     const target = makeInstance('target', 'p2');
-    const current = game(player('p1', { avatarZone: [attacker] }), player('p2', { avatarZone: [target] }));
+    const current = { ...game(player('p1', { avatarZone: [attacker] }), player('p2', { avatarZone: [target] })), currentPhase: 'BATTLE' as const };
     const declared = declareCombatAttack(current, 'attacker', { type: 'AVATAR', playerId: 'p2', instanceId: 'target' });
     expect(declared?.players.p1.avatarZone[0].isRested).toBe(true);
     expect(declared?.battleContext?.snapshotPower).toBe(4);

@@ -64,6 +64,10 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
     ? new Set(state.pendingDeckChoice.candidateInstanceIds)
     : new Set<string>();
   const gameEvents = state.gameEvents?.map(({ sequence, event }) => {
+    if (event.type === 'CARD_DRAWN' && event.playerId !== viewerId) {
+      const { instanceId: _privateInstanceId, ...publicEvent } = event;
+      return { sequence, event: publicEvent };
+    }
     if (event.type === 'DECK_SCOUTED' && event.viewerId !== viewerId) {
       return { sequence, event: { ...event, cardInstanceIds: [] } };
     }

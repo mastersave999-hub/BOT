@@ -1,5 +1,12 @@
 import { CardInstance } from './types';
 
+export function calculateSnapshotPower(avatar: CardInstance): number {
+  const modifiers = avatar.layerModifiers
+    .filter(modifier => modifier.layer === 1 || modifier.layer === 2)
+    .sort((left, right) => left.layer - right.layer || left.sourceCardId.localeCompare(right.sourceCardId));
+  return Math.max(0, avatar.card.power + modifiers.reduce((total, modifier) => total + modifier.powerMod, 0));
+}
+
 export function calculateNetPower(avatar: CardInstance): number {
   // Layer 0: Base printed Power
   let currentPower = avatar.card.power;

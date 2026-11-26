@@ -2,6 +2,7 @@ import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
 import { executeCardAbility, expireModifiersAt, clearEndOfTurnModifiers } from './abilityEngine';
 import { moveCardBetweenZones } from './gameRules';
 import { runGameTransaction } from './gameTransaction';
+import { appendGameEvents } from './gameEvents';
 
 export function isFirstPlayerFirstTurn(state: GameState, playerId: string): boolean {
   return state.turnNumber === 1 && state.playerOrder[0] === playerId && state.playerOrder[state.currentTurnPlayerIndex] === playerId;
@@ -9,6 +10,15 @@ export function isFirstPlayerFirstTurn(state: GameState, playerId: string): bool
 
 export function nextPhaseAfterMain(state: GameState, playerId: string): 'BATTLE' | 'END' {
   return isFirstPlayerFirstTurn(state, playerId) ? 'END' : 'BATTLE';
+}
+
+export function transitionGamePhase(state: GameState, playerId: string, nextPhase: GameState['currentPhase']): GameState {
+  if (!state.players[playerId] || state.playerOrder[state.currentTurnPlayerIndex] !== playerId || state.currentPhase === nextPhase) return state;
+  const nextTurnNumber = nextPhase === 'DRAW' && state.currentPhase === 'END' ? state.turnNumber + 1 : state.turnNumber;
+  return appendGameEvents({ ...state, currentPhase: nextPhase }, [
+    { type: 'PHASE_ENDED', phase: state.currentPhase, playerId, turnNumber: state.turnNumber, eventId: `${state.id}:phase-ended:${state.currentPhase}:${state.turnNumber}:${playerId}` },
+    { type: 'PHASE_STARTED', phase: nextPhase, playerId, turnNumber: nextTurnNumber, eventId: `${state.id}:phase-started:${nextPhase}:${nextTurnNumber}:${playerId}` }
+  ]);
 }
 
 export function executeDrawPhase(inputState: GameState): GameState {
@@ -98,7 +108,10 @@ export function executeDrawPhase(inputState: GameState): GameState {
       };
     }
     return nextState;
-  });
+  }, [
+    { type: 'PHASE_ENDED', phase: 'DRAW', playerId: currentTurnPlayerId, turnNumber: inputState.turnNumber, eventId: `${inputState.id}:phase-ended:DRAW:${inputState.turnNumber}:${currentTurnPlayerId}` },
+    { type: 'PHASE_STARTED', phase: 'MAIN', playerId: currentTurnPlayerId, turnNumber: inputState.turnNumber, eventId: `${inputState.id}:phase-started:MAIN:${inputState.turnNumber}:${currentTurnPlayerId}` }
+  ]);
 
   if (transaction.ok === false) throw new Error(`Draw Phase transaction failed: ${transaction.reason}`);
   return transaction.state;
@@ -128,8 +141,10 @@ export function finishEndPhaseTurn(state: GameState): GameState {
       ]
     };
   }, [
+    { type: 'PHASE_ENDED', phase: 'END', playerId: activePlayerId, turnNumber: state.turnNumber, eventId: `${state.id}:phase-ended:END:${state.turnNumber}:${activePlayerId}` },
     { type: 'TURN_ENDED', playerId: activePlayerId, turnNumber: state.turnNumber, eventId: `${state.id}:turn-ended:${state.turnNumber}:${activePlayerId}` },
-    { type: 'TURN_STARTED', playerId: nextPlayerId, turnNumber, eventId: `${state.id}:turn-started:${turnNumber}:${nextPlayerId}` }
+    { type: 'TURN_STARTED', playerId: nextPlayerId, turnNumber, eventId: `${state.id}:turn-started:${turnNumber}:${nextPlayerId}` },
+    { type: 'PHASE_STARTED', phase: 'DRAW', playerId: nextPlayerId, turnNumber, eventId: `${state.id}:phase-started:DRAW:${turnNumber}:${nextPlayerId}` }
   ]);
   return transaction.ok ? transaction.state : state;
 }

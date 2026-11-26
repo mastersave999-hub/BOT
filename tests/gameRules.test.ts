@@ -72,6 +72,11 @@ describe('shared game rules', () => {
     const opponentView = redactLifeCardsForViewer(moved.state, 'p2');
     expect(opponentView.players.p1.hand[0].card.name).toBe('Hidden card');
     expect(opponentView.players.p1.hand[0].instanceId).toBe('private-card-id');
+    const publicDrawEvent = opponentView.gameEvents?.find(item => item.event.type === 'CARD_DRAWN')?.event;
+    expect(publicDrawEvent).not.toHaveProperty('instanceId');
+    const ownerDrawEvent = redactLifeCardsForViewer(moved.state, 'p1').gameEvents?.find(item => item.event.type === 'CARD_DRAWN')?.event;
+    expect(ownerDrawEvent?.type).toBe('CARD_DRAWN');
+    expect(ownerDrawEvent).toHaveProperty('instanceId', 'private-card-id');
   });
 
   it('uses controller authorization separately from original-owner return routing', () => {
@@ -82,7 +87,7 @@ describe('shared game rules', () => {
     expect(moved.ok).toBe(true);
     expect(moved.state.players.p1.hell[0].ownerId).toBe('p1');
     expect(moved.state.players.p1.hell[0].controllerId).toBe('p2');
-    expect(moved.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED']);
+    expect(moved.state.gameEvents?.map(item => item.event.type)).toEqual(['CARD_MOVED', 'CARD_LEFT_FIELD']);
   });
 
   it('discards exactly the selected excess hand cards after End Phase selection opens', () => {

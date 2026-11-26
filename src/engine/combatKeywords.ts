@@ -1,8 +1,11 @@
 import type { CardInstance, GameState } from './types';
 import { avatarHasKeyword } from './abilityEngine';
-import { calculateNetPower } from './layers';
-import { moveCardBetweenZones } from './gameRules';
+import { calculateNetPower, calculateSnapshotPower } from './layers';
+import { getOriginalOwnerId, moveCardBetweenZones } from './gameRules';
 import { appendGameEvents } from './gameEvents';
+import { resolveAvatarCombat, attackLifeZone } from './combatEngine';
+import { expireModifiersAt } from './abilityEngine';
+import { recomputeContinuousEffects } from './continuousEffects';
 
 export type AttackTarget = { type: 'AVATAR'; playerId: string; instanceId: string } | { type: 'CONSTRUCT'; playerId: string; instanceId: string } | { type: 'LIFE'; playerId: string };
 
@@ -15,7 +18,7 @@ function findAvatar(state: GameState, id: string): { playerId: string; avatar: C
 
 export function canDeclareAttack(state: GameState, attackerId: string, target: AttackTarget): boolean {
   const found = findAvatar(state, attackerId);
-  if (!found || found.avatar.isRested || found.playerId !== state.playerOrder[state.currentTurnPlayerIndex] || !state.players[target.playerId]) return false;
+  if (!found || state.currentPhase !== 'BATTLE' || found.avatar.isRested || found.playerId !== state.playerOrder[state.currentTurnPlayerIndex] || !state.players[target.playerId]) return false;
   if (target.playerId === found.playerId) return false;
   if (target.type === 'AVATAR') return !!state.players[target.playerId]?.avatarZone.some(card => card.instanceId === target.instanceId);
   if (target.type === 'CONSTRUCT') return !!state.players[target.playerId]?.constructZone.some(card => card.instanceId === target.instanceId);
@@ -40,7 +43,7 @@ export function declareCombatAttack(state: GameState, attackerId: string, target
       targetPlayerId: target.playerId,
       ...(target.type !== 'LIFE' ? { targetInstanceId: target.instanceId } : {}),
       step: 1,
-      snapshotPower: calculateNetPower(found.avatar),
+      snapshotPower: calculateSnapshotPower(found.avatar),
       unityHelpers: [],
       isDirectEggKick: target.type === 'LIFE' && (state.players[target.playerId].avatarZone.length > 0)
     }
@@ -69,7 +72,10 @@ export function payCombatKeyword(state: GameState, attackerId: string, helperId:
   players[attacker.playerId] = { ...players[attacker.playerId], avatarZone: players[attacker.playerId].avatarZone.map(avatar => avatar.instanceId === attackerId ? {
     ...avatar, layerModifiers: [...avatar.layerModifiers, { layer: 4, powerMod: amount, sourceCardId: `${keyword}:${helperId}`, expiresAt: 'END_OF_BATTLE' }]
   } : avatar) };
-  return { ...state, players };
+  const battleContext = state.battleContext?.attackerInstanceId === attackerId
+    ? { ...state.battleContext, unityHelpers: [...state.battleContext.unityHelpers, helperId] }
+    : state.battleContext;
+  return { ...state, players, battleContext };
 }
 
 /** Rule Book p.20: a player may pair a compatible, not-yet-paired Duo Avatar once each turn. */
@@ -128,4 +134,174 @@ export function resolveConstructAttack(state: GameState, attackerId: string, con
 /** Backstab's delayed penalty: after the attack, destroy the attacker if its color differs. */
 export function backstabPenalty(attacker: CardInstance, helper: CardInstance): boolean {
   return attacker.card.color !== helper.card.color;
+}
+
+export function declareCombatAttackWithHelpers(
+  state: GameState,
+  attackerId: string,
+  target: AttackTarget,
+  helpers: Array<{ instanceId: string; keyword: 'สามัคคี' | 'แทงหลัง' }>
+): GameState | null {
+  if (helpers.some((helper, index) => helpers.findIndex(candidate => candidate.instanceId === helper.instanceId) !== index)) return null;
+  let next = declareCombatAttack(state, attackerId, target);
+  if (!next) return null;
+  for (const helper of helpers) {
+    const paid = payCombatKeyword(next, attackerId, helper.instanceId, helper.keyword);
+    if (!paid) return null;
+    next = paid;
+  }
+  return next;
+}
+
+export interface BattleLifecycleResult {
+  ok: boolean;
+  state: GameState;
+  events: string[];
+  reason?: string;
+}
+
+function findCardInState(state: GameState, instanceId: string): CardInstance | undefined {
+  for (const player of Object.values(state.players)) {
+    for (const zone of ['avatarZone', 'constructZone', 'magicZone', 'hell', 'hand', 'deck', 'lifeDeck'] as const) {
+      const found = player[zone].find(card => card.instanceId === instanceId);
+      if (found) return found;
+    }
+  }
+  return state.landMagicZone?.instanceId === instanceId ? state.landMagicZone : undefined;
+}
+
+function battlePower(snapshotPower: number, attacker: CardInstance): number {
+  const layerFour = attacker.layerModifiers
+    .filter(modifier => modifier.layer === 4)
+    .sort((left, right) => left.sourceCardId.localeCompare(right.sourceCardId))
+    .reduce((total, modifier) => total + modifier.powerMod, 0);
+  return Math.max(0, snapshotPower + layerFour);
+}
+
+/** Completes a previously declared Battle after its Reaction Window has resolved. */
+export function resolveDeclaredBattle(state: GameState): BattleLifecycleResult {
+  const context = state.battleContext;
+  if (!context || state.reactionWindow) return { ok: false, state, events: [], reason: 'A declared battle without an open Reaction Window is required' };
+  const attackerMatch = findAvatar(state, context.attackerInstanceId);
+  const attacker = attackerMatch?.avatar;
+  if (!attacker || attacker.card.type !== 'Avatar') return { ok: false, state, events: [], reason: 'The attacking Avatar is no longer on the field' };
+  const attackerPlayerId = attacker.controllerId;
+  const target: AttackTarget = context.targetType === 'LIFE'
+    ? { type: 'LIFE', playerId: context.targetPlayerId }
+    : { type: context.targetType, playerId: context.targetPlayerId, instanceId: context.targetInstanceId ?? '' };
+  const redirected = applyHumanShieldRedirect(state, target);
+  const targetPlayerId = redirected.target.playerId;
+  let next: GameState = {
+    ...redirected.state,
+    battleContext: {
+      ...context,
+      targetType: redirected.target.type,
+      targetPlayerId,
+      ...(redirected.target.type === 'LIFE' ? { targetInstanceId: undefined } : { targetInstanceId: redirected.target.instanceId })
+    }
+  };
+  const redirectedTarget = redirected.target;
+  const resolvedTarget = redirectedTarget.type === 'AVATAR'
+    ? next.players[targetPlayerId]?.avatarZone.find(card => card.instanceId === redirectedTarget.instanceId)
+    : redirectedTarget.type === 'CONSTRUCT'
+      ? next.players[targetPlayerId]?.constructZone.find(card => card.instanceId === redirectedTarget.instanceId)
+      : undefined;
+  if (redirectedTarget.type !== 'LIFE' && (!resolvedTarget || resolvedTarget.controllerId !== targetPlayerId)) {
+    next = expireModifiersAt(next, 'END_OF_BATTLE');
+    const { battleContext: _battleContext, ...closed } = next;
+    return { ok: true, state: closed, events: ['The declared attack ended because its target left the field.'] };
+  }
+
+  const attackPower = battlePower(context.snapshotPower, attacker);
+  const eventIdBase = `${state.id}:${state.gameEvents?.length ?? 0}:battle:${context.attackerInstanceId}:${context.targetInstanceId ?? 'LIFE'}`;
+  const logs: string[] = [];
+  let destroyedAttacker = false;
+  let destroyedDefender = false;
+
+  if (redirected.target.type === 'CONSTRUCT' && resolvedTarget) {
+    if (attackPower > calculateNetPower(resolvedTarget)) {
+      const moved = moveCardBetweenZones(next, {
+        instanceId: resolvedTarget.instanceId,
+        actorId: attackerPlayerId,
+        destination: 'hell',
+        destinationPlayerId: getOriginalOwnerId(resolvedTarget),
+        effectMove: true,
+        cause: 'COMBAT'
+      });
+      if (!moved.ok) return { ok: false, state, events: [], reason: moved.reason };
+      next = moved.state;
+      logs.push(moved.state.players[getOriginalOwnerId(resolvedTarget)].hell.some(card => card.instanceId === resolvedTarget.instanceId)
+        ? `${resolvedTarget.card.name} was destroyed by the Construct attack.`
+        : `${resolvedTarget.card.name} was protected from destruction.`);
+    } else {
+      logs.push('Construct attack did not exceed the Construct POWER; no card was destroyed.');
+    }
+  } else if (redirected.target.type === 'AVATAR' && resolvedTarget) {
+    const combat = resolveAvatarCombat(attacker, resolvedTarget, attackPower);
+    logs.push(...combat.events);
+    const defeated = [
+      ...(combat.attackerDestroyed ? [attacker] : []),
+      ...(combat.defenderDestroyed ? [resolvedTarget] : [])
+    ];
+    const orderedDefeats = defeated.sort((a, b) =>
+      Number(a.controllerId !== attackerPlayerId) - Number(b.controllerId !== attackerPlayerId)
+    );
+    for (const avatar of orderedDefeats) {
+      const moved = moveCardBetweenZones(next, {
+        instanceId: avatar.instanceId,
+        actorId: attackerPlayerId,
+        destination: 'hell',
+        destinationPlayerId: getOriginalOwnerId(avatar),
+        effectMove: true,
+        cause: 'COMBAT'
+      });
+      if (!moved.ok) return { ok: false, state, events: [], reason: moved.reason };
+      next = moved.state;
+      const wasDestroyed = moved.state.players[getOriginalOwnerId(avatar)]?.hell.some(card => card.instanceId === avatar.instanceId) ?? false;
+      if (!wasDestroyed) continue;
+      if (avatar.instanceId === attacker.instanceId) destroyedAttacker = true;
+      if (avatar.instanceId === resolvedTarget.instanceId) destroyedDefender = true;
+      next = appendGameEvents(next, [{
+        type: 'AVATAR_DESTROYED', instanceId: avatar.instanceId, ownerId: getOriginalOwnerId(avatar),
+        controllerId: avatar.controllerId, actorId: attackerPlayerId,
+        eventId: `${eventIdBase}:destroyed:${avatar.instanceId}`
+      }]);
+    }
+  } else {
+    const defender = structuredClone(next.players[targetPlayerId]);
+    const lifeResult = attackLifeZone({ ...attacker, card: { ...attacker.card, power: attackPower }, layerModifiers: [] }, defender);
+    next = { ...next, players: { ...next.players, [targetPlayerId]: defender } };
+    logs.push(lifeResult.event);
+    if (lifeResult.damageDealt) next = appendGameEvents(next, [
+      { type: 'DAMAGE_DEALT', amount: 1, sourceId: attacker.instanceId, targetPlayerId, actorId: attackerPlayerId, eventId: `${eventIdBase}:damage-dealt` },
+      { type: 'DAMAGE_TAKEN', amount: 1, sourceId: attacker.instanceId, targetPlayerId, actorId: attackerPlayerId, eventId: `${eventIdBase}:damage-taken` }
+    ]);
+  }
+
+  if (!destroyedAttacker) {
+    for (const helperId of context.unityHelpers) {
+      const helper = findCardInState(next, helperId);
+      const survivingAttacker = findCardInState(next, attacker.instanceId);
+      if (!helper || !survivingAttacker || !avatarHasKeyword(helper, 'แทงหลัง') || !backstabPenalty(survivingAttacker, helper)) continue;
+      const moved = moveCardBetweenZones(next, {
+        instanceId: attacker.instanceId, actorId: attackerPlayerId, destination: 'hell',
+        destinationPlayerId: getOriginalOwnerId(survivingAttacker), effectMove: true, cause: 'EFFECT'
+      });
+      if (!moved.ok) return { ok: false, state, events: [], reason: moved.reason };
+      next = moved.state;
+      destroyedAttacker = next.players[getOriginalOwnerId(survivingAttacker)]?.hell.some(card => card.instanceId === attacker.instanceId) ?? false;
+      if (destroyedAttacker) logs.push(`${attacker.card.name} was destroyed by Backstab.`);
+      break;
+    }
+  }
+
+  next = expireModifiersAt(recomputeContinuousEffects(next), 'END_OF_BATTLE');
+  const { battleContext: _battleContext, ...closedState } = next;
+  const finalState = appendGameEvents(closedState, [{
+    type: 'BATTLE_ENDED', attackerId: attacker.instanceId,
+    targetId: redirected.target.type === 'LIFE' ? `${targetPlayerId}:LIFE` : redirected.target.instanceId,
+    playerId: attackerPlayerId,
+    eventId: `${eventIdBase}:ended`
+  }]);
+  return { ok: true, state: finalState, events: logs };
 }

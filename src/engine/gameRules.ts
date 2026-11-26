@@ -316,13 +316,20 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
     actorId: request.actorId,
     eventId: `${state.id}:${(state.gameEvents?.length ?? 0) + events.length}:CARD_MOVED:${exposeIdentity ? card.instanceId : 'hidden'}:${sourcePlayerId ?? 'shared'}:${sourceZone ?? 'landMagicZone'}:${destinationPlayerId ?? 'shared'}:${request.destination}:${request.actorId}`
   });
-  detachedAttachments.forEach((attached, index) => events.push({
-    type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId: attached.ownerId,
-    controllerId: attached.controllerId, from: `${sourcePlayerId}:attached`,
-    to: request.destination === 'removedFromGame' ? 'removedFromGame' : `${getOriginalOwnerId(attached)}:hell`,
-    actorId: request.actorId,
-    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached:${index}:${attached.instanceId}:${request.destination}:${request.actorId}`
-  }));
+  detachedAttachments.forEach((attached, index) => {
+    events.push({
+      type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId: attached.ownerId,
+      controllerId: attached.controllerId, from: `${sourcePlayerId}:attached`,
+      to: request.destination === 'removedFromGame' ? 'removedFromGame' : `${getOriginalOwnerId(attached)}:hell`,
+      actorId: request.actorId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached:${index}:${attached.instanceId}:${request.destination}:${request.actorId}`
+    });
+    events.push({
+      type: 'CARD_LEFT_FIELD', instanceId: attached.instanceId, ownerId: getOriginalOwnerId(attached),
+      controllerId: attached.controllerId, actorId: request.actorId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:attached-left-field:${index}:${attached.instanceId}:${request.destination}`
+    });
+  });
   if (sourceZone === 'constructZone' && sourcePlayerId) events.push({
     type: 'CONSTRUCT_LEFT', instanceId: card.instanceId, name: card.card.name, playerId: sourcePlayerId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:construct-left:${card.instanceId}:${sourcePlayerId}`
@@ -330,6 +337,37 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   if (request.destination === 'constructZone') events.push({
     type: 'CONSTRUCT_ENTERED', instanceId: card.instanceId, name: card.card.name, playerId: destinationPlayerId,
     eventId: `${state.id}:${state.gameEvents?.length ?? 0}:construct-entered:${card.instanceId}:${destinationPlayerId}`
+  });
+  if (request.destination === 'avatarZone' && card.card.type === 'Avatar') events.push({
+    type: 'AVATAR_SUMMONED', instanceId: card.instanceId, playerId: destinationPlayerId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:avatar-summoned:${card.instanceId}:${destinationPlayerId}`
+  });
+  if (request.destination === 'avatarZone' && card.card.type === 'Token') events.push({
+    type: 'TOKEN_CREATED', instanceId: card.instanceId, playerId: destinationPlayerId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:token-created:${card.instanceId}:${destinationPlayerId}`
+  });
+  if (sourceZone === 'deck' && request.destination === 'hand') events.push({
+    type: 'CARD_DRAWN', instanceId: card.instanceId, playerId: destinationPlayerId, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-drawn:${card.instanceId}:${request.actorId}`
+  });
+  if (sourceZone === 'hand' && request.destination === 'hell') events.push({
+    type: 'CARD_DISCARDED', instanceId: card.instanceId, playerId: sourcePlayerId!, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-discarded:${card.instanceId}:${request.actorId}`
+  });
+  if (card.card.type === 'Magic' && card.card.subtype && sourceZone === 'hand' && request.destination === 'magicZone') events.push({
+    type: 'MAGIC_PLAYED', instanceId: card.instanceId, subtype: card.card.subtype, playerId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:magic-played:${card.instanceId}:${request.actorId}`
+  });
+  const leavesAvatarField = sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && request.destination !== 'magicZone';
+  const leavesOtherFieldZone = (sourceZone === 'constructZone' || sourceZone === 'magicZone') && request.destination !== sourceZone;
+  if (leavesAvatarField || leavesOtherFieldZone) events.push({
+    type: 'CARD_LEFT_FIELD', instanceId: card.instanceId, ownerId: originalOwnerId,
+    controllerId: card.controllerId, actorId: request.actorId,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-left-field:${card.instanceId}:${request.destination}`
+  });
+  if (sourceZone === 'avatarZone' && card.card.type === 'Token' && request.destination === 'removedFromGame') events.push({
+    type: 'TOKEN_DESTROYED', instanceId: card.instanceId, playerId: sourcePlayerId!,
+    eventId: `${state.id}:${state.gameEvents?.length ?? 0}:token-destroyed:${card.instanceId}`
   });
   return { ok: true, state: appendGameEvents(next, events) };
 }

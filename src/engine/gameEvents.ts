@@ -9,7 +9,8 @@ type GameEventPayload =
   | { type: 'TOKEN_CREATED' | 'TOKEN_DESTROYED'; instanceId: string; playerId: string }
   | { type: 'ATTACK_DECLARED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'BATTLE_ENDED'; attackerId: string; targetId: string; playerId: string }
-  | { type: 'CARD_DRAWN' | 'CARD_DISCARDED'; instanceId: string; playerId: string; actorId: string }
+  | { type: 'CARD_DRAWN'; instanceId?: string; playerId: string; actorId: string }
+  | { type: 'CARD_DISCARDED'; instanceId: string; playerId: string; actorId: string }
   | { type: 'DAMAGE_DEALT' | 'DAMAGE_TAKEN'; amount: number; sourceId?: string; targetPlayerId: string; actorId: string }
   | { type: 'AVATAR_DESTROYED' | 'CARD_LEFT_FIELD'; instanceId: string; ownerId: string; controllerId: string; actorId: string }
   | { type: 'PHASE_STARTED' | 'PHASE_ENDED'; phase: import('./types').Phase; playerId: string; turnNumber: number }

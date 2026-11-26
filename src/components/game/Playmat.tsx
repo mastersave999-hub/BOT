@@ -24,7 +24,7 @@ import {
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
-import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain } from '../../engine/turnEngine';
+import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain, transitionGamePhase } from '../../engine/turnEngine';
 import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
 import {
   parseCardAbility,
@@ -574,7 +574,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const actorName = nextState.players[action.actorId]?.name ?? 'ผู้เล่น';
       if (action.nextPhase === 'BATTLE' || action.nextPhase === 'END') {
         nextState = appendLogs(
-          { ...nextState, currentPhase: action.nextPhase },
+          transitionGamePhase(nextState, action.actorId, action.nextPhase),
           [`${actorName} เข้าสู่ ${action.nextPhase === 'BATTLE' ? 'Battle' : 'End'} Phase`],
           'PHASE_CHANGE',
           action.actorId
@@ -773,14 +773,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const firstPlayerSkipsBattle = gameState.turnNumber === 1 && gameState.currentTurnPlayerIndex === 0;
       const phase = firstPlayerSkipsBattle ? 'END' : 'BATTLE';
       setGameState(prev => appendLogs(
-        { ...prev, currentPhase: phase },
+        transitionGamePhase(prev, meId, phase),
         [firstPlayerSkipsBattle ? `${me.name} ข้าม Battle Phase ในเทิร์นแรก` : `${me.name} เข้าสู่ Battle Phase`],
         'PHASE_CHANGE'
       ));
       showNotification(firstPlayerSkipsBattle ? 'เทิร์นแรกของผู้เล่นคนแรก — ข้าม Battle Phase เข้าสู่ End Phase' : 'เข้าสู่ Battle Phase!');
     } else if (gameState.currentPhase === 'BATTLE') {
       setSelectedAttackerId(null);
-      setGameState(prev => appendLogs({ ...prev, currentPhase: 'END' }, [`${me.name} เข้าสู่ End Phase`], 'PHASE_CHANGE'));
+      setGameState(prev => appendLogs(transitionGamePhase(prev, meId, 'END'), [`${me.name} เข้าสู่ End Phase`], 'PHASE_CHANGE'));
       showNotification('เข้าสู่ End Phase!');
     } else if (gameState.currentPhase === 'END') {
       const nextState = finishEndPhaseTurn(gameState);
