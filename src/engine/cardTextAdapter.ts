@@ -1,5 +1,5 @@
-import type { Card, MagicSubtype } from './types';
-import type { EffectCost, EffectDefinition, EffectPlan } from './effectResolver';
+import type { Card, ContinuousPowerEffect, MagicSubtype } from './types';
+import { resolveEffectPlan, type EffectCost, type EffectDefinition, type EffectPlan } from './effectResolver';
 import type { GameState } from './types';
 import type { TriggerAbility } from './triggerEngine';
 import type { GameEvent } from './gameEvents';
@@ -68,12 +68,18 @@ export interface ParsedCardTextClause {
   effects: CardTextEffect[];
   unresolved: string[];
 }
+export interface CardNameRules {
+  secondaryNames: string[];
+  additionalPrimaryNames: string[];
+}
 export interface CardTextAdapterResult {
   status: CardTextStatus;
   reason?: string;
   attributes: Omit<Card, 'mainEffect' | 'imageUrl'>;
   ruleTexts: string[];
+  nameRules: CardNameRules;
   clauses: ParsedCardTextClause[];
+  continuousEffects: ContinuousPowerEffect[];
   magicUse: { abilityConsumesMagicType?: MagicSubtype; magicSubtypeOverride?: MagicSubtype };
 }
 
@@ -120,10 +126,21 @@ export function createNameReference(value: string, quoted: boolean): NameReferen
 }
 
 /** Rule Book 3.2 p.13: quoted names match a delimited word sequence; unquoted names match exactly. */
-export function matchesCardName(cardName: string, reference: NameReference): boolean {
-  if (reference.kind === 'exact-name') return cardName.trim() === reference.value;
+export function parseCardNameRules(card: Pick<Card, 'mainEffect'>): CardNameRules {
+  const source = (card.mainEffect ?? '').normalize('NFC').replace(/<br\s*\/?\s*>/gi, '\n');
+  const secondaryNames = [...source.matchAll(/#\s*การ์ดใบนี้นับว่าเป็น\s*["“]([^"”]+)["”]/g)].map(match => match[1].trim());
+  const additionalPrimaryNames = [...source.matchAll(/#\s*การ์ดใบนี้นับเป็นชื่อ\s*([^\n<>,:：]+?)(?=\s+ซึ่ง|\s+และการ์ด|\s*$|[.。])/g)]
+    .map(match => match[1].trim().replace(/[.。]+$/, '').trim()).filter(Boolean);
+  return { secondaryNames: [...new Set(secondaryNames)], additionalPrimaryNames: [...new Set(additionalPrimaryNames)] };
+}
+
+export function matchesCardName(cardName: string, reference: NameReference, aliases: CardNameRules = { secondaryNames: [], additionalPrimaryNames: [] }): boolean {
+  const candidateNames = [cardName, ...aliases.additionalPrimaryNames,
+    ...(reference.kind === 'quoted-word' ? aliases.secondaryNames : [])];
+  if (reference.kind === 'exact-name') return candidateNames.some(name => name.trim() === reference.value);
   const escape = reference.value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s\\p{P}])${escape}(?=$|[\\s\\p{P}])`, 'u').test(cardName);
+  const matcher = new RegExp(`(?:^|[\\s\\p{P}])${escape}(?=$|[\\s\\p{P}])`, 'u');
+  return candidateNames.some(name => matcher.test(name));
 }
 
 function parseSelector(source: string): CardTextSelector | undefined {
@@ -141,6 +158,25 @@ function parseSelector(source: string): CardTextSelector | undefined {
     ...(symbol ? { symbol: symbol[1].trim() } : {}),
     ...(cost ? { cost: { comparison: cost[2] === 'หรือต่ำกว่า' ? 'at_most' : 'at_least', value: Number(cost[1]) } } : {})
   };
+}
+
+function parseContinuousPowerEffects(source: string): ContinuousPowerEffect[] {
+  const power = source.match(/POWER\s*([+-])\s*(\d+)\b/i);
+  const symbol = source.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+(?:ให้|ทุกใบ|ทั้งหมด)|$)/i)?.[1]?.trim();
+  if ((!power && !symbol) || !/Avatar/.test(source)) return [];
+  const targetSymbol = source.match(/\{\s*symbol\s+([^}]+)\}/i)?.[1]?.trim();
+  const quotedName = source.match(/["“]([^"”]+)["”]/)?.[1]?.trim();
+  const targetSelf = /Avatar\s+ใบนี้/.test(source) && !/ทุกใบ|ทั้งหมด/.test(source);
+  return [{
+    layer: targetSelf ? 1 : 2,
+    powerMod: power ? Number(power[2]) * (power[1] === '-' ? -1 : 1) : 0,
+    ...(symbol ? { symbolMod: symbol } : {}),
+    targetCardType: 'Avatar',
+    targetController: /ฝ่ายตรงข้าม|ของอีกฝ่าย/.test(source) ? 'OPPONENT' : /ฝ่ายเรา|ของเรา/.test(source) ? 'SOURCE_CONTROLLER' : 'ANY',
+    ...(targetSymbol ? { targetSymbol } : {}),
+    ...(quotedName ? { targetNameIncludes: quotedName } : {}),
+    ...(targetSelf ? { targetSelf: true } : {})
+  }];
 }
 
 function parseTiming(source: string): CardTextTiming {
@@ -170,6 +206,7 @@ function parseClause(source: string): ParsedCardTextClause {
   const quotedReferences = [...split.effectText.matchAll(/"([^\"]+)"/g)].map(match => createNameReference(match[1], true));
   const exactNameReferences = [...split.effectText.matchAll(/ชื่อ\s+([^\"“”{},:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/g)].map(match => createNameReference(match[1].trim(), false));
   const timing = parseTiming(source);
+  const continuousAura = timing.mode === 'CONTINUOUS' && parseContinuousPowerEffects(source).length > 0;
   const partnerName = source.match(/คู่หู\s*[-–:]\s*([^\n(]+)/)?.[1]?.trim();
   const keywordSpecs: CardTextKeywordSpec[] = keywords.map(keyword => {
     if (['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) {
@@ -189,7 +226,7 @@ function parseClause(source: string): ParsedCardTextClause {
   const unresolved: string[] = [];
   const standaloneKeywordDefinition = keywords.some(keyword => ['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) &&
     !split.costText && !split.separator && /^\s*(?:สามัคคี|โล่มนุษย์|เตะไข่|ลูกฮึด|แทงหลัง|คู่หู)(?:\s*\([^)]*\)|\s*[-–:]\s*[^\n]+)?\s*$/.test(effectText);
-  const parts = standaloneKeywordDefinition ? [] : effectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
+  const parts = standaloneKeywordDefinition || continuousAura ? [] : effectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
   for (const part of parts) {
     const draw = part.match(/^(?:จั่วการ์ด(?:จาก\s+Deck(?:\s+เรา)?)?)\s*(\d+)\s*ใบ(?:\s*หลังจากนั้นสับ Deck)?$/i);
     const flip = part.match(/^(หงาย|คว่ำ)\s*LIFE Card\s*(?:ใบบนสุด\s*)?(?:ของฝ่ายตรงข้าม|ของอีกฝ่าย|ฝ่ายตรงข้าม|ของเรา|ฝ่ายเรา)?\s*(\d+)\s*ใบ/i);
@@ -246,10 +283,10 @@ function parseClause(source: string): ParsedCardTextClause {
   if (split.costText && !cost) unresolved.push('cost syntax is not represented by a validated typed cost primitive');
   if (split.costText && cost && cost.kind !== 'discard_from_hand' && cost.kind !== 'sacrifice_avatar') unresolved.push('typed cost primitive is not part of the Phase 2 atomic effect resolver');
   const keywordOnly = effects.length === 0 && keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD') && !split.costText && !/(?:เลือก|จั่ว|POWER\s*[+-]|POWER\s*(?:เท่ากับ|เป็น)|หงาย LIFE|คว่ำ LIFE|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText);
-  if (!effects.length && !keywordOnly && !unresolved.length) unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
+  if (!effects.length && !keywordOnly && !continuousAura && !unresolved.length) unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
   const duration = /จนจบการต่อสู้/.test(effectText) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(effectText) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(effectText) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(effectText) ? 'NEXT_DRAW_PHASE' : undefined;
-  if (/ถ้า|หาก|ตราบเท่าที่/.test(effectText) && !keywordOnly) unresolved.push('condition expression is not fully represented by the supported condition AST');
-  if (/(?:เลือก|POWER|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText) && !effects.length && !keywordOnly) unresolved.push('targeted or zone-changing operation lacks a complete executable plan');
+  if (/ถ้า|หาก|ตราบเท่าที่/.test(effectText) && !keywordOnly && !continuousAura) unresolved.push('condition expression is not fully represented by the supported condition AST');
+  if (/(?:เลือก|POWER|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText) && !effects.length && !keywordOnly && !continuousAura) unresolved.push('targeted or zone-changing operation lacks a complete executable plan');
   return {
     source, ...(split.costText ? { costText: split.costText } : {}), effectText: split.effectText,
     costEffectSeparator: split.separator, keywords, keywordSpecs, timing, ...(cost ? { cost } : {}),
@@ -344,7 +381,7 @@ export function toEffectPlan(
         const selected = targetInstanceIds.slice(bindingIndex, bindingIndex + effect.count);
         if (!player || selected.some(id => {
           const card = player.deck.find(item => item.instanceId === id);
-          return !card || card.card.type !== effect.cardType || !matchesCardName(card.card.name, effect.name);
+          return !card || card.card.type !== effect.cardType || !matchesCardName(card.card.name, effect.name, parseCardNameRules(card.card));
         })) return null;
         bindingIndex += effect.count;
       }
@@ -382,6 +419,69 @@ export function toEffectPlan(
       player.lifeDeck.filter(card => card.isFaceUp !== (lifeEffect.face === 'up')).length < lifeEffect.count) return null;
   }
   return { actorId, costs, effects: toEffectDefinitions(clause.effects, actorId, targetInstanceIds, targetPlayerId) };
+}
+
+export function activateRegisteredCardTextAbility(
+  state: GameState,
+  sourceInstanceId: string,
+  abilityIndex: number,
+  bindings: { costInstanceIds?: string[]; targetInstanceIds?: string[] } = {}
+): import('./effectResolver').EffectResolution {
+  const activeCards = state.playerOrder.flatMap(playerId => {
+    const player = state.players[playerId];
+    return player ? [...player.avatarZone, ...player.constructZone, ...player.magicZone] : [];
+  }).concat(state.landMagicZone ? [state.landMagicZone] : []);
+  const source = activeCards.find(card => card.instanceId === sourceInstanceId);
+  const clause = source?.registeredActivatedAbilities?.[abilityIndex];
+  if (!source || !clause) return { ok: false, state, logs: [], reason: 'Activated ability is not registered on an active field card' };
+  const activePlayerId = state.playerOrder[state.currentTurnPlayerIndex];
+  const explicitlyBattle = /Battle Phase|ช่วง Battle Phase|ช่วงต่อสู้/.test(clause.source);
+  const explicitlyOpponentTurn = /เทิร์นฝ่ายตรงข้าม|ในเทิร์นของฝ่ายตรงข้าม/.test(clause.source);
+  const timingAllowed = explicitlyOpponentTurn
+    ? activePlayerId !== source.controllerId
+    : explicitlyBattle ? state.currentPhase === 'BATTLE' && activePlayerId === source.controllerId
+      : state.currentPhase === 'MAIN' && activePlayerId === source.controllerId;
+  if (!timingAllowed) return { ok: false, state, logs: [], reason: 'Activated ability timing is not currently permitted' };
+  const player = state.players[source.controllerId];
+  if (!player) return { ok: false, state, logs: [], reason: 'Ability controller does not exist' };
+  const usageKey = `${state.turnNumber}:${source.controllerId}:${source.instanceId}:card-text:${abilityIndex}`;
+  if (clause.timing.frequency === 'ONCE_PER_TURN' && state.triggerUsage?.includes(usageKey)) {
+    return { ok: false, state, logs: [], reason: 'Activated ability has already been used this turn' };
+  }
+  const magicType = parseCardText(source.card).magicUse.abilityConsumesMagicType;
+  if (magicType && player.usedMagicTypesThisTurn.has(magicType)) {
+    return { ok: false, state, logs: [], reason: `${magicType} Magic quota has already been used this turn` };
+  }
+  const plan = toEffectPlan(clause, source.controllerId, bindings.costInstanceIds, state, bindings.targetInstanceIds);
+  if (!plan) return { ok: false, state, logs: [], reason: 'Activated ability has unresolved costs, targets, or effects' };
+  const stagedPlayer = {
+    ...player,
+    usedMagicTypesThisTurn: new Set(player.usedMagicTypesThisTurn)
+  };
+  if (magicType) stagedPlayer.usedMagicTypesThisTurn.add(magicType);
+  const staged = { ...state, players: { ...state.players, [player.id]: stagedPlayer } };
+  const result = resolveEffectPlan(staged, plan);
+  if (!result.ok) return { ...result, state };
+  if (clause.timing.frequency === 'ONCE_PER_TURN') {
+    result.state.triggerUsage = [...(result.state.triggerUsage ?? []), usageKey];
+  }
+  return result;
+}
+
+export function effectiveMagicSubtype(parsed: CardTextAdapterResult, printedSubtype: MagicSubtype): MagicSubtype {
+  return parsed.magicUse.magicSubtypeOverride ?? printedSubtype;
+}
+
+export function magicCancellationTargetType(parsed: CardTextAdapterResult): MagicSubtype | undefined {
+  return parsed.magicUse.magicSubtypeOverride;
+}
+
+export function validateAbilityMagicQuota(state: GameState, playerId: string, parsed: CardTextAdapterResult): string | null {
+  const type = parsed.magicUse.abilityConsumesMagicType;
+  if (!type) return null;
+  const player = state.players[playerId];
+  if (!player) return 'Player does not exist';
+  return player.usedMagicTypesThisTurn.has(type) ? `${type} Magic has already been used this turn` : null;
 }
 
 export function toCardTextEffectPlan(
@@ -451,6 +551,7 @@ export function parseCardText(card: Card): CardTextAdapterResult {
     } else abilityLines.push(line);
   }
   const clauses = abilityLines.map(parseClause);
+  const continuousEffects = clauses.flatMap(clause => clause.timing.mode === 'CONTINUOUS' ? parseContinuousPowerEffects(clause.source) : []);
   const taggedMagic = [...source.matchAll(/ความสามารถนี้ถือเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);
   const overrideMagic = [...source.matchAll(/โดยถือว่าเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);
   const magicUse = {
@@ -458,7 +559,9 @@ export function parseCardText(card: Card): CardTextAdapterResult {
     ...(overrideMagic.length === 1 ? { magicSubtypeOverride: overrideMagic[0] } : {})
   };
   const reasons = clauses.flatMap(clause => clause.unresolved);
-  if (ruleTexts.length > 0) reasons.push('inherent # Rule Text is retained as rule metadata but has no complete executable specification');
+  const nameRules = parseCardNameRules(card);
+  const executableNameRuleCount = nameRules.secondaryNames.length + nameRules.additionalPrimaryNames.length;
+  if (ruleTexts.length > executableNameRuleCount) reasons.push('inherent # Rule Text is retained as rule metadata but has no complete executable specification');
   if (taggedMagic.length > 1 || overrideMagic.length > 1) reasons.push('multiple or conflicting Magic type declarations');
   if (taggedMagic.length > 0 && overrideMagic.length > 0 && (taggedMagic.length !== 1 || overrideMagic.length !== 1)) reasons.push('cannot disambiguate mixed Magic-use declarations');
   if (AMBIGUOUS_WORDING.test(source)) reasons.push('wording explicitly matches an unresolved or ambiguous-rule marker');
@@ -472,8 +575,9 @@ export function parseCardText(card: Card): CardTextAdapterResult {
       soi: card.soi, cost: card.cost, gem: card.gem, gemColor: card.gemColor ?? null,
       power: card.power, symbol: card.symbol ?? null, color: card.color, rarity: card.rarity,
       dropRate: card.dropRate, favorText: card.favorText, creator: card.creator,
-      isOnlyOne: card.isOnlyOne, isBias: card.isBias, isCollab: card.isCollab
-    }, ruleTexts, clauses: resolvedClauses, magicUse
+      isOnlyOne: card.isOnlyOne, isBias: card.isBias, isCollab: card.isCollab,
+      ...(ruleTexts.length ? { ruleTextProtected: true } : {})
+    }, ruleTexts, nameRules, clauses: resolvedClauses, continuousEffects, magicUse
   };
 }
 

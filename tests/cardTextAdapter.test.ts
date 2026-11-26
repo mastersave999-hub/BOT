@@ -1,8 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEffectPlan } from '../src/engine/effectResolver';
-import { createNameReference, matchesCardName, parseCardText, toCardTextEffectPlan, toEffectDefinitions, toEffectPlan, toTriggerAbility } from '../src/engine/cardTextAdapter';
+import { activateRegisteredCardTextAbility, createNameReference, effectiveMagicSubtype, magicCancellationTargetType, matchesCardName, parseCardNameRules, parseCardText, toCardTextEffectPlan, toEffectDefinitions, toEffectPlan, toTriggerAbility, validateAbilityMagicQuota } from '../src/engine/cardTextAdapter';
+import { moveCardBetweenZones } from '../src/engine/gameRules';
+import { validateMagicPlay } from '../src/engine/gameRules';
+import { validateDeck } from '../src/engine/deckValidator';
 import { calculateEffectiveSymbol, calculateNetPower } from '../src/engine/layers';
+import { beginReactionCard, canCancelMagicCard, resolveReactionCard } from '../src/engine/reactionEngine';
 import { payCombatKeyword } from '../src/engine/combatKeywords';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
@@ -148,6 +152,125 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(abilityUse.magicUse.magicSubtypeOverride).toBeUndefined();
     expect(cardOverride.magicUse.magicSubtypeOverride).toBe('React');
     expect(cardOverride.magicUse.abilityConsumesMagicType).toBeUndefined();
+  });
+
+  it('registers a summoned Avatar activated ability and continuous POWER/Symbol layers, then unregisters on exit', () => {
+    const base = byPrintId('SD01-001');
+    const activatedText = 'เทิร์นละครั้ง สั่งใช้ ทิ้งการ์ด 1 ใบ : จั่วการ์ด 1 ใบ ความสามารถนี้ถือเป็นการใช้ Normal Magic';
+    const continuousText = 'ต่อเนื่อง ตราบเท่าที่ Avatar ใบนี้อยู่บน Avatar Zone POWER +1 ให้ Avatar {symbol เทพ} ทุกใบบน Avatar Zone ฝ่ายเรา';
+    const continuousSymbolText = 'ต่อเนื่อง Avatar ใบนี้เปลี่ยน Symbol เป็น ผี';
+    const initial = gameState();
+    initial.players.p1.hand = [{ ...instance('p1-ability', 'p1'), card: { ...base, mainEffect: `${activatedText}<br>${continuousText}<br>${continuousSymbolText}` } }];
+    initial.players.p1.hand.push(instance('p1-cost', 'p1'));
+    const entered = moveCardBetweenZones(initial, {
+      instanceId: 'p1-ability', actorId: 'p1', destination: 'avatarZone', destinationPlayerId: 'p1'
+    });
+    expect(entered.ok).toBe(true);
+    const source = entered.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-ability')!;
+    expect(source.registeredActivatedAbilities).toHaveLength(1);
+    expect(source.registeredContinuousAbilities).toHaveLength(2);
+    expect(source.cardTextContinuousEffects).toEqual([
+      { layer: 2, powerMod: 1, targetCardType: 'Avatar', targetController: 'SOURCE_CONTROLLER', targetSymbol: 'เทพ' },
+      { layer: 1, powerMod: 0, symbolMod: 'ผี', targetCardType: 'Avatar', targetController: 'ANY', targetSelf: true }
+    ]);
+    expect(calculateNetPower(entered.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-avatar')!)).toBe(base.power + 1);
+    expect(calculateEffectiveSymbol(source)).toBe('ผี');
+
+    const activated = activateRegisteredCardTextAbility(entered.state, 'p1-ability', 0, { costInstanceIds: ['p1-cost'] });
+    expect(activated.ok).toBe(true);
+    expect(activated.state.players.p1.usedMagicTypesThisTurn.has('Normal')).toBe(true);
+    expect(activated.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-cost');
+    expect(activated.state.players.p1.hand.map(card => card.instanceId)).toContain('p1-deck');
+    expect(activateRegisteredCardTextAbility(activated.state, 'p1-ability', 0, { costInstanceIds: ['missing'] }).reason).toContain('already been used');
+
+    const exited = moveCardBetweenZones(activated.state, {
+      instanceId: 'p1-ability', actorId: 'p1', destination: 'hell'
+    });
+    expect(exited.ok).toBe(true);
+    expect(exited.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-ability');
+    expect(exited.state.players.p1.avatarZone.find(card => card.instanceId === 'p1-avatar')?.layerModifiers)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ sourceCardId: expect.stringContaining('p1-ability') })]));
+    expect(exited.state.players.p1.hell.find(card => card.instanceId === 'p1-ability')).not.toHaveProperty('registeredActivatedAbilities');
+    expect(exited.state.players.p1.hell.find(card => card.instanceId === 'p1-ability')).not.toHaveProperty('registeredContinuousAbilities');
+  });
+
+  it('executes inherent secondary and second-primary name rules for searches and deck limits', () => {
+    const base = byPrintId('SD01-001');
+    const secondary = { ...base, name: 'Moon Guard', mainEffect: '#การ์ดใบนี้นับว่าเป็น "Camp Name" ซึ่งจะถือว่าเป็นชื่อเสริม' };
+    const dualPrimary = { ...base, name: 'Sea Temple', mainEffect: '#การ์ดใบนี้นับเป็นชื่อ Black Marsh ซึ่งจะถือว่าเป็นชื่อหลักอีกชื่อ' };
+    const secondaryRules = parseCardNameRules(secondary);
+    const primaryRules = parseCardNameRules(dualPrimary);
+    expect(secondaryRules.secondaryNames).toEqual(['Camp Name']);
+    expect(primaryRules.additionalPrimaryNames).toEqual(['Black Marsh']);
+    expect(matchesCardName('Moon Guard', createNameReference('Camp Name', true), secondaryRules)).toBe(true);
+    expect(matchesCardName('Moon Guard', createNameReference('Camp Name', false), secondaryRules)).toBe(false);
+    expect(matchesCardName('Sea Temple', createNameReference('Black Marsh', false), primaryRules)).toBe(true);
+    expect(parseCardText(secondary).attributes.ruleTextProtected).toBe(true);
+    expect(parseCardText(dualPrimary).attributes.ruleTextProtected).toBe(true);
+
+    const mainDeck = [
+      ...Array.from({ length: 4 }, () => secondary),
+      ...Array.from({ length: 4 }, () => ({ ...base, name: 'Camp Name' })),
+      ...Array.from({ length: 42 }, (_, index) => ({ ...base, name: `Filler ${index}`, isOnlyOne: index === 0 }))
+    ];
+    const lifeDeck = Array.from({ length: 5 }, (_, index) => ({ ...base, type: 'Life' as const, name: `Life ${index}` }));
+    expect(validateDeck(mainDeck, lifeDeck).isValid).toBe(true);
+
+    const dualNameDeck = [
+      dualPrimary,
+      ...Array.from({ length: 4 }, () => ({ ...base, name: 'Black Marsh' })),
+      ...Array.from({ length: 45 }, (_, index) => ({ ...base, name: `Dual filler ${index}`, isOnlyOne: index === 0 }))
+    ];
+    expect(validateDeck(dualNameDeck, lifeDeck).isValid).toBe(false);
+  });
+
+  it('enforces ability Magic quotas separately from effective Magic type conversion and cancellation', () => {
+    const base = byPrintId('SD01-001');
+    const ability = parseCardText({ ...base, mainEffect: 'สั่งใช้ ทิ้งการ์ด 1 ใบ : จั่วการ์ด 1 ใบ ความสามารถนี้ถือเป็นการใช้ Normal Magic' });
+    expect(ability.magicUse.abilityConsumesMagicType).toBe('Normal');
+    expect(validateAbilityMagicQuota(gameState(), 'p1', ability)).toBeNull();
+    const used = gameState();
+    used.players.p1.usedMagicTypesThisTurn.add('Normal');
+    expect(validateAbilityMagicQuota(used, 'p1', ability)).toContain('already been used');
+    expect(magicCancellationTargetType(ability)).toBeUndefined();
+
+    const converted = parseCardText({ ...base, subtype: 'Normal', mainEffect: 'สามารถใช้การ์ดใบนี้ใน Battle Phase โดยถือว่าเป็นการใช้ React Magic' });
+    expect(effectiveMagicSubtype(converted, 'Normal')).toBe('React');
+    expect(magicCancellationTargetType(converted)).toBe('React');
+    expect(canCancelMagicCard('ยกเลิกการใช้ React Magic', { ...base, type: 'Magic', subtype: 'Normal', mainEffect: 'สามารถใช้การ์ดใบนี้ใน Battle Phase โดยถือว่าเป็นการใช้ React Magic' })).toBe(true);
+    expect(canCancelMagicCard('ยกเลิกการใช้ Normal Magic', { ...base, type: 'Magic', subtype: 'Normal', mainEffect: 'สามารถใช้การ์ดใบนี้ใน Battle Phase โดยถือว่าเป็นการใช้ React Magic' })).toBe(false);
+    expect(canCancelMagicCard('ยกเลิกการใช้ Normal Magic', { ...base, type: 'Avatar', mainEffect: ability.clauses[0].source })).toBe(false);
+    const state = gameState();
+    state.currentPhase = 'BATTLE';
+    expect(validateMagicPlay(state, 'p1', 'React', true)).toBeNull();
+    state.players.p1.usedMagicTypesThisTurn.add('React');
+    expect(validateMagicPlay(state, 'p1', 'React', true)).toContain('already been used');
+    expect(magicCancellationTargetType(converted)).not.toBe(magicCancellationTargetType(ability));
+
+    const target = { ...instance('p1-converted-magic', 'p1'), card: { ...base, type: 'Magic' as const, subtype: 'Normal' as const,
+      mainEffect: 'สามารถใช้การ์ดใบนี้ใน Battle Phase โดยถือว่าเป็นการใช้ React Magic' } };
+    const cancelCard = { ...instance('p2-cancel-react', 'p2'), card: { ...base, type: 'Magic' as const,
+      subtype: 'React' as const, mainEffect: 'ยกเลิกการใช้ React Magic' } };
+    const cancellationState = gameState();
+    cancellationState.players.p1.magicZone.push(target);
+    cancellationState.players.p1.usedMagicTypesThisTurn.add('React');
+    cancellationState.players.p2.hand = [cancelCard];
+    cancellationState.reactionWindow = {
+      id: 'react-conversion-window', trigger: { type: 'MAGIC_PLAYED', actorId: 'p1', sourceInstanceId: target.instanceId },
+      turnOwnerId: 'p1', priorityPlayerId: 'p2', passedPlayerIds: [], priorityOrder: ['p2', 'p1'], chain: [], revision: 0,
+      pendingAction: { type: 'RESOLVE_MAGIC', actorId: 'p1', sourceCard: target }
+    };
+    const begun = beginReactionCard(cancellationState, 'p2', cancelCard.instanceId);
+    expect(begun.ok, begun.ok ? '' : begun.reason).toBe(true);
+    if (begun.ok) {
+      const cancelled = resolveReactionCard(begun.state);
+      expect(cancelled.ok).toBe(true);
+      if (cancelled.ok) {
+        expect(cancelled.state.players.p1.hell.map(card => card.instanceId)).toContain(target.instanceId);
+        expect(cancelled.state.gameEvents?.some(event => event.event.type === 'ACTION_CANCELLED' && event.event.targetInstanceId === target.instanceId)).toBe(true);
+        expect(cancelled.pendingAction).toBeUndefined();
+      }
+    }
   });
 
   it('converts an exact draw clause into a typed effect and resolves it atomically in Game State', () => {

@@ -1,4 +1,5 @@
 import { Card } from './types';
+import { parseCardNameRules } from './cardTextAdapter';
 
 export interface DeckValidationResult {
   isValid: boolean;
@@ -35,24 +36,30 @@ export function validateDeck(mainDeck: Card[], lifeDeck: Card[]): DeckValidation
     lifeNames.add(card.name);
   }
 
-  // Rule 4: Max 4 copies per card name in Main Deck (excluding dual/secondary name rules)
-  const nameCounts: Record<string, number> = {};
+  // Rule 4: enforce primary-name caps; secondary aliases permit up to eight combined copies.
+  const nameCounts = new Map<string, number>();
+  const secondaryPairs = new Set<string>();
   let onlyOneCount = 0;
 
   for (const card of mainDeck) {
-    nameCounts[card.name] = (nameCounts[card.name] || 0) + 1;
-    if (card.isOnlyOne) {
-      onlyOneCount++;
+    const rules = parseCardNameRules(card);
+    const primaryNames = [card.name, ...rules.additionalPrimaryNames];
+    for (const name of new Set(primaryNames)) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    for (const alias of rules.secondaryNames) {
+      const pair = [card.name, alias].sort().join('\\u0000');
+      secondaryPairs.add(pair);
     }
-    if (card.isBias) {
-      errors.push(`Card "${card.name}" has symbol "ลำเอียง" and is forbidden in standard competition [RuleBook p.1, p.5]`);
-    }
+    if (card.isOnlyOne) onlyOneCount++;
+    if (card.isBias) errors.push(`Card "${card.name}" has symbol "ลำเอียง" and is forbidden in standard competition [RuleBook p.1, p.5]`);
   }
 
-  for (const [name, count] of Object.entries(nameCounts)) {
-    if (count > 4) {
-      errors.push(`Card "${name}" exceeds maximum allowed 4 copies (found: ${count}) [RuleBook p.1]`);
-    }
+  for (const [name, count] of nameCounts) {
+    if (count > 4) errors.push(`Card "${name}" exceeds maximum allowed 4 copies (found: ${count}) [RuleBook p.1]`);
+  }
+  for (const pair of secondaryPairs) {
+    const [primaryName, secondaryName] = pair.split('\\u0000');
+    const combined = (nameCounts.get(primaryName) ?? 0) + (nameCounts.get(secondaryName) ?? 0);
+    if (combined > 8) errors.push(`Cards named "${primaryName}" and secondary alias "${secondaryName}" exceed 8 combined copies (found: ${combined}) [RuleBook p.14]`);
   }
 
   // Rule 5: Exactly 1 "Only #1" card in Main Deck

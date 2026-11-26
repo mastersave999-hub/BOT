@@ -41,10 +41,12 @@ export type EffectDuration = 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE';
 export interface ContinuousPowerEffect {
   layer: 1 | 2;
   powerMod: number;
+  symbolMod?: string;
   targetCardType?: 'Avatar' | 'Construct' | 'Life';
   targetController?: 'SOURCE_CONTROLLER' | 'OPPONENT' | 'ANY';
   targetSymbol?: string;
   targetNameIncludes?: string;
+  targetSelf?: boolean;
 }
 
 export interface PreventionShield {
@@ -79,6 +81,10 @@ export interface CardInstance {
   preventionShields?: PreventionShield[];
   /** Explicit typed event abilities; never inferred from printed card text. */
   triggerAbilities?: import('./triggerEngine').TriggerAbility[];
+  /** Card-text activated and continuous abilities are registered only while this instance is on an active field. */
+  registeredActivatedAbilities?: import('./cardTextAdapter').ParsedCardTextClause[];
+  registeredContinuousAbilities?: import('./cardTextAdapter').ParsedCardTextClause[];
+  cardTextContinuousEffects?: ContinuousPowerEffect[];
   layerModifiers: {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
