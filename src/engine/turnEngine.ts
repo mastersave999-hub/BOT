@@ -125,15 +125,38 @@ export function finishEndPhaseTurn(state: GameState): GameState {
   const turnNumber = state.turnNumber + 1;
   const nextIndex = (state.currentTurnPlayerIndex + 1) % state.playerOrder.length;
   const nextPlayerId = state.playerOrder[nextIndex];
-  const transaction = runGameTransaction(state, draft => {
-    const nextState = clearEndOfTurnModifiers(draft);
+  let prepared = state;
+  const dueDestructions = state.playerOrder.flatMap(id => state.players[id]?.avatarZone ?? [])
+    .filter(avatar => avatar.destroyAtEndPhase?.playerId === activePlayerId &&
+      avatar.destroyAtEndPhase.turnNumber === state.turnNumber);
+  for (const avatar of dueDestructions) {
+    const moved = moveCardBetweenZones(prepared, {
+      instanceId: avatar.instanceId, actorId: activePlayerId, destination: 'hell',
+      destinationPlayerId: avatar.originalOwnerId ?? avatar.ownerId, effectMove: true, cause: 'EFFECT'
+    });
+    if (!moved.ok) return state;
+    prepared = moved.state;
+    if (prepared.pendingExitPrevention) return prepared;
+  }
+  const transaction = runGameTransaction(prepared, draft => {
+    let nextState = clearEndOfTurnModifiers(draft);
+    for (const playerId of state.playerOrder) {
+      const player = nextState.players[playerId];
+      if (!player) continue;
+      nextState = { ...nextState, players: { ...nextState.players, [playerId]: {
+        ...player, avatarZone: player.avatarZone.map(avatar => avatar.controllerId === activePlayerId &&
+          avatar.attachedInstances.some(attached => attached.card.type === 'Magic' && attached.card.subtype === 'Modification' &&
+            attached.card.mainEffect.trim() === 'Avatar ที่สวมใส่การ์ดใบนี้จะกลับมาเป็นสภาพตื่น ตอน End Phase')
+          ? { ...avatar, isRested: false } : avatar)
+      } } };
+    }
     const nextPlayer = nextState.players[nextPlayerId];
     return {
       ...nextState,
       currentTurnPlayerIndex: nextIndex,
       currentPhase: 'DRAW',
       turnNumber,
-      stateRevision: (state.stateRevision ?? 0) + 1,
+      stateRevision: (prepared.stateRevision ?? 0) + 1,
       eventLog: [
         ...nextState.eventLog,
         { timestamp: Date.now(), type: 'TURN_ENDED', description: `${state.players[activePlayerId]?.name ?? activePlayerId} ended the turn.`, actorId: activePlayerId },

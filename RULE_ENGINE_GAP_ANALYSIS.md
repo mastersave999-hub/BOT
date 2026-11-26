@@ -353,27 +353,27 @@ These are text triage counts, not unique mechanics or verified cards. Adapter te
 - Hell recovery and Avatar special-summon effects can open a private `pendingHellChoice` with candidate instance IDs, authorized viewer, selection bounds, typed destination, and expected state revision. `resolveHellChoice` validates authorization, candidate membership, duplicate/stale commands, and transactionally routes cards to Hand, Deck top/bottom, Banish, or Avatar Zone. Catalog verification selects deterministically through this stateful API. The current grammar remains limited; multi-step, broad selector, triggered, and cost/destination variants stay unsupported.
 - Modification Magic equip restrictions implement Rule Book pp.13, 18 matching for quoted/exact names, Symbol/tribe, color, and Text Box criteria, including combined name-plus-Symbol restrictions. Illegal attempts send the card to its owner's Hell; recomputation rechecks attachments and owner-routes them to Hell when an equip becomes illegal. The Phase 4 harness also verifies representative attached POWER overrides and equipment/host exit. Full 170-clause continuous parsing and all 38 original equip patterns are not complete; unparseable forms fail closed.
 
-### Batch 4C-4: current 1,833-row audit
+### Batch 4D: current 1,833-row audit
 
 | Status | Rows |
 |---|---:|
-| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 134 |
-| PARSED_READY (including verified) | 241 |
-| PARSED_READY not yet verified | 107 |
-| UNSUPPORTED | 1,588 |
+| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 142 |
+| PARSED_READY (including verified) | 259 |
+| PARSED_READY not yet verified | 117 |
+| UNSUPPORTED | 1,570 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
-The deterministic suite attempts each of the 241 parser-ready catalog rows using exact rows from `cards_clean.json`; 134 pass before/after Game State assertions, while 107 remain unverified. Batch 4C-4 recognizes the exact self-attack trigger `อัตโนมัติ เมื่อ Avatar ใบนี้โจมตี : POWER +2 จนจบเทิร์น` (six DB rows; SD01-002, PRMO-027, SL01-004, KD01-006, B2SB-003), plus attached-Avatar POWER templates `Avatar ที่สวมใส่การ์ดใบนี้ POWER +1` (SD01-016, ODY1-075) and `Avatar ที่สวมใส่การ์ดใบนี้ POWER +0` (PRE0-001-2). Hell-choice resolution is simulated in the shared player-choice helper using the pending request's authorized viewer and expected revision. The extracted high-frequency top-30 text candidates include conditional, delayed, dynamic-count and multi-effect wording; unsupported semantics remain closed rather than promoted. Reproduce parser counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
+The deterministic suite attempts each of the 259 parser-ready catalog rows using exact rows from `cards_clean.json`; 142 pass before/after Game State assertions, while 117 remain unverified. Batch 4D recognizes the six requested exact templates, including End Phase +4 and destruction, bounded giant Avatar Hell summons, continuous Land Magic auras, Naga Juti POWER, and attached-avatar End Phase awakening. Five Hell-summon rows and three End Phase +4 rows pass per-row state assertions. The Naga selector has no matching official catalog Avatar and tribe auras do not have all required official target examples, so those rows remain unverified; two awakening rows also lack a complete legal-host fixture. Reproduce parser counts with `npx tsx scripts/audit-card-text-adapter.ts` and per-card verification/blocker counts with `npx vitest run tests/phase4CardVerification.test.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
 
-**Current unverified blocker counts (overlapping):** timing/event context 93; keyword behavior 72; no executable effect in a clause 20; effect plan did not compile with generated bindings 19; equip restriction fixture unavailable 4; typed trigger plan compile failure 2; LIFE timing outside active-field simulation 5. A row can have multiple blockers; counts are not an exclusive partition. These counts are from the current Phase 4 catalog harness, not mutually exclusive card totals.
+**Current unverified blocker counts (overlapping):** timing/event context 95; keyword behavior 72; no executable effect in a clause 20; effect plan did not compile with generated bindings 21; equip restriction fixture unavailable 4; typed trigger plan compile failure 5; LIFE timing outside active-field simulation 5; continuous effect did not match a legal catalog target 5; Naga Symbol target fixture unavailable 3. A row can have multiple blockers; counts are not an exclusive partition. These counts are from the current Phase 4 catalog harness, not mutually exclusive card totals.
 
-### Batch 4C-4 overlapping unsupported-reason counts
+### Batch 4D overlapping unsupported-reason counts
 
 | Reason | Rows |
 |---|---:|
-| No complete mapped effect clause | 1,479 |
-| Targeted/zone-changing operation without a complete bound plan | 1,070 |
+| No complete mapped effect clause | 1,461 |
+| Targeted/zone-changing operation without a complete bound plan | 1,054 |
 | Condition expression gap | 428 |
 | Unrecognized cost syntax | 171 |
 | Inherent `#` Rule Text without executable spec | 103 |
@@ -385,11 +385,11 @@ The deterministic suite attempts each of the 241 parser-ready catalog rows using
 
 ### Top remaining unparsed catalog clusters
 
-Counts below are overlapping pattern matches across exact database rows; duplicates count separately. Opponent Avatar-summon reactions 2; opponent Magic-use clauses 10; cancellation 44; destruction prevention 2; Modification equip restriction 32; continuous POWER/Symbol modifiers 170; end-of-turn self-exit/removal 37; conditional `ถ้า...:` clauses 18; Hell recovery/summon/banish 309; ability-counts-as-Normal-Magic pattern 0. Representative exact `printId` and names are in the audit output; examples include SD06-015 `ปืนใหญ่ไทยประดิษฐ์`, BT08-036 `ขงเบ้ง กุนซือซ่อนกายแห่งจ๊กก๊ก`, BT10-073 `ดวงจันทร์วันเพ็ญ`, BT10-009 `K-BO ยอดหุ่นยนต์`, SD03-003 `นายนิรยบาล แว่น`, and SD02-004 `ริกกี้ เพื่อนรัก`.
+Counts below are overlapping pattern matches across exact database rows; duplicates count separately. Opponent Avatar-summon reactions 2; opponent Magic-use clauses 10; cancellation 44; destruction prevention 2; Modification equip restriction 32; continuous POWER/Symbol modifiers 170; end-of-turn self-exit/removal 37; conditional `ถ้า...:` clauses 18; Hell recovery/summon/banish 304; ability-counts-as-Normal-Magic pattern 0. Representative exact `printId` and names are in the audit output; examples include SD06-015 `ปืนใหญ่ไทยประดิษฐ์`, BT08-036 `ขงเบ้ง กุนซือซ่อนกายแห่งจ๊กก๊ก`, BT10-073 `ดวงจันทร์วันเพ็ญ`, BT10-009 `K-BO ยอดหุ่นยนต์`, SD03-003 `นายนิรยบาล แว่น`, and SD02-004 `ริกกี้ เพื่อนรัก`.
 
-### Batch 4C-4 verification boundary
+### Batch 4D verification boundary
 
-`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. Batch 4C-4 currently has 107 remaining `PARSED_READY` rows not promoted: they include event timing, keywords, unresolved multi-clause effects, incomplete equip fixtures and typed trigger-plan failures. The 1,588 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
+`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. Batch 4D has 117 remaining `PARSED_READY` rows not promoted: they include event timing, keywords, unresolved multi-clause effects, incomplete equip fixtures, target-fixture gaps and typed trigger-plan failures. The 1,570 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
 
 **Step 4B-4 validation (historical):** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 442 tests**); `npm run build` passed; `git diff --check` passed; and the 1,833-row adapter audit returned **PARSED_READY 226 / UNSUPPORTED 1,603 / AMBIGUOUS 4**.
 
@@ -399,6 +399,6 @@ Batch 4C adds typed conditions for explicitly stated Avatar Zone, hand-size, and
 
 **Batch 4C-2 validation (historical):** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 457 tests**); `npm run build` passed; `git diff --check` passed; the full audit returned `PARSED_READY 232 / UNSUPPORTED 1,597 / AMBIGUOUS 4`, and the per-card harness reported `VERIFIED_WORKING 120`.
 
-### Batch 4C-4 validation
+### Batch 4D validation status
 
-Passed `npx tsc --noEmit`, `npm test` (**20 files / 468 tests**), `npm run build`, and `git diff --check`. The full 1,833-row adapter audit reports **PARSED_READY 241 / UNSUPPORTED 1,588 / AMBIGUOUS 4**; the exact per-card Game State harness reports **VERIFIED_WORKING 134**, with 107 ready rows not individually verified. Branch remains `v0/phase4-batch-4c-mass-grammar-expansion`; PR #22 has not been merged.
+Validation passed: `npx tsc --noEmit`; `npm test` (20 files / 486 tests); `npm run build`; `git diff --check`; and the full 1,833-row audit (**VERIFIED_WORKING 142 / PARSED_READY 259 / UNSUPPORTED 1,570 / AMBIGUOUS 4**). The target of 200+ verified rows was not reached; 117 parser-ready rows remain unverified and PR #22 is not ready to merge.

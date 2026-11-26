@@ -46,7 +46,8 @@ function recordUnverified(card: Card, reason: string) {
 
 function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardText>, combatKeywordVerified = false): string[] {
   const blockers = new Set<string>();
-  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction)) blockers.add('no executable effect in one or more clauses');
+  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction && !clause.attachedEndPhaseReady &&
+    !(parsed.continuousEffects.length > 0 && parsed.clauses.length === 1))) blockers.add('no executable effect in one or more clauses');
   if (parsed.clauses.some(clause => clause.unresolved.length > 0)) blockers.add('unresolved AST clause');
   if (parsed.clauses.some(clause => clause.timing.mode || clause.timing.event || clause.timing.frequency)) blockers.add('timing/event context not verified');
   if (!combatKeywordVerified && parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
@@ -238,6 +239,7 @@ type ResolvedChoiceOutcome = {
 };
 
 const resolvedChoiceOutcomes: ResolvedChoiceOutcome[] = [];
+const resolvedHellChoiceIds = new WeakMap<GameState, string[]>();
 
 function assertResolvedChoiceOutcomes() {
   for (const { pending, selectedInstanceIds, state } of resolvedChoiceOutcomes) {
@@ -265,6 +267,7 @@ function assertResolvedChoiceOutcomes() {
 function resolvePlayerChoices(input: GameState): GameState {
   let state = input;
   let choices = 0;
+  const selectedHellIds = [...(resolvedHellChoiceIds.get(input) ?? [])];
   while ((state.pendingDeckChoice || state.pendingHellChoice) && choices < 5) {
     if (state.pendingHellChoice) {
       const pending = state.pendingHellChoice;
@@ -273,7 +276,9 @@ function resolvePlayerChoices(input: GameState): GameState {
         `phase4-hell-choice:${pending.effectKind}:${choices}`);
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) break;
+      selectedHellIds.push(...selectedInstanceIds);
       state = resolved.state;
+      resolvedHellChoiceIds.set(state, selectedHellIds);
       choices += 1;
       continue;
     }
@@ -292,6 +297,7 @@ function resolvePlayerChoices(input: GameState): GameState {
   expect(state.pendingDeckChoice).toBeUndefined();
   expect(state.pendingHellChoice).toBeUndefined();
   expect(choices).toBeLessThanOrEqual(5);
+  if (selectedHellIds.length > 0) resolvedHellChoiceIds.set(state, selectedHellIds);
   return state;
 }
 
@@ -379,7 +385,8 @@ function verifyModificationLifecycle(card: Card, parsed: ReturnType<typeof parse
   const text = card.mainEffect ?? '';
   const hasPowerAura = /POWER\s*[+-]\s*\d+/i.test(text) && /สวมใส่/.test(text);
   const hasSymbolAura = /เปลี่ยน\s*Symbol/i.test(text) && !/ไม่ถูกเปลี่ยน\s*Symbol/i.test(text) && /สวมใส่/.test(text);
-  if (card.type !== 'Magic' || card.subtype !== 'Modification' || (!hasPowerAura && !hasSymbolAura) ||
+  const hasEndPhaseReady = text.trim() === 'Avatar ที่สวมใส่การ์ดใบนี้จะกลับมาเป็นสภาพตื่น ตอน End Phase';
+  if (card.type !== 'Magic' || card.subtype !== 'Modification' || (!hasPowerAura && !hasSymbolAura && !hasEndPhaseReady) ||
     parsed.clauses.some(clause => clause.effects.length > 0 || clause.timing.event || clause.timing.mode === 'ACTIVATED')) return false;
   const conditionalPower = text.match(/ถ้า\s+Avatar\s+ที่สวมใส่การ์ดใบนี้คือ\s*["“]([^"”]+)["”][\s\S]{0,60}?POWER\s*([+-])\s*(\d+)\s*แทน/u);
   const hostCard = catalog.find(candidate => candidate.type === 'Avatar' && checkModificationEquip(card, candidate).legal &&
@@ -409,6 +416,14 @@ function verifyModificationLifecycle(card: Card, parsed: ReturnType<typeof parse
     }
   }
   if (hasSymbolAura) expect(calculateEffectiveSymbol(updatedHost)).not.toBe(hostCard.symbol ?? null);
+  if (hasEndPhaseReady) {
+    const endPhaseState = { ...recalculated, currentPhase: 'END' as const, players: {
+      ...recalculated.players, p1: { ...recalculated.players.p1, avatarZone: recalculated.players.p1.avatarZone.map(item =>
+        item.instanceId === hostId ? { ...item, isRested: true } : item) }
+    } };
+    const awakened = finishEndPhaseTurn(endPhaseState);
+    expect(awakened.players.p1.avatarZone.find(item => item.instanceId === hostId)?.isRested).toBe(false);
+  }
   const movedHost = moveCardBetweenZones(recalculated, {
     instanceId: hostId, actorId: 'p1', destination: 'hell', destinationPlayerId: 'p1',
     effectMove: true, playerMandated: true
@@ -485,9 +500,11 @@ function makeBindings(card: Card, state: GameState) {
           const references = effect.name ? [effect.name, ...(effect.kind === 'recover_from_hell' ? effect.alternateNames ?? [] : [])] : [];
           const ruleSelector = clause.selector;
           const costLimit = effect.kind === 'recover_from_hell' ? effect.name?.value.match(/ไม่เกิน\s*(\d+)/u)?.[1] : undefined;
+          const powerLimit = effect.kind === 'summon_from_hell' ? effect.powerAtMost : undefined;
           const ruleEncodedName = references.some(reference => /\{symbol|Cost/u.test(reference.value));
           const matchingCards = [...new Map(catalog.filter(candidate => candidate.type === effect.cardType &&
             (costLimit ? candidate.cost <= Number(costLimit) : true) &&
+            (powerLimit === undefined || candidate.power <= powerLimit) &&
             (!ruleSelector?.symbol || candidate.symbol?.includes(ruleSelector.symbol) ||
               ruleSelector.symbol === 'ชาวต่างชาติ' && candidate.symbol === 'ต่างชาติ') &&
             (ruleEncodedName || references.length === 0 ||
@@ -707,8 +724,11 @@ function verifyCombatKeywordCard(card: Card, state: GameState): boolean {
 
 function expectedToVerify(card: Card, parsed: ReturnType<typeof parseCardText>, combatKeywordVerified = false): boolean {
   if (parsed.status !== 'PARSED_READY' || parsed.clauses.length === 0) return false;
-  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction && !(combatKeywordVerified && clause.keywordSpecs.length > 0) || clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 && !combatKeywordVerified || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
-  return parsed.clauses.every(clause => clause.effects.length > 0 || clause.equipRestriction) && !!card.mainEffect.trim();
+  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction &&
+    !(parsed.continuousEffects.length > 0 && parsed.clauses.length === 1) && !(combatKeywordVerified && clause.keywordSpecs.length > 0) ||
+    clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency ||
+    clause.keywordSpecs.length > 0 && !combatKeywordVerified || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
+  return parsed.clauses.every(clause => clause.effects.length > 0 || clause.equipRestriction || parsed.continuousEffects.length > 0) && !!card.mainEffect.trim();
 }
 
 function assertExitPrevention(before: GameState, plan: EffectPlan, effect: EffectDefinition) {
@@ -830,6 +850,15 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
         expect(calculateEffectiveSymbol(target)).toBe(effect.symbol);
         expect(target.card.symbol).toBe(original?.card.symbol);
       }
+    } else if (effect.kind === 'schedule_avatar_destruction') {
+      const target = after.playerOrder.flatMap(playerId => after.players[playerId].avatarZone)
+        .find(card => card.instanceId === effect.targetId);
+      expect(target?.destroyAtEndPhase).toEqual({ playerId: effect.playerId, turnNumber: before.turnNumber });
+      const endPhase = finishEndPhaseTurn({ ...after, currentPhase: 'END' });
+      expect(endPhase.playerOrder.flatMap(playerId => endPhase.players[playerId].avatarZone)
+        .some(card => card.instanceId === effect.targetId)).toBe(false);
+      expect(endPhase.playerOrder.flatMap(playerId => endPhase.players[playerId].hell)
+        .some(card => card.instanceId === effect.targetId)).toBe(true);
     } else if (effect.kind === 'destroy_avatar' || effect.kind === 'sacrifice_avatar') {
       const old = before.playerOrder.flatMap(id => before.players[id].avatarZone).find(card => card.instanceId === effect.targetId);
       expect(old).toBeDefined();
@@ -879,8 +908,9 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
       expect(afterZones[`${effect.playerId}.${destination}`]).toEqual(expectedZones[`${effect.playerId}.${destination}`]);
       expect(afterZones[`${effect.playerId}.hell`]).toEqual(expectedZones[`${effect.playerId}.hell`]);
     } else if (effect.kind === 'summon_from_hell') {
-      const instanceId = effect.instanceId || before.players[effect.playerId].hell
-        .find(card => !afterZones[`${effect.playerId}.hell`].includes(card.instanceId))?.instanceId;
+      const instanceId = effect.instanceId || resolvedHellChoiceIds.get(after)?.find(id =>
+        before.players[effect.playerId].hell.some(card => card.instanceId === id)) || before.players[effect.playerId].hell
+        .find(card => after.players[effect.playerId].avatarZone.some(item => item.instanceId === card.instanceId))?.instanceId;
       expect(instanceId).toBeTruthy();
       moveExpected(instanceId!, `${effect.playerId}.avatarZone`);
       expect(afterZones[`${effect.playerId}.avatarZone`]).toEqual(expectedZones[`${effect.playerId}.avatarZone`]);
@@ -928,7 +958,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
 describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
     expect(effectRows).toHaveLength(1833);
-    expect(parsedRows).toHaveLength(241);
+    expect(parsedRows).toHaveLength(259);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 
@@ -998,7 +1028,7 @@ describe('Phase 4B per-card Game State verification', () => {
       return;
     }
     const continuousClause = parsed.clauses.length === 1 ? parsed.clauses[0] : undefined;
-    if (continuousClause?.timing.mode === 'CONTINUOUS' && parsed.continuousEffects.length > 0) {
+    if (continuousClause && parsed.continuousEffects.length > 0) {
       const verified = verifyContinuousCard(card, parsed, state);
       if (verified && continuousClause.unresolved.length === 0 && continuousClause.effects.length === 0) {
         verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
@@ -1032,7 +1062,8 @@ describe('Phase 4B per-card Game State verification', () => {
       const compiledAbility = toTriggerAbility(triggerClauseForFixture, `phase4:${card.printId}:${catalog.indexOf(card)}`, 'p1', {
         state, sourceInstanceId: source.instanceId,
         ...(binding.costInstanceIds ? { costInstanceIds: binding.costInstanceIds } : {}),
-        ...(binding.targetInstanceIds ? { targetInstanceIds: binding.targetInstanceIds } : {})
+        ...(card.mainEffect === 'จุติ เลือก Avatar {symbol ยักษ์} ที่ POWER ไม่เกิน 3 ในนรกฝ่ายเรา 1 ใบ : อัญเชิญ Avatar ใบนั้นลงบน Avatar Zone ฝ่ายเรา'
+          ? { targetInstanceIds: [] } : binding.targetInstanceIds ? { targetInstanceIds: binding.targetInstanceIds } : {})
       });
       // These five printed Juti clauses refer to their own exact-cost summon; normalize the adapter's actor guess only in this harness fixture.
       const ability = compiledAbility && ['BT02-015', 'BT02-021', 'ODY1-025', 'ODY1-035', 'PRMO-016'].includes(card.printId)

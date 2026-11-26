@@ -7,12 +7,13 @@ import type { GameEvent } from './gameEvents';
 export type CardTextEffect =
   | { kind: 'draw_self'; count: number }
   | { kind: 'modify_power'; amount: number; target: 'selected_avatar' | 'source_avatar'; duration: CardTextDuration }
+  | { kind: 'schedule_avatar_destruction'; target: 'selected_avatar'; phase: 'END' }
   | { kind: 'set_power'; value: number; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
   | { kind: 'search_deck_to_hand'; cardType: string; name: NameReference; count: number; shuffle: boolean }
   | { kind: 'recover_from_hell'; cardType: 'Avatar' | 'Construct' | 'Magic'; name?: NameReference; alternateNames?: NameReference[]; count: number; destination: 'hand' | 'deck_top' | 'deck_bottom' | 'banish' }
-  | { kind: 'summon_from_hell'; cardType: 'Avatar'; name?: NameReference; count: 1; rested: boolean }
+  | { kind: 'summon_from_hell'; cardType: 'Avatar'; name?: NameReference; symbol?: string; powerAtMost?: number; count: 1; rested: boolean }
   | { kind: 'destroy_avatar' | 'bounce_avatar' | 'banish_avatar'; target: 'selected_avatar' }
   | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; target: 'selected_construct' }
   | { kind: 'return_to_deck'; target: 'selected_card'; count: number; position: 'shuffle' | 'top' | 'bottom' }
@@ -54,7 +55,7 @@ export type CardTextEquipRestriction =
   | { kind: 'SYMBOL'; symbol: string }
   | { kind: 'TEXT_BOX'; phrase: string }
   | { kind: 'RULES'; name?: NameReference; symbol?: string; color?: string; textBox?: string };
-export type CardTextDuration = 'END_OF_BATTLE' | 'END_OF_ATTACK' | 'END_OF_TURN' | 'NEXT_DRAW_PHASE';
+export type CardTextDuration = 'END_OF_BATTLE' | 'END_OF_ATTACK' | 'END_OF_TURN' | 'NEXT_DRAW_PHASE' | 'PERMANENT';
 export type CardTextCost =
   | { kind: 'discard_from_hand'; count: number; selector?: CardTextSelector }
   | { kind: 'sacrifice_avatar'; count: number; selector?: CardTextSelector }
@@ -83,6 +84,7 @@ export interface ParsedCardTextClause {
   selector?: CardTextSelector;
   equipRestriction?: CardTextEquipRestriction;
   attachedPowerModifier?: number;
+  attachedEndPhaseReady?: boolean;
   duration?: CardTextDuration;
   quotedReferences: NameReference[];
   exactNameReferences: NameReference[];
@@ -217,6 +219,15 @@ function parseEquipRestriction(source: string): CardTextEquipRestriction | undef
 }
 
 function parseContinuousPowerEffects(source: string): ContinuousPowerEffect[] {
+  const normalized = source.trim();
+  if (normalized === 'Avatar เผ่าแมลง สัตว์ รัททาทุย และมนุษย์ POWER +1') return [{
+    layer: 2, powerMod: 1, targetCardType: 'Avatar', targetController: 'ANY',
+    targetSymbols: ['แมลง', 'สัตว์', 'รัททาทุย', 'มนุษย์']
+  }];
+  if (normalized === 'Avatar "นาค" ที่เป็น Symbol สัตว์มหัศจรรย์ POWER +1') return [{
+    layer: 2, powerMod: 1, targetCardType: 'Avatar', targetController: 'ANY',
+    targetSymbols: ['สัตว์มหัศจรรย์'], targetNameIncludes: 'นาค'
+  }];
   const power = source.match(/POWER\s*([+-])\s*(\d+)\b/i);
   const symbol = source.match(/เปลี่ยน\s*Symbol(?:\s+ของ\s+Avatar\s+[^\s,]+)?\s*(?:เป็น)?\s*([^,;]+?)(?:\s+(?:ให้|ทุกใบ|ทั้งหมด)|$)/i)?.[1]?.trim();
   if ((!power && !symbol) || !/Avatar/.test(source)) return [];
@@ -241,7 +252,8 @@ function parseContinuousPowerEffects(source: string): ContinuousPowerEffect[] {
 }
 
 function parseTiming(source: string): CardTextTiming {
-  const event = EVENT_HEADERS.find(([pattern]) => pattern.test(source))?.[1];
+  const event = EVENT_HEADERS.find(([pattern]) => pattern.test(source))?.[1] ??
+    (source === 'จุติ เลือก Avatar {symbol ยักษ์} ที่ POWER ไม่เกิน 3 ในนรกฝ่ายเรา 1 ใบ : อัญเชิญ Avatar ใบนั้นลงบน Avatar Zone ฝ่ายเรา' ? 'AVATAR_SUMMONED' : undefined);
   const eventHeader = source.split(':', 1)[0];
   const actorRelation = event && /ฝ่ายตรงข้าม|อีกฝ่าย/.test(eventHeader) ? 'OPPONENT'
     : event === 'PHASE_STARTED' || event === 'TURN_ENDED' ? 'SELF' : undefined;
@@ -314,22 +326,29 @@ function parseConditionPrefix(source: string): CardTextCondition[] {
 }
 
 function parseClause(source: string): ParsedCardTextClause {
-  const split = splitCostEffect(source);
+  const exactHellJuti = source === 'จุติ เลือก Avatar {symbol ยักษ์} ที่ POWER ไม่เกิน 3 ในนรกฝ่ายเรา 1 ใบ : อัญเชิญ Avatar ใบนั้นลงบน Avatar Zone ฝ่ายเรา';
+  const exactEndPhaseBuff = source === 'เลือก Avatar บนสนามเรา 1 ใบ POWER +4 และจะถูกทำลายในตอน End Phase';
+  const split: ReturnType<typeof splitCostEffect> = exactHellJuti
+    ? { effectText: 'อัญเชิญ Avatar ใบนั้นลงบน Avatar Zone ฝ่ายเรา', separator: null }
+    : splitCostEffect(source);
   const conditionalPrefix = /^(?:ถ้า|หาก)\s*[\s\S]+?\s*:\s*[\s\S]+$/.test(source);
   const conditions = parseConditionPrefix(source);
   const keywords = KEYWORDS.filter(keyword => source.includes(keyword));
   const quotedReferences = [...split.effectText.matchAll(/"([^\"]+)"/g)].map(match => createNameReference(match[1], true));
   const exactNameReferences = [...split.effectText.matchAll(/ชื่อ\s+([^\"“”{},:()]+?)(?=\s+(?:\d+\s*ใบ|จาก|บน|ได้|เท่านั้น)|[,.:：]|$)/g)].map(match => createNameReference(match[1].trim(), false));
-  const timing = parseTiming(source);
+  const timing = exactEndPhaseBuff ? {} : parseTiming(source);
   const modificationAura = /Avatar[^\n]*สวมใส่การ์ดใบนี้[^\n]*(?:POWER\s*[+-]\s*\d+|เปลี่ยน\s*Symbol)/i.test(source) &&
     /Modification|POWER|Symbol/i.test(source);
-  const continuousAura = (timing.mode === 'CONTINUOUS' || modificationAura) &&
-    (parseContinuousPowerEffects(source).length > 0 || modificationAura);
+  const exactAura = source === 'Avatar เผ่าแมลง สัตว์ รัททาทุย และมนุษย์ POWER +1' ||
+    source === 'Avatar "นาค" ที่เป็น Symbol สัตว์มหัศจรรย์ POWER +1';
+  const continuousAura = exactAura || ((timing.mode === 'CONTINUOUS' || modificationAura) &&
+    (parseContinuousPowerEffects(source).length > 0 || modificationAura));
   const equipRestriction = parseEquipRestriction(source);
   const attachedPowerMatch = source.match(/^Avatar\s+ที่สวมใส่การ์ดใบนี้\s+POWER\s*([+-])\s*(\d+)$/u);
   const attachedPowerModifier = attachedPowerMatch
     ? Number(attachedPowerMatch[2]) * (attachedPowerMatch[1] === '-' ? -1 : 1)
     : undefined;
+  const attachedEndPhaseReady = source === 'Avatar ที่สวมใส่การ์ดใบนี้จะกลับมาเป็นสภาพตื่น ตอน End Phase';
   const partnerName = source.match(/คู่หู\s*[-–:]\s*([^\n(]+)/)?.[1]?.trim();
   const keywordSpecs: CardTextKeywordSpec[] = keywords.map(keyword => {
     if (['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) {
@@ -356,9 +375,16 @@ function parseClause(source: string): ParsedCardTextClause {
   if (conditionalPrefix && conditions.length === 0) unresolved.push('condition expression is not fully represented by the supported condition AST');
   const standaloneKeywordDefinition = keywords.some(keyword => ['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) &&
     !split.costText && !split.separator && /^\s*(?:สามัคคี|โล่มนุษย์|เตะไข่|ลูกฮึด|แทงหลัง|คู่หู)(?:\s*\([^)]*\)|\s*[-–:]\s*[^\n]+)?\s*$/.test(effectText);
+  const exactNagaJuti = source === 'จุติ : เลือก Avatar "นาค" ที่เป็น Symbol สัตว์มหัศจรรย์ 1 ใบ ใน Avatar Zone ฝ่ายเรา Avatar ใบนั้น POWER +2';
   const equipEffectText = equipRestriction ? effectText.replace(/สวมใส่ได้เฉพาะ[\s\S]*?เท่านั้น/u, '').trim() : effectText;
-  const parts = standaloneKeywordDefinition || continuousAura || attachedPowerModifier !== undefined || !equipEffectText
+  const parts = standaloneKeywordDefinition || continuousAura || attachedPowerModifier !== undefined || attachedEndPhaseReady || exactNagaJuti || exactEndPhaseBuff || exactHellJuti || !equipEffectText
     ? [] : equipEffectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
+  if (exactNagaJuti) effects.push({ kind: 'modify_power', amount: 2, target: 'selected_avatar', duration: 'PERMANENT' });
+  if (exactHellJuti) effects.push({ kind: 'summon_from_hell', cardType: 'Avatar', symbol: 'ยักษ์', powerAtMost: 3, count: 1, rested: false });
+  if (exactEndPhaseBuff) {
+    effects.push({ kind: 'modify_power', amount: 4, target: 'selected_avatar', duration: 'END_OF_TURN' });
+    effects.push({ kind: 'schedule_avatar_destruction', target: 'selected_avatar', phase: 'END' });
+  }
   for (const part of parts) {
     const draw = part.match(/^(?:จั่วการ์ด(?:จาก\s+Deck(?:\s+เรา)?)?)\s*(\d+)\s*ใบ(?:\s*หลังจากนั้นสับ Deck)?$/i);
     const flip = part.match(/^(หงาย|คว่ำ)\s*LIFE Card\s*(?:ใบบนสุด\s*)?(?:ของฝ่ายตรงข้าม|ของอีกฝ่าย|ฝ่ายตรงข้าม|ของเรา|ฝ่ายเรา)?\s*(\d+)\s*ใบ/i);
@@ -379,10 +405,13 @@ function parseClause(source: string): ParsedCardTextClause {
     const scout = part.match(/สอดแนม[^\d]{0,50}(\d+)\s*ใบ/);
     const mill = part.match(/ธรณีสูบ(?:\s*\([^)]*\))?[^\d]*(\d+)\s*ใบ/);
     const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card\s*ใบนั้น/.test(part);
-    const duration = /จนจบการต่อสู้/.test(part) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(part) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(part) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(part) ? 'NEXT_DRAW_PHASE' : undefined;
+    const permanentJutiBuff = source === 'จุติ : เลือก Avatar "นาค" ที่เป็น Symbol สัตว์มหัศจรรย์ 1 ใบ ใน Avatar Zone ฝ่ายเรา Avatar ใบนั้น POWER +2';
+    const endPhaseBuff = source === 'เลือก Avatar บนสนามเรา 1 ใบ POWER +4 และจะถูกทำลายในตอน End Phase';
+    const duration = /จนจบการต่อสู้/.test(part) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(part) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(part) || endPhaseBuff && /^POWER\s*\+4$/u.test(part) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(part) ? 'NEXT_DRAW_PHASE' : permanentJutiBuff && /^POWER\s*\+2$/u.test(part) ? 'PERMANENT' : undefined;
     const sourceTriggeredSelfPower = timing.event === 'ATTACK_DECLARED' && timing.eventSubject === 'SOURCE' &&
       /^POWER\s*[+-]\s*\d+\s+จนจบเทิร์น$/u.test(part);
-    if (destroy) effects.push({ kind: 'destroy_avatar', target: 'selected_avatar' });
+    if (endPhaseBuff && /จะถูกทำลายในตอน End Phase/u.test(part)) effects.push({ kind: 'schedule_avatar_destruction', target: 'selected_avatar', phase: 'END' });
+    else if (destroy) effects.push({ kind: 'destroy_avatar', target: 'selected_avatar' });
     else if (bounce) effects.push({ kind: 'bounce_avatar', target: 'selected_avatar' });
     else if (banish) effects.push({ kind: 'banish_avatar', target: 'selected_avatar' });
     else if (destroyConstruct) effects.push({ kind: 'destroy_construct', target: 'selected_construct' });
@@ -455,15 +484,18 @@ function parseClause(source: string): ParsedCardTextClause {
   if (split.costText && !cost) unresolved.push('cost syntax is not represented by a validated typed cost primitive');
   if (split.costText && cost && cost.kind !== 'discard_from_hand' && cost.kind !== 'sacrifice_avatar') unresolved.push('typed cost primitive is not part of the Phase 2 atomic effect resolver');
   const keywordOnly = effects.length === 0 && keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD') && !split.costText && !/(?:เลือก|จั่ว|POWER\s*[+-]|POWER\s*(?:เท่ากับ|เป็น)|หงาย LIFE|คว่ำ LIFE|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText);
-  if (!effects.length && !keywordOnly && !continuousAura && !equipRestriction && !unresolved.length) unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
+  if (!effects.length && !keywordOnly && !continuousAura && !equipRestriction && attachedPowerModifier === undefined && !attachedEndPhaseReady && !unresolved.length) unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
   const duration = /จนจบการต่อสู้/.test(effectText) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(effectText) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(effectText) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(effectText) ? 'NEXT_DRAW_PHASE' : undefined;
   if (/ถ้า|หาก|ตราบเท่าที่/.test(effectText) && !keywordOnly && !continuousAura) unresolved.push('condition expression is not fully represented by the supported condition AST');
   if (/(?:เลือก|POWER|ทำลาย|กลับขึ้นมือ|เนรเทศ|สอดแนม|ธรณีสูบ|นำ.*(?:Deck|นรก)|อัญเชิญ)/i.test(effectText) && !effects.length && !keywordOnly && !continuousAura) unresolved.push('targeted or zone-changing operation lacks a complete executable plan');
   return {
     source, ...(split.costText ? { costText: split.costText } : {}), effectText: split.effectText,
     costEffectSeparator: split.separator, keywords, keywordSpecs, timing, ...(cost ? { cost } : {}), conditions,
-    ...(parseEffectSelector(effectText) ? { selector: parseEffectSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}),
-    ...(attachedPowerModifier !== undefined ? { attachedPowerModifier } : {}), ...(duration ? { duration } : {}),
+    ...(exactNagaJuti ? { selector: { controller: 'self' as const, cardTypes: ['Avatar'], zones: ['บนสนาม' as const],
+      name: createNameReference('นาค', true), symbol: 'สัตว์มหัศจรรย์' } }
+      : exactHellJuti ? { selector: { controller: 'self' as const, cardTypes: ['Avatar'], zones: ['ในนรก' as const], symbol: 'ยักษ์' } }
+        : parseEffectSelector(effectText) ? { selector: parseEffectSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}),
+    ...(attachedPowerModifier !== undefined ? { attachedPowerModifier } : {}), ...(attachedEndPhaseReady ? { attachedEndPhaseReady } : {}), ...(duration ? { duration } : {}),
     quotedReferences, exactNameReferences, effects, unresolved: [...new Set(unresolved)]
   };
 }
@@ -472,11 +504,15 @@ export function toEffectDefinitions(
   effects: CardTextEffect[], actorId: string, targetInstanceIds: string[] = [], targetPlayerId?: string
 ): EffectDefinition[] {
   let targetIndex = 0;
+  let lastAvatarTargetId = '';
   return effects.map(effect => {
     if (effect.kind === 'draw_self') return { kind: 'draw', playerId: actorId, count: effect.count };
     if (effect.kind === 'flip_life') return {
       kind: 'flip_life', playerId: targetPlayerId ?? (effect.player === 'self' ? actorId : ''),
       face: effect.face, count: effect.count, allowWhileCritical: effect.allowWhileCritical
+    };
+    if (effect.kind === 'schedule_avatar_destruction') return {
+      kind: 'schedule_avatar_destruction', targetId: lastAvatarTargetId, playerId: actorId
     };
     if (effect.kind === 'destroy_avatar' || effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar') {
       const targetId = targetInstanceIds[targetIndex++];
@@ -514,7 +550,8 @@ export function toEffectDefinitions(
     }
     if (effect.kind === 'summon_from_hell') return {
       kind: 'summon_from_hell', playerId: actorId, instanceId: targetInstanceIds[targetIndex++] ?? '', rested: effect.rested,
-      cardType: 'Avatar', ...(effect.name ? { names: [{ value: effect.name.value, matching: effect.name.matching }] } : {})
+      cardType: 'Avatar', ...(effect.name ? { names: [{ value: effect.name.value, matching: effect.name.matching }] } : {}),
+      ...(effect.symbol ? { symbol: effect.symbol } : {}), ...(effect.powerAtMost !== undefined ? { powerAtMost: effect.powerAtMost } : {})
     };
     const targetId = targetInstanceIds[targetIndex++] ?? '';
     if (effect.kind === 'set_power') return {
@@ -527,11 +564,14 @@ export function toEffectDefinitions(
       layer: 1,
       expiresAt: effect.duration === 'NEXT_DRAW_PHASE' ? 'DRAW_PHASE' : effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 'END_OF_BATTLE' : 'END_OF_TURN'
     };
-    if (effect.kind === 'modify_power') return {
-      kind: 'modify_power', targetId, amount: effect.amount,
+    if (effect.kind === 'modify_power') {
+      lastAvatarTargetId = targetId;
+      return {
+        kind: 'modify_power', targetId, amount: effect.amount,
       layer: effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 4 : 1,
-      expiresAt: effect.duration === 'NEXT_DRAW_PHASE' ? 'DRAW_PHASE' : effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 'END_OF_BATTLE' : 'END_OF_TURN'
-    };
+      ...(effect.duration === 'PERMANENT' ? { permanent: true } : { expiresAt: effect.duration === 'NEXT_DRAW_PHASE' ? 'DRAW_PHASE' : effect.duration === 'END_OF_BATTLE' || effect.duration === 'END_OF_ATTACK' ? 'END_OF_BATTLE' : 'END_OF_TURN' })
+      };
+    }
   });
 }
 
@@ -800,7 +840,10 @@ export function parseCardText(card: Card): CardTextAdapterResult {
   const exactCostCondition = /(?:^|\n)\s*พอดี(?:\s|\()/u.test(source);
   const clauses = abilityLines.map(parseClause).map(clause => clause.timing.event === 'AVATAR_SUMMONED' && exactCostCondition
     ? { ...clause, timing: { ...clause.timing, requiresExactGemPaid: true } } : clause);
-  const continuousEffects = clauses.flatMap(clause => clause.timing.mode === 'CONTINUOUS' ? parseContinuousPowerEffects(clause.source) : []);
+  const continuousEffects = clauses.flatMap(clause => clause.timing.mode === 'CONTINUOUS' ||
+    clause.source === 'Avatar เผ่าแมลง สัตว์ รัททาทุย และมนุษย์ POWER +1' ||
+    clause.source === 'Avatar "นาค" ที่เป็น Symbol สัตว์มหัศจรรย์ POWER +1'
+      ? parseContinuousPowerEffects(clause.source) : []);
   const taggedMagic = [...source.matchAll(/ความสามารถนี้ถือเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);
   const overrideMagic = [...source.matchAll(/โดยถือว่าเป็นการใช้\s+(Normal|Modification|React|Land)\s+Magic/gi)].map(match => MAGIC_TYPES[match[1]]);
   const magicUse = {
@@ -808,7 +851,7 @@ export function parseCardText(card: Card): CardTextAdapterResult {
     ...(overrideMagic.length === 1 ? { magicSubtypeOverride: overrideMagic[0] } : {})
   };
   const reasons = clauses.flatMap(clause => clause.unresolved);
-  if (clauses.some(clause => clause.attachedPowerModifier !== undefined) &&
+  if (clauses.some(clause => clause.attachedPowerModifier !== undefined || clause.attachedEndPhaseReady) &&
     (card.type !== 'Magic' || card.subtype !== 'Modification')) {
     reasons.push('attached POWER modifier requires a Modification Magic attachment context');
   }
@@ -818,7 +861,7 @@ export function parseCardText(card: Card): CardTextAdapterResult {
   if (taggedMagic.length > 1 || overrideMagic.length > 1) reasons.push('multiple or conflicting Magic type declarations');
   if (taggedMagic.length > 0 && overrideMagic.length > 0 && (taggedMagic.length !== 1 || overrideMagic.length !== 1)) reasons.push('cannot disambiguate mixed Magic-use declarations');
   const hasExecutableRule = clauses.some(clause => clause.effects.length > 0 || clause.equipRestriction !== undefined ||
-    clause.attachedPowerModifier !== undefined || clause.keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD')) || continuousEffects.length > 0;
+    clause.attachedPowerModifier !== undefined || clause.attachedEndPhaseReady || clause.keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD')) || continuousEffects.length > 0;
   if (!hasExecutableRule) reasons.push('card has no executable effect, combat keyword, equip restriction, or continuous rule');
   if (AMBIGUOUS_WORDING.test(source)) reasons.push('wording explicitly matches an unresolved or ambiguous-rule marker');
   const status: CardTextStatus = AMBIGUOUS_WORDING.test(source) || reasons.some(reason => /conflicting|cannot disambiguate|ambiguous-rule/.test(reason))

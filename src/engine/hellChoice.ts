@@ -27,11 +27,13 @@ export function beginHellChoice(state: GameState, request: HellChoiceRequest): H
     return { ok: false, state, reason: 'Hell choice count must be a positive integer' };
   }
   if (state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification ||
-    state.pendingEndPhaseDiscardPlayerId || state.pendingExitPrevention || state.reactionWindow) {
+    state.pendingEndPhaseDiscardPlayerId || state.pendingExitPrevention) {
     return { ok: false, state, reason: 'Another game action is pending' };
   }
   const candidates = player.hell.filter(card => card.card.type === request.cardType &&
-    (!request.names?.length || request.names.some(reference => matchesName(card.card.name, reference)))
+    (!request.names?.length || request.names.some(reference => matchesName(card.card.name, reference))) &&
+    (!request.symbol || card.card.symbol?.includes(request.symbol)) &&
+    (request.powerAtMost === undefined || card.card.power <= request.powerAtMost)
   ).map(card => card.instanceId);
   if (candidates.length < request.count) return { ok: false, state, reason: 'Not enough matching cards in Hell' };
   const expectedRevision = (state.stateRevision ?? 0) + 1;

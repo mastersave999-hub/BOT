@@ -22,7 +22,8 @@ export type EffectCost =
 
 export type EffectDefinition =
   | { kind: 'draw'; playerId: string; count: number }
-  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 2 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
+  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 2 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE'; permanent?: boolean }
+  | { kind: 'schedule_avatar_destruction'; targetId: string; playerId: string }
   | { kind: 'set_power'; targetId: string; value: number; layer: 1 | 2 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
   | { kind: 'change_symbol'; targetId: string; symbol: string; layer: 1 | 2; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
   | { kind: 'flip_life'; playerId: string; face: 'up' | 'down'; count: number; allowWhileCritical?: boolean }
@@ -38,7 +39,7 @@ export type EffectDefinition =
   | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish'; cardType?: 'Avatar' | 'Construct' | 'Magic'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }> }
-  | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean; cardType?: 'Avatar'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }> }
+  | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean; cardType?: 'Avatar'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }>; symbol?: string; powerAtMost?: number }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
   | { kind: 'cancel_chain_entry'; targetId: string }
   | { kind: 'cancel_pending_magic' };
@@ -146,6 +147,15 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     }
     return next;
   },
+  schedule_avatar_destruction: ({ state, plan, effect }) => {
+    if (effect.kind !== 'schedule_avatar_destruction' || !effect.targetId) return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found || found.avatar.controllerId !== effect.playerId) return null;
+    return { ...state, players: { ...state.players, [found.playerId]: {
+      ...state.players[found.playerId], avatarZone: state.players[found.playerId].avatarZone.map(avatar =>
+        avatar.instanceId === effect.targetId ? { ...avatar, destroyAtEndPhase: { playerId: effect.playerId, turnNumber: state.turnNumber } } : avatar)
+    } } };
+  },
   modify_power: ({ state, plan, effect }) => {
     if (effect.kind !== 'modify_power' || !Number.isFinite(effect.amount)) return null;
     const found = findAvatar(state, effect.targetId);
@@ -157,7 +167,7 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       ...avatar,
       layerModifiers: [...avatar.layerModifiers, {
         layer: effect.layer ?? 1, powerMod: effect.amount, sourceCardId: `effect-${effect.targetId}-${state.eventLog.length}`,
-        expiresAt: effect.expiresAt ?? 'END_OF_TURN'
+        ...(effect.permanent ? {} : { expiresAt: effect.expiresAt ?? 'END_OF_TURN' })
       }]
     });
     return { ...state, players: { ...state.players, [found.playerId]: { ...player, avatarZone } } };
@@ -489,7 +499,8 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (!effect.instanceId && effect.cardType === 'Avatar') {
       const choice = beginHellChoice(state, {
         effectKind: 'summon_from_hell', playerId: effect.playerId, actorId: plan.actorId, authorizedViewerId: plan.actorId,
-        count: 1, cardType: 'Avatar', names: effect.names, destination: 'avatarZone', rested: effect.rested
+        count: 1, cardType: 'Avatar', names: effect.names, symbol: effect.symbol, powerAtMost: effect.powerAtMost,
+        destination: 'avatarZone', rested: effect.rested
       });
       return choice.ok ? choice.state : null;
     }
