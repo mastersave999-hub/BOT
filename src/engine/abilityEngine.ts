@@ -1,7 +1,23 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { calculateNetPower } from './layers';
+import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 
 type LayerMod = CardInstance['layerModifiers'][number];
+
+const UNSUPPORTED_EFFECT_PATTERNS: Array<[string, RegExp]> = [
+  ['conditional requirements', /(?:หาก|ถ้า)\s/],
+  ['mixed continuous and triggered text', /ต่อเนื่อง/],
+  ['search or selection from a private zone', /(?:นำ|เลือก|ค้นหา|หยิบ).{0,80}(?:Deck|เด็ค|นรก)|(?:Deck|เด็ค).{0,80}(?:นำ|เลือก|ค้นหา|หยิบ)/i],
+  ['discard, sacrifice, or activation costs', /ทิ้ง|เซ่นไหว้|สังเวย|เทิร์นละครั้ง|สั่งใช้/],
+  ['mill or scouting', /ธรณีสูบ|สอดแนม/],
+  ['prevention, cancellation, or control changes', /ยกเลิก(?!การใช้\s*Magic Card)|ป้องกัน|เปลี่ยนการควบคุม|เนรเทศ|มิติมืด/],
+  ['state changes not represented by the game model', /เปลี่ยนชื่อ|เปลี่ยน Symbol|เปลี่ยนสี|เปลี่ยนค่า Cost|ได้รับความสามารถ/],
+  ['Hell selection or recovery destination', /นรก.{0,80}(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ)|(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ).{0,80}นรก/]
+];
+
+export function getUnsupportedEffectReason(card: Card): string | undefined {
+  return UNSUPPORTED_EFFECT_PATTERNS.find(([, pattern]) => pattern.test(card.mainEffect || ''))?.[0];
+}
 
 export interface AbilityParseResult {
   hasJuti: boolean;           // จุติ (On summon with cost)
@@ -18,6 +34,7 @@ export interface AbilityParseResult {
   targetScope: 'ANY_AVATAR' | 'OWN_AVATAR' | 'OPPONENT_AVATAR' | 'NONE';
   drawCount: number;
   powerMod: number;
+  resetsPower: boolean;
   destroysTarget: boolean;
   destroysAllOpponentAvatars: boolean;
   bouncesTarget: boolean;
@@ -57,6 +74,7 @@ export function parseCardAbility(card: Card): AbilityParseResult {
   if (powerMatch) {
     powerMod = parseInt(powerMatch[1], 10);
   }
+  const resetsPower = /ปรับ\s*POWER.*กลับเป็น\s*POWER ตั้งต้น/.test(eff);
 
   // Parse destroy effects
   const destroysAllOpponentAvatars =
@@ -125,6 +143,7 @@ export function parseCardAbility(card: Card): AbilityParseResult {
     targetScope,
     drawCount,
     powerMod,
+    resetsPower,
     destroysTarget,
     destroysAllOpponentAvatars,
     bouncesTarget,
@@ -262,15 +281,106 @@ export function executeCardAbility(
 ): { state: GameState; logs: string[] } {
   const logs: string[] = [];
   let nextState = { ...state, players: { ...state.players } };
-  const actor = { ...nextState.players[actorId] };
-  if (!actor) return { state, logs };
+  const existingActor = nextState.players[actorId];
+  if (!existingActor) return { state, logs };
+  const actor = { ...existingActor };
 
   const parsed = parseCardAbility(sourceCard.card);
 
-  // Skip if summon didn't have จุติ
-  if (triggerType === 'SUMMON_JUTI' && !parsed.hasJuti) {
+  // Effects are dispatched only from the timing printed on the card. Previously,
+  // every parsed operation ran for every trigger (e.g. a Last Words draw ran on
+  // summon), which could apply effects before their legal timing.
+  const triggerIsValid = (() => {
+    switch (triggerType) {
+      case 'SUMMON_JUTI': return sourceCard.card.type === 'Avatar' && parsed.hasJuti;
+      case 'MAGIC_CAST': return sourceCard.card.type === 'Magic' &&
+        (sourceCard.card.subtype === 'Normal' || sourceCard.card.subtype === 'React');
+      case 'ON_ATTACK': return sourceCard.card.type === 'Avatar' && parsed.hasOnAttack;
+      case 'LAST_WORDS': return parsed.hasLastWords;
+      case 'LIFE_FLIP': return sourceCard.card.type === 'Life';
+      case 'CONSTRUCT_ACTIVATE': return sourceCard.card.type === 'Construct';
+      default: return false;
+    }
+  })();
+  if (!triggerIsValid) return { state, logs };
+
+  // Rule Book 3.2 pp.12–13 requires an effect to resolve as a whole and costs
+  // to be paid only when the complete effect is possible. Until the engine has
+  // explicit choices/payment state for these mechanics, refuse the whole effect
+  // instead of applying only the regex-recognized fragment.
+  const unsupportedReason = getUnsupportedEffectReason(sourceCard.card);
+  if (unsupportedReason) {
+    logs.push(`${sourceCard.card.name}: ยังไม่รองรับ${unsupportedReason} จึงไม่ทำผลใด ๆ`);
     return { state, logs };
   }
+
+  const hasResolvedOperation = parsed.drawCount > 0 || parsed.powerMod !== 0 || parsed.resetsPower ||
+    parsed.destroysTarget || parsed.destroysAllOpponentAvatars || parsed.bouncesTarget ||
+    parsed.summonsFromHell || parsed.recoversFromHell > 0 ||
+    (triggerType === 'MAGIC_CAST' && /ยกเลิกการใช้\s*Magic Card/.test(sourceCard.card.mainEffect || ''));
+  if (!hasResolvedOperation) {
+    logs.push(`${sourceCard.card.name}: ยังไม่มีตัวจัดการผลของความสามารถนี้ จึงไม่ทำผลใด ๆ`);
+    return { state, logs };
+  }
+
+  // Validate target legality before applying any portion of a multi-part effect.
+  const targetOwnerId = targetAvatarId
+    ? state.playerOrder.find(playerId => state.players[playerId]?.avatarZone.some(avatar => avatar.instanceId === targetAvatarId))
+    : undefined;
+  const targetRequired = parsed.needsTargetAvatar || parsed.destroysTarget || parsed.bouncesTarget ||
+    parsed.resetsPower || (parsed.powerMod !== 0 && triggerType !== 'ON_ATTACK');
+  const targetIsLegal = !targetRequired || (!!targetOwnerId &&
+    (parsed.targetScope !== 'OWN_AVATAR' || targetOwnerId === actorId) &&
+    (parsed.targetScope !== 'OPPONENT_AVATAR' || targetOwnerId !== actorId));
+  if (!targetIsLegal) {
+    logs.push(`${sourceCard.card.name}: เป้าหมายไม่ถูกต้องหรือไม่ได้เลือกเป้าหมาย ผลของการ์ดไม่ทำงาน`);
+    return { state, logs };
+  }
+
+  const effectText = sourceCard.card.mainEffect || '';
+  const effectDefinitions: Array<{ position: number; effect: EffectDefinition }> = [];
+  const addEffect = (needle: string, effect: EffectDefinition) => {
+    const position = effectText.indexOf(needle);
+    if (position >= 0) effectDefinitions.push({ position, effect });
+  };
+  if (parsed.drawCount > 0) addEffect('จั่ว', { kind: 'draw', playerId: actorId, count: parsed.drawCount });
+  if (parsed.destroysAllOpponentAvatars) addEffect('ทำลาย Avatar', { kind: 'destroy_opponent_avatars', actorId });
+  if (triggerType === 'ON_ATTACK' && parsed.powerMod !== 0) {
+    effectDefinitions.push({ position: effectText.indexOf('POWER'), effect: { kind: 'modify_power', targetId: sourceCard.instanceId, amount: parsed.powerMod, layer: 4, expiresAt: 'END_OF_TURN' } });
+  } else if (targetAvatarId && parsed.destroysTarget) addEffect('ทำลาย', { kind: 'destroy_avatar', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.bouncesTarget) addEffect('กลับขึ้นมือ', { kind: 'bounce_avatar', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.resetsPower) addEffect('ปรับ', { kind: 'reset_power', targetId: targetAvatarId });
+  else if (targetAvatarId && parsed.powerMod !== 0) addEffect('POWER', { kind: 'modify_power', targetId: targetAvatarId, amount: parsed.powerMod });
+  if (parsed.recoversFromHell > 0) {
+    const destination = /นรก.{0,80}นำขึ้นมือ|นำขึ้นมือ.{0,80}นรก/.test(effectText) ? 'hand' : 'deck';
+    addEffect('นรก', { kind: 'recover_from_hell', playerId: actorId, count: parsed.recoversFromHell, destination });
+  }
+  if (parsed.summonsFromHell) {
+    const candidates = actor.hell.filter(card => card.card.type === 'Avatar');
+    if (candidates.length !== 1) {
+      logs.push(`${sourceCard.card.name}: ต้องระบุ Avatar จากนรกอย่างชัดเจน จึงไม่ทำผลใด ๆ`);
+      return { state, logs };
+    }
+    addEffect('นรก', { kind: 'summon_from_hell', playerId: actorId, instanceId: candidates[0].instanceId });
+  }
+  effectDefinitions.sort((left, right) => left.position - right.position);
+  const resolved = resolveEffectPlan(state, { actorId, effects: effectDefinitions.map(item => item.effect) });
+  if (!resolved.ok) {
+    logs.push(`${sourceCard.card.name}: Effect Resolver ปฏิเสธผลทั้งหมด (${resolved.reason})`);
+    return { state, logs };
+  }
+  const resolvedState = recomputeContinuousAuras(resolved.state);
+  return { state: resolvedState, logs: effectDefinitions.map(({ effect }) => {
+    switch (effect.kind) {
+      case 'draw': return `${sourceCard.card.name}: จั่วการ์ด ${effect.count} ใบ`;
+      case 'modify_power': return `${sourceCard.card.name}: ปรับ POWER ${effect.amount >= 0 ? '+' : ''}${effect.amount}`;
+      case 'destroy_avatar': return `${sourceCard.card.name}: ทำลาย Avatar เป้าหมายลงนรก`;
+      case 'bounce_avatar': return `${sourceCard.card.name}: นำ Avatar เป้าหมายกลับขึ้นมือ`;
+      case 'destroy_opponent_avatars': return `${sourceCard.card.name}: ทำลาย Avatar ฝ่ายตรงข้ามทั้งหมด`;
+      case 'recover_from_hell': return `${sourceCard.card.name}: นำการ์ดจากนรกกลับ${effect.destination === 'hand' ? 'ขึ้นมือ' : 'เข้า Deck'}`;
+      case 'summon_from_hell': return `${sourceCard.card.name}: อัญเชิญ Avatar จากนรก`;
+    }
+  }) };
 
   // 1. Handle Draw Effect ("จั่วการ์ด X ใบ")
   if (parsed.drawCount > 0) {
@@ -290,7 +400,7 @@ export function executeCardAbility(
       const opp = { ...nextState.players[pid] };
       if (opp.avatarZone.length > 0) {
         const destroyedNames = opp.avatarZone.map(a => a.card.name).join(', ');
-        opp.hell = [...opp.hell, ...opp.avatarZone];
+        opp.hell = [...opp.hell, ...opp.avatarZone.flatMap(avatar => [avatar, ...avatar.attachedInstances])];
         opp.avatarZone = [];
         nextState.players[pid] = opp;
         logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar ฝ่ายตรงข้ามทั้งหมด (${destroyedNames})!`);
@@ -323,19 +433,27 @@ export function executeCardAbility(
   // 4. Handle Targeted Effects (Power Mod, Destroy Target, Bounce Target)
   if (targetAvatarId && triggerType !== 'ON_ATTACK') {
     for (const pid of nextState.playerOrder) {
-      const p = { ...nextState.players[pid] };
+      const p = pid === actorId ? actor : { ...nextState.players[pid] };
       const targetIdx = p.avatarZone.findIndex(a => a.instanceId === targetAvatarId);
       if (targetIdx !== -1) {
         const targetAvatar = p.avatarZone[targetIdx];
 
         if (parsed.destroysTarget) {
           p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
-          p.hell = [...p.hell, targetAvatar, ...(targetAvatar.attachedInstances || [])];
+          p.hell = [...p.hell, targetAvatar, ...targetAvatar.attachedInstances];
           logs.push(`💥 "${sourceCard.card.name}" ทำลาย Avatar "${targetAvatar.card.name}" ลงนรก!`);
         } else if (parsed.bouncesTarget) {
           p.avatarZone = p.avatarZone.filter(a => a.instanceId !== targetAvatarId);
+          p.hell = [...p.hell, ...targetAvatar.attachedInstances];
           p.hand = [...p.hand, { ...targetAvatar, isRested: false, layerModifiers: [], attachedInstances: [] }];
           logs.push(`🌪️ "${sourceCard.card.name}" นำ "${targetAvatar.card.name}" กลับขึ้นมือ!`);
+        } else if (parsed.resetsPower) {
+          const updatedTarget: CardInstance = {
+            ...targetAvatar,
+            layerModifiers: targetAvatar.layerModifiers.filter(modifier => modifier.sourceCardId.startsWith('aura-'))
+          };
+          p.avatarZone = p.avatarZone.map(a => (a.instanceId === targetAvatarId ? updatedTarget : a));
+          logs.push(`⚡ "${sourceCard.card.name}" คืน POWER ของ "${targetAvatar.card.name}" เป็นค่าเริ่มต้น`);
         } else if (parsed.powerMod !== 0) {
           const updatedTarget: CardInstance = {
             ...targetAvatar,
@@ -387,10 +505,12 @@ export function executeCardAbility(
   return { state: nextState, logs };
 }
 
-/**
- * Clears all end-of-turn temporary modifiers (Layer 1/4 one-turn buffs) at the start of End Phase / Turn change.
- */
-export function clearEndOfTurnModifiers(state: GameState): GameState {
+/** Expires only the modifiers whose explicit timing matches this boundary. */
+export function expireModifiersAt(
+  state: GameState,
+  timing: 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE',
+  playerId?: string
+): GameState {
   const newPlayers: Record<string, PlayerState> = {};
   for (const pid of state.playerOrder) {
     const p = state.players[pid];
@@ -399,9 +519,15 @@ export function clearEndOfTurnModifiers(state: GameState): GameState {
       ...p,
       avatarZone: p.avatarZone.map(a => ({
         ...a,
-        layerModifiers: a.layerModifiers.filter(m => m.sourceCardId.startsWith('aura-'))
+        layerModifiers: pid === playerId || playerId === undefined
+          ? a.layerModifiers.filter(m => m.expiresAt !== timing)
+          : a.layerModifiers
       }))
     };
   }
   return recomputeContinuousAuras({ ...state, players: newPlayers });
+}
+
+export function clearEndOfTurnModifiers(state: GameState): GameState {
+  return expireModifiersAt(state, 'END_OF_TURN');
 }

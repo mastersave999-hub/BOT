@@ -1,4 +1,22 @@
 import type { Card, GameState } from './types';
+import { validateGameState } from './gameRules';
+
+const HIDDEN_PRIVATE_CARD: Card = {
+  printId: 'hidden-private-card',
+  name: 'Hidden card',
+  type: 'Token',
+  soi: 1,
+  cost: 0,
+  gem: 0,
+  power: 0,
+  color: 'ไร้สี',
+  rarity: 'C',
+  mainEffect: '',
+  isOnlyOne: false,
+  isBias: false,
+  isCollab: false,
+  imageUrl: 'https://cdn.bottcg.com/cards/card-back.png'
+};
 
 const FACE_DOWN_LIFE_CARD: Card = {
   printId: 'hidden-life-card',
@@ -50,6 +68,8 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
           ? player
           : {
               ...player,
+              hand: player.hand.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
+              deck: player.deck.map(card => ({ ...card, card: HIDDEN_PRIVATE_CARD, isFaceUp: false })),
               lifeDeck: player.lifeDeck.map(card =>
                 card.isFaceUp ? card : { ...card, card: FACE_DOWN_LIFE_CARD }
               )
@@ -57,6 +77,67 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
       ])
     )
   };
+}
+
+export function restoreHiddenZonesFromCanonical(
+  incoming: GameState,
+  canonical: GameState,
+  senderPlayerId: string
+): GameState {
+  const players = { ...incoming.players };
+  for (const [playerId, incomingPlayer] of Object.entries(incoming.players)) {
+    if (playerId === senderPlayerId) continue;
+    const knownPlayer = canonical.players[playerId];
+    if (!knownPlayer) continue;
+    const knownInstances = new Map<string, (typeof knownPlayer.hand)[number]>();
+    const collect = (cards: typeof knownPlayer.hand) => cards.forEach(card => knownInstances.set(card.instanceId, card));
+    collect(knownPlayer.hand);
+    collect(knownPlayer.deck);
+    collect(knownPlayer.lifeDeck);
+    collect(knownPlayer.avatarZone);
+    collect(knownPlayer.constructZone);
+    collect(knownPlayer.magicZone);
+    collect(knownPlayer.hell);
+    collect(knownPlayer.darkDimension);
+    const restoreZone = (cards: typeof incomingPlayer.hand) => cards.map(card => {
+      const known = knownInstances.get(card.instanceId);
+      return known ? { ...known, isFaceUp: card.isFaceUp } : { ...card, card: HIDDEN_PRIVATE_CARD };
+    });
+    players[playerId] = {
+      ...incomingPlayer,
+      hand: restoreZone(incomingPlayer.hand),
+      deck: restoreZone(incomingPlayer.deck),
+      lifeDeck: incomingPlayer.lifeDeck.map(card => {
+        const known = knownPlayer.lifeDeck.find(item => item.instanceId === card.instanceId);
+        return known ? { ...known, isFaceUp: card.isFaceUp } : { ...card, card: FACE_DOWN_LIFE_CARD };
+      })
+    };
+  }
+  return { ...incoming, players };
+}
+
+export function isGameStateValidForSync(state: GameState): boolean {
+  return validateGameState(state) === null;
+}
+
+export function isLegalGameStateSync(previous: GameState, incoming: GameState, senderPlayerId: string): boolean {
+  if (!isGameStateValidForSync(incoming) || incoming.id !== previous.id || incoming.mode !== previous.mode ||
+    JSON.stringify(incoming.playerOrder) !== JSON.stringify(previous.playerOrder) ||
+    Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
+    Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
+  const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
+  if (!activePlayerId || senderPlayerId !== activePlayerId) return false;
+  const outgoingPlayer = previous.players[activePlayerId];
+  const incomingOutgoingPlayer = incoming.players[activePlayerId];
+  const endedTurn = incoming.currentTurnPlayerIndex !== previous.currentTurnPlayerIndex || incoming.turnNumber !== previous.turnNumber;
+  if (previous.currentPhase === 'END' && endedTurn && outgoingPlayer.hand.length > 7) {
+    const removedIds = outgoingPlayer.hand.filter(card => !incomingOutgoingPlayer?.hand.some(next => next.instanceId === card.instanceId)).map(card => card.instanceId);
+    const movedToHell = new Set(incomingOutgoingPlayer?.hell.map(card => card.instanceId) ?? []);
+    if (incomingOutgoingPlayer?.hand.length !== 7 || removedIds.length !== outgoingPlayer.hand.length - 7 || removedIds.some(id => !movedToHell.has(id))) return false;
+  }
+  const firstPlayerFirstTurn = previous.turnNumber === 1 && activePlayerId === previous.playerOrder[0];
+  if (previous.currentPhase === 'MAIN' && firstPlayerFirstTurn && incoming.currentPhase === 'BATTLE') return false;
+  return true;
 }
 
 export type RoomMode = 'DUEL' | 'AD_MUA';
@@ -67,19 +148,48 @@ export interface PlayerSetup {
   lifeDeck: Card[];
 }
 
+export interface ReactionCommand {
+  kind: 'PASS' | 'PLAY';
+  playerId: string;
+  windowId: string;
+  expectedRevision?: number;
+  commandId?: string;
+  cardInstanceId?: string;
+  targetInstanceId?: string;
+}
+
+export function isReactionCommandCurrent(
+  state: GameState,
+  command: ReactionCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const window = state.reactionWindow;
+  return !!window &&
+    Number.isInteger(window.revision) &&
+    command.playerId === authenticatedPlayerId &&
+    command.windowId === window.id &&
+    command.expectedRevision === window.revision &&
+    window.priorityPlayerId === authenticatedPlayerId;
+}
+
 export type NetMessage =
   | { type: 'HELLO'; setup: PlayerSetup }
   | { type: 'ROOM'; mode: RoomMode; capacity: number; names: string[] }
   | { type: 'REJECT'; reason: string }
   | { type: 'START'; state: GameState; myPlayerId: string }
   | { type: 'SYNC'; state: GameState; winner: string | null }
+  | {
+      type: 'REACTION_COMMAND';
+    command: ReactionCommand;
+
+    }
   | { type: 'PING' }
   | { type: 'LEAVE' };
 
 export interface RoomLink {
   send: (msg: NetMessage) => void;
   /** Messages received before the first subscriber attaches are buffered and replayed. */
-  onMessage: (cb: (msg: NetMessage) => void) => () => void;
+  onMessage: (cb: (msg: NetMessage, senderPlayerId?: string) => void) => () => void;
   /** Fires once nobody is connected any more (for a guest: the host is gone). */
   onClose: (cb: () => void) => () => void;
   /** Host only: fires with the player id whenever one guest drops out. */
@@ -131,18 +241,40 @@ export const HOST_PLAYER_ID = 'player-1';
 export const playerIdForSeat = (seat: number) => `player-${seat + 1}`;
 
 // JSON cannot represent Set, but PlayerState.usedMagicTypesThisTurn is one.
-function encode(msg: NetMessage): string {
+export function encodeNetMessage(msg: NetMessage): string {
   return JSON.stringify(msg, (_key, value) =>
     value instanceof Set ? { __set: Array.from(value) } : value
   );
 }
 
-function decode(raw: unknown): NetMessage | null {
+export function decodeNetMessage(raw: unknown): NetMessage | null {
   if (typeof raw !== 'string') return null;
   try {
-    return JSON.parse(raw, (_key, value) =>
+    const decoded: unknown = JSON.parse(raw, (_key, value) =>
       value && typeof value === 'object' && Array.isArray(value.__set) ? new Set(value.__set) : value
-    ) as NetMessage;
+    );
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return null;
+    const message = decoded as Record<string, unknown>;
+    if (typeof message.type !== 'string') return null;
+    if (message.type === 'REACTION_COMMAND') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if (
+        (command.kind !== 'PASS' && command.kind !== 'PLAY') ||
+        typeof command.playerId !== 'string' ||
+        typeof command.windowId !== 'string' ||
+        !Number.isSafeInteger(command.expectedRevision) ||
+        (command.expectedRevision as number) < 0 ||
+        (command.commandId !== undefined && typeof command.commandId !== 'string') ||
+        (command.cardInstanceId !== undefined && typeof command.cardInstanceId !== 'string') ||
+        (command.targetInstanceId !== undefined && typeof command.targetInstanceId !== 'string') ||
+        (command.kind === 'PLAY' && typeof command.cardInstanceId !== 'string')
+      ) return null;
+      return decoded as NetMessage;
+    }
+    const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];
+    if (!knownTypes.includes(message.type)) return null;
+    return decoded as NetMessage;
   } catch {
     return null;
   }
@@ -183,7 +315,7 @@ function createLink(
   handshake?: (msg: NetMessage) => HandshakeResult,
   transformOutgoing?: (msg: NetMessage) => NetMessage
 ): RoomLink {
-  const messageListeners = new Set<(msg: NetMessage) => void>();
+  const messageListeners = new Set<(msg: NetMessage, senderPlayerId?: string) => void>();
   const closeListeners = new Set<() => void>();
   const buffer: NetMessage[] = [];
   let closed = false;
@@ -213,13 +345,13 @@ function createLink(
         notifyClosed();
         return;
       }
-      if (conn.open) conn.send(encode({ type: 'PING' }));
+      if (conn.open) conn.send(encodeNetMessage({ type: 'PING' }));
     }, HEARTBEAT_INTERVAL_MS);
   };
 
   conn.on('data', (raw: unknown) => {
     lastSeen = Date.now();
-    const msg = decode(raw);
+    const msg = decodeNetMessage(raw);
     if (!msg || msg.type === 'PING') return;
     if (msg.type === 'LEAVE') {
       notifyClosed();
@@ -244,13 +376,13 @@ function createLink(
   return {
     send: msg => {
       if (closed || !conn.open) return;
-      conn.send(encode(transformOutgoing ? transformOutgoing(msg) : msg));
+      conn.send(encodeNetMessage(transformOutgoing ? transformOutgoing(msg) : msg));
     },
     onMessage: cb => {
       messageListeners.add(cb);
       if (buffer.length > 0) {
         const pending = buffer.splice(0, buffer.length);
-        pending.forEach(cb);
+        pending.forEach(message => cb(message));
       }
       return () => messageListeners.delete(cb);
     },
@@ -262,7 +394,7 @@ function createLink(
     close: () => {
       if (!closed && conn.open) {
         try {
-          conn.send(encode({ type: 'LEAVE' }));
+          conn.send(encodeNetMessage({ type: 'LEAVE' }));
         } catch {}
       }
       closed = true;
@@ -283,70 +415,58 @@ interface GuestEntry {
 
 /** Star topology: the host owns every connection and relays guest updates to the other guests. */
 function createHostLink(guests: GuestEntry[]): RoomLink {
-  const messageListeners = new Set<(msg: NetMessage) => void>();
+  const messageListeners = new Set<(msg: NetMessage, senderPlayerId?: string) => void>();
   const closeListeners = new Set<() => void>();
   const peerLeftListeners = new Set<(playerId: string) => void>();
-  const buffer: NetMessage[] = [];
-  const openGuests = new Set(guests.map(g => g.playerId));
+  const buffer: Array<{ message: NetMessage; senderPlayerId: string }> = [];
+  const openGuests = new Set(guests.map(guest => guest.playerId));
   let allClosed = false;
 
   guests.forEach(guest => {
     guest.link.onMessage(msg => {
-      if (msg.type === 'SYNC') {
-        guests.forEach(other => {
-          if (other.playerId !== guest.playerId) {
-            other.link.send({
-              ...msg,
-              state: redactLifeCardsForViewer(msg.state, other.playerId)
-            });
-          }
-        });
-      }
-      const hostView = msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
-        : msg;
+      const hostView = msg;
       if (messageListeners.size === 0) {
-        buffer.push(hostView);
+        buffer.push({ message: hostView, senderPlayerId: guest.playerId });
         return;
       }
-      messageListeners.forEach(cb => cb(hostView));
+      messageListeners.forEach(callback => callback(hostView, guest.playerId));
     });
 
     guest.link.onClose(() => {
       openGuests.delete(guest.playerId);
-      peerLeftListeners.forEach(cb => cb(guest.playerId));
+      peerLeftListeners.forEach(callback => callback(guest.playerId));
       if (openGuests.size === 0 && !allClosed) {
         allClosed = true;
-        closeListeners.forEach(cb => cb());
+        closeListeners.forEach(callback => callback());
       }
     });
   });
 
   return {
-    send: msg => guests.forEach(g => {
+    send: msg => guests.forEach(guest => {
       const viewerMessage = msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, g.playerId) }
+        ? { ...msg, state: redactLifeCardsForViewer(msg.state, guest.playerId) }
         : msg;
-      g.link.send(viewerMessage);
+      guest.link.send(viewerMessage);
     }),
-    onMessage: cb => {
-      messageListeners.add(cb);
+    onMessage: callback => {
+      messageListeners.add(callback);
       if (buffer.length > 0) {
         const pending = buffer.splice(0, buffer.length);
-        pending.forEach(cb);
+        pending.forEach(({ message, senderPlayerId }) => callback(message, senderPlayerId));
       }
-      return () => messageListeners.delete(cb);
+      return () => messageListeners.delete(callback);
     },
-    onClose: cb => {
-      closeListeners.add(cb);
-      if (allClosed) cb();
-      return () => closeListeners.delete(cb);
+    onClose: callback => {
+      closeListeners.add(callback);
+      if (allClosed) callback();
+      return () => closeListeners.delete(callback);
     },
-    onPeerLeft: cb => {
-      peerLeftListeners.add(cb);
-      return () => peerLeftListeners.delete(cb);
+    onPeerLeft: callback => {
+      peerLeftListeners.add(callback);
+      return () => peerLeftListeners.delete(callback);
     },
-    close: () => guests.forEach(g => g.link.close())
+    close: () => guests.forEach(guest => guest.link.close())
   };
 }
 
@@ -426,7 +546,7 @@ export function hostRoom(
     peer.on('connection', (conn: DataConnectionLike) => {
       const reject = (reason: string) => {
         conn.on('open', () => {
-          conn.send(encode({ type: 'REJECT', reason }));
+          conn.send(encodeNetMessage({ type: 'REJECT', reason }));
           setTimeout(() => conn.close(), 500);
         });
       };
@@ -558,15 +678,13 @@ export function joinRoom(
           return 'done';
         }
         return 'pass';
-      }, msg => msg.type === 'SYNC'
-        ? { ...msg, state: redactLifeCardsForViewer(msg.state, HOST_PLAYER_ID) }
-        : msg);
+      });
 
       link.onClose(() => fail('การเชื่อมต่อกับห้องถูกตัด'));
 
       conn.on('open', () => {
         handlers.onStatus('พบห้องแล้ว กำลังเข้าร่วม...');
-        conn.send(encode({ type: 'HELLO', setup: redactLifeCardsInSetup(local) }));
+        conn.send(encodeNetMessage({ type: 'HELLO', setup: redactLifeCardsInSetup(local) }));
       });
     });
   })().catch(() => fail('โหลดระบบเชื่อมต่อไม่สำเร็จ'));

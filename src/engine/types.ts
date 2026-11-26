@@ -53,6 +53,91 @@ export interface CardInstance {
 
 export type Phase = 'DRAW' | 'MAIN' | 'BATTLE' | 'END';
 
+export type ReactionTriggerType =
+  | 'AVATAR_SUMMONED'
+  | 'MAGIC_PLAYED'
+  | 'ABILITY_USED'
+  | 'ATTACK_DECLARED'
+  | 'AVATAR_TARGETED'
+  | 'AVATAR_WOULD_BE_DESTROYED'
+  | 'AVATAR_DESTROYED'
+  | 'BEFORE_PHASE_CHANGE';
+
+export interface ReactionTrigger {
+  type: ReactionTriggerType;
+  actorId: string;
+  targetInstanceId?: string;
+  targetCardName?: string;
+  sourceCardName?: string;
+  sourceInstanceId?: string;
+}
+
+export type DeferredReactionAction =
+  | {
+      type: 'SUMMON_JUTI' | 'RESOLVE_MAGIC';
+      actorId: string;
+      sourceCard: CardInstance;
+      paidCost?: boolean;
+      targetAvatarId?: string;
+    }
+  | {
+      type: 'AI_TURN_CONTINUATION';
+      actorId: string;
+      sourceCard: CardInstance;
+      logs: string[];
+    }
+  | {
+      type: 'ADVANCE_PHASE';
+      actorId: string;
+      nextPhase: Phase;
+    }
+  | {
+      type: 'START_ATTACK';
+      actorId: string;
+      sourceCard: CardInstance;
+    }
+  | {
+      type: 'RESOLVE_COMBAT';
+      actorId: string;
+      sourceCard: CardInstance;
+      targetPlayerId: string;
+      targetAvatarId: string;
+      checkedAvatarIds?: string[];
+    }
+  | {
+      type: 'RESOLVE_ABILITY';
+      actorId: string;
+      sourceCard: CardInstance;
+      abilityTrigger: 'CONSTRUCT_ACTIVATE';
+    };
+
+export interface PendingReactionCard {
+  playerId: string;
+  sourceCard: CardInstance;
+  treatedAsReact: boolean;
+}
+
+export interface ReactionChainEntry extends PendingReactionCard {
+  targetAvatarId?: string;
+  respondedTo: ReactionTrigger;
+}
+
+export interface ReactionWindow {
+  id: string;
+  trigger: ReactionTrigger;
+  turnOwnerId: string;
+  priorityPlayerId: string;
+  passedPlayerIds: string[];
+  /** The rulebook's turn-player-first pass order, rotated after each response. */
+  priorityOrder?: string[];
+  /** Reactions are stored in play order and resolve from the end of this array. */
+  chain?: ReactionChainEntry[];
+  /** Monotonic window version used to reject stale/duplicate network commands. */
+  revision?: number;
+  pendingAction?: DeferredReactionAction;
+  pendingReaction?: PendingReactionCard;
+}
+
 export interface PlayerState {
   id: string;
   name: string;
@@ -85,6 +170,9 @@ export interface GameState {
   roundNumber: number;
   players: Record<string, PlayerState>;
   landMagicZone: CardInstance | null; // 1 shared global slot
+  reactionWindow?: ReactionWindow;
+  reactionSequence?: number;
+  pendingEndPhaseDiscardPlayerId?: string;
   /** Opening dice roll (d6) per player id; present only when turn order was decided by dice. */
   openingRolls?: Record<string, number>;
   battleContext?: {
@@ -103,4 +191,5 @@ export interface GameState {
     description: string;
     actorId: string;
   }>;
+  gameEvents?: Array<{ sequence: number; event: import('./gameEvents').GameEvent }>;
 }
