@@ -1,4 +1,5 @@
 import { executeCardAbility, getUnsupportedEffectReason, parseCardAbility } from './abilityEngine';
+import { resolveEffectPlan } from './effectResolver';
 import { canUseMagicTypeThisTurn } from './gameRules';
 import type {
   Card,
@@ -94,11 +95,12 @@ export function isReactionEffectExecutable(card: Card): boolean {
   const parsed = parseCardAbility(card);
   if (getUnsupportedEffectReason(card)) return false;
   const cancelsMagic = /ยกเลิกการใช้\s*Magic Card/.test(effect);
-  const hasSupportedEffect = cancelsMagic || parsed.drawCount > 0 || parsed.powerMod !== 0 ||
+  const cancelsAbility = /ยกเลิก.*(?:ความสามารถ|Ability)/i.test(effect);
+  const hasSupportedEffect = cancelsMagic || cancelsAbility || parsed.drawCount > 0 || parsed.powerMod !== 0 ||
     parsed.resetsPower || parsed.destroysTarget || parsed.destroysAllOpponentAvatars ||
     parsed.bouncesTarget || parsed.summonsFromHell || parsed.recoversFromHell > 0;
   if (!hasSupportedEffect) return false;
-  if (/ยกเลิก(?!การใช้\s*Magic Card)|ป้องกัน|สอดแนม|ค้นหา|สุ่ม|เปลี่ยนสภาพ|สับ Deck|เตะไข่/.test(effect)) return false;
+  if (/ยกเลิก(?!การใช้\s*Magic Card|.*(?:ความสามารถ|Ability))|ป้องกัน|สอดแนม|ค้นหา|สุ่ม|เปลี่ยนสภาพ|สับ Deck|เตะไข่/.test(effect)) return false;
   if (/ทิ้ง\s*Avatar|ส่ง Avatar.*ลงนรก|เซ่นไหว้|นอน Avatar/.test(effect)) return false;
   if (/(?:หาก|ถ้า)/.test(effect) && !/(?:หาก|ถ้า)บน Avatar Zone ฝ่ายเรามี\s*["“][^"”]+["”]/.test(effect)) return false;
   return true;
@@ -144,7 +146,7 @@ export function isReactionWindowStructurallyValid(state: GameState): boolean {
     window.passedPlayerIds.every((playerId, index) => playerId === expectedPassed[index]);
   if (!validPriority) return false;
   if (window.passedPlayerIds.length > 0 || window.pendingReaction) return true;
-  return state.playerOrder.some(playerId => {
+  return (window.chain?.length ?? 0) > 0 || state.playerOrder.some(playerId => {
     const candidateWindow = { ...window, priorityPlayerId: playerId };
     return state.players[playerId]?.hand.some(({ card }) =>
       getReactionEligibility({ ...state, reactionWindow: candidateWindow }, playerId, card).eligible
@@ -312,6 +314,7 @@ export function queueReactionCard(
   };
   updatedPlayer.usedMagicTypesThisTurn.add('React');
   const chainEntry: ReactionChainEntry = {
+    entryType: 'REACT_MAGIC',
     playerId,
     sourceCard,
     treatedAsReact: eligibility.treatedAsReact,
@@ -379,11 +382,18 @@ function applyCancellation(
   let pendingAction = window.pendingAction;
   let applied = false;
   if (targetKind === 'CHAIN_ENTRY') {
-    const index = chain.findIndex(entry => entry.sourceCard.instanceId === targetInstanceId);
+    const index = chain.findIndex(entry => entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY'
+      ? entry.sourceCardId === targetInstanceId || entry.triggerId === targetInstanceId
+      : entry.sourceCard.instanceId === targetInstanceId);
     const entry = chain[index];
-    if (!entry || entry.sourceCard.card.ruleTextProtected) return { state, applied: false };
-    chain.splice(index, 1);
-    nextState = sendResolvedMagicToHell(nextState, entry.playerId, entry.sourceCard);
+    if (!entry) return { state, applied: false };
+    if (entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') {
+      chain[index] = { ...entry, cancelled: true };
+    } else {
+      if (entry.sourceCard.card.ruleTextProtected) return { state, applied: false };
+      chain.splice(index, 1);
+      nextState = sendResolvedMagicToHell(nextState, entry.playerId, entry.sourceCard);
+    }
     applied = true;
   } else if (pendingAction && 'sourceCard' in pendingAction && pendingAction.sourceCard.instanceId === targetInstanceId && !pendingAction.sourceCard.card.ruleTextProtected) {
     if (targetKind === 'MAGIC_PLAY' && pendingAction.type === 'RESOLVE_MAGIC') {
@@ -421,6 +431,12 @@ export function cancelReactionTarget(
 }
 
 function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: ReactionChainEntry) {
+  if (entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') {
+    if (entry.cancelled) return { state, logs: [`${entry.triggerId}: trigger cancelled`] };
+    const resolved = resolveEffectPlan(state, { actorId: entry.controllerId, effects: entry.effects });
+    if (!resolved.ok) return { state, logs: [`${entry.triggerId}: trigger failed and was rolled back (${resolved.reason ?? 'invalid effect'})`] };
+    return { state: resolved.state, logs: [`${entry.triggerId}: trigger resolved`] };
+  }
   const parsed = parseCardAbility(entry.sourceCard.card);
   const requiresAvatarTarget = parsed.needsTargetAvatar || parsed.destroysTarget || parsed.bouncesTarget || parsed.resetsPower || parsed.powerMod !== 0;
   const targetOwnerId = entry.targetAvatarId
@@ -437,15 +453,31 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
   }
 
   const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card/.test(entry.sourceCard.card.mainEffect ?? '');
+  const cancelsAbility = /ยกเลิก.*(?:ความสามารถ|Ability)/i.test(entry.sourceCard.card.mainEffect ?? '');
   let nextState = state;
   let chain = [...(window.chain ?? [])];
   let pendingAction = window.pendingAction;
   let canceledTarget: { instanceId: string; kind: CancellationTargetKind } | undefined;
+  if (cancelsAbility) {
+    const requestedTarget = entry.respondedTo.targetInstanceId;
+    const index = chain.findIndex(item =>
+      (item.entryType === 'TRIGGER_ABILITY' || item.entryType === 'ACTIVATED_ABILITY') &&
+      (item.sourceCardId === requestedTarget || item.triggerId === requestedTarget)
+    );
+    const targetIndex = index >= 0 ? index : chain.findLastIndex(item =>
+      item.entryType === 'TRIGGER_ABILITY' || item.entryType === 'ACTIVATED_ABILITY'
+    );
+    const target = chain[targetIndex];
+    if (target && (target.entryType === 'TRIGGER_ABILITY' || target.entryType === 'ACTIVATED_ABILITY')) {
+      chain[targetIndex] = { ...target, cancelled: true };
+      canceledTarget = { instanceId: target.sourceCardId, kind: 'CHAIN_ENTRY' };
+    }
+  }
   if (cancelsPlayedMagic && entry.respondedTo.type === 'MAGIC_PLAYED' && entry.respondedTo.sourceInstanceId) {
     const targetId = entry.respondedTo.sourceInstanceId;
-    const chainIndex = chain.findIndex(item => item.sourceCard.instanceId === targetId);
+    const chainIndex = chain.findIndex(item => item.entryType === 'REACT_MAGIC' && item.sourceCard.instanceId === targetId);
     const canceledEntry = chain[chainIndex];
-    if (canceledEntry && !canceledEntry.sourceCard.card.ruleTextProtected) {
+    if (canceledEntry?.entryType === 'REACT_MAGIC' && !canceledEntry.sourceCard.card.ruleTextProtected) {
       chain = chain.filter((_, index) => index !== chainIndex);
       nextState = sendResolvedMagicToHell(nextState, canceledEntry.playerId, canceledEntry.sourceCard);
       canceledTarget = { instanceId: targetId, kind: 'CHAIN_ENTRY' };
@@ -456,7 +488,7 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
     }
   }
 
-  if (cancelsPlayedMagic) {
+  if (cancelsPlayedMagic || cancelsAbility) {
     if (canceledTarget) {
       const eventId = `${state.id}:${state.gameEvents?.length ?? 0}:cancel:${canceledTarget.kind}:${canceledTarget.instanceId}:${entry.playerId}`;
       nextState = appendGameEvents(nextState, [{
@@ -609,15 +641,24 @@ export function passReactionPriority(state: GameState, playerId: string): Reacti
     return { ok: true, state: closedState, pendingAction: window.pendingAction };
   }
 
-  const resolved = resolveQueuedReaction(state, { ...window, chain }, top);
-  const remainingChain = 'chain' in resolved ? resolved.chain : chain;
+  const resolutionState = { ...state, reactionWindow: { ...window, chain } };
+  const resolved = resolveQueuedReaction(resolutionState, { ...window, chain }, top);
+  const returnedChain = resolved.state.reactionWindow?.chain ?? chain;
+  const baseChain = 'chain' in resolved ? resolved.chain : chain;
+  const additions = returnedChain.filter(candidate => !chain.some(item =>
+    item.entryType === candidate.entryType && (item.entryType === 'REACT_MAGIC'
+      ? candidate.entryType === 'REACT_MAGIC' && item.sourceCard.instanceId === candidate.sourceCard.instanceId
+      : candidate.entryType !== 'REACT_MAGIC' && item.triggerId === candidate.triggerId)
+  ));
+  const remainingChain = [...baseChain, ...additions];
   const pendingAction = 'pendingAction' in resolved ? resolved.pendingAction : window.pendingAction;
   const logs = resolved.logs;
   if (remainingChain.length > 0) {
-    const priorityOrder = rotatePriorityOrder(state, top.playerId);
+    const resolverId = top.entryType === 'REACT_MAGIC' ? top.playerId : top.controllerId;
+    const priorityOrder = rotatePriorityOrder(state, resolverId);
     return {
       ok: true,
-      resolvedCard: top.sourceCard.card.name,
+      ...(top.entryType === 'REACT_MAGIC' ? { resolvedCard: top.sourceCard.card.name } : {}),
       logs,
       state: {
         ...resolved.state,
@@ -637,7 +678,7 @@ export function passReactionPriority(state: GameState, playerId: string): Reacti
   const { reactionWindow: _reactionWindow, ...closedState } = resolved.state;
   return {
     ok: true,
-    resolvedCard: top.sourceCard.card.name,
+    ...(top.entryType === 'REACT_MAGIC' ? { resolvedCard: top.sourceCard.card.name } : {}),
     logs,
     state: closedState,
     pendingAction

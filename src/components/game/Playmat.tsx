@@ -1499,11 +1499,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <li className="shrink-0 rounded border border-slate-500/60 bg-slate-900 px-2 py-1 text-[10px] text-slate-200">
                 0 · การกระทำเดิม
               </li>
-              {(gameState.reactionWindow.chain ?? []).map((entry, index) => (
-                <li key={`${entry.sourceCard.instanceId}-${index}`} className="shrink-0 rounded border border-amber-300/50 bg-amber-900/70 px-2 py-1 text-[10px] font-semibold">
-                  {index + 1} · {entry.sourceCard.card.name}
-                </li>
-              ))}
+              {(gameState.reactionWindow.chain ?? []).map((entry, index) => {
+                const isReact = entry.entryType === 'REACT_MAGIC';
+                const label = isReact ? entry.sourceCard.card.name : `${entry.entryType === 'TRIGGER_ABILITY' ? 'Trigger' : 'Ability'} · ${entry.triggerId}`;
+                const entryId = isReact ? entry.sourceCard.instanceId : entry.triggerId;
+                return (
+                  <li key={`${entryId}-${index}`} className="shrink-0 rounded border border-amber-300/50 bg-amber-900/70 px-2 py-1 text-[10px] font-semibold">
+                    {index + 1} · {label}{!isReact && entry.cancelled ? ' · ยกเลิกแล้ว' : ''}
+                  </li>
+                );
+              })}
             </ol>
           </div>
           {gameState.reactionWindow.priorityPlayerId === meId && !gameState.reactionWindow.pendingReaction && (

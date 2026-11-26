@@ -1,6 +1,7 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 import { recomputeContinuousEffects, expirePreventionShieldsAt } from './continuousEffects';
+import { dispatchTriggersForEvent } from './triggerEngine';
 
 type LayerMod = CardInstance['layerModifiers'][number];
 
@@ -10,7 +11,7 @@ const UNSUPPORTED_EFFECT_PATTERNS: Array<[string, RegExp]> = [
   ['search or selection from a private zone', /(?:นำ|เลือก|ค้นหา|หยิบ).{0,80}(?:Deck|เด็ค|นรก)|(?:Deck|เด็ค).{0,80}(?:นำ|เลือก|ค้นหา|หยิบ)/i],
   ['discard, sacrifice, or activation costs', /ทิ้ง|เซ่นไหว้|สังเวย|เทิร์นละครั้ง|สั่งใช้/],
   ['mill or scouting', /ธรณีสูบ|สอดแนม/],
-  ['prevention, cancellation, or control changes', /ยกเลิก(?!การใช้\s*Magic Card)|ป้องกัน|เปลี่ยนการควบคุม|เนรเทศ|มิติมืด/],
+  ['prevention, cancellation, or control changes', /ยกเลิก(?!การใช้\s*Magic Card|.*(?:ความสามารถ|Ability))|ป้องกัน|เปลี่ยนการควบคุม|เนรเทศ|มิติมืด/],
   ['state changes not represented by the game model', /เปลี่ยนชื่อ|เปลี่ยน Symbol|เปลี่ยนสี|เปลี่ยนค่า Cost|ได้รับความสามารถ/],
   ['Hell selection or recovery destination', /นรก.{0,80}(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ)|(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ).{0,80}นรก/]
 ];
@@ -368,7 +369,9 @@ export function executeCardAbility(
     logs.push(`${sourceCard.card.name}: Effect Resolver ปฏิเสธผลทั้งหมด (${resolved.reason})`);
     return { state, logs };
   }
-  const resolvedState = recomputeContinuousAuras(resolved.state);
+  const recomputedState = recomputeContinuousAuras(resolved.state);
+  const lastEvent = recomputedState.gameEvents?.at(-1)?.event;
+  const resolvedState = lastEvent ? dispatchTriggersForEvent(recomputedState, lastEvent) : recomputedState;
   return { state: resolvedState, logs: effectDefinitions.map(({ effect }) => {
     switch (effect.kind) {
       case 'draw': return `${sourceCard.card.name}: จั่วการ์ด ${effect.count} ใบ`;

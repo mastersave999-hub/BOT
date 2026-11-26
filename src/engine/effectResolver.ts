@@ -20,7 +20,8 @@ export type EffectDefinition =
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; destination: 'deck' | 'hand' }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string }
-  | { kind: 'change_avatar_control'; targetId: string; controllerId: string };
+  | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
+  | { kind: 'cancel_chain_entry'; targetId: string };
 
 export interface EffectPlan {
   actorId: string;
@@ -210,6 +211,19 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     const moved = changeAvatarControl(state, plan.actorId, effect.targetId, effect.controllerId);
     return moved.ok ? moved.state : null;
   },
+  cancel_chain_entry: ({ state, effect }) => {
+    if (effect.kind !== 'cancel_chain_entry' || !state.reactionWindow) return null;
+    let found = false;
+    const chain = (state.reactionWindow.chain ?? []).map(entry => {
+      if ((entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') &&
+        (entry.sourceCardId === effect.targetId || entry.triggerId === effect.targetId)) {
+        found = true;
+        return { ...entry, cancelled: true };
+      }
+      return entry;
+    });
+    return found ? { ...state, reactionWindow: { ...state.reactionWindow, chain } } : null;
+  },
   summon_from_hell: ({ state, plan, effect }) => {
     if (effect.kind !== 'summon_from_hell') return null;
     const player = state.players[effect.playerId];
@@ -247,7 +261,7 @@ function resolveEffectPlanInTransaction(
     if (!effect || !Object.hasOwn(defaultHandlers, effect.kind)) return fail(state, 'unsupported effect');
     if ('count' in effect && (!Number.isInteger(effect.count) || effect.count < 0)) return fail(state, 'invalid effect count');
     if ('amount' in effect && !Number.isFinite(effect.amount)) return fail(state, 'invalid effect value');
-    if (('targetId' in effect) && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
+    if (('targetId' in effect) && effect.kind !== 'cancel_chain_entry' && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
   }
   for (const cost of plan.costs ?? []) {
     if (cost.playerId !== plan.actorId) return fail(state, 'cost payer must be the acting player');

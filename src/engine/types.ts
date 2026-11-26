@@ -155,10 +155,32 @@ export interface PendingReactionCard {
   treatedAsReact: boolean;
 }
 
-export interface ReactionChainEntry extends PendingReactionCard {
-  targetAvatarId?: string;
-  respondedTo: ReactionTrigger;
-}
+export type ReactionChainEntry =
+  | (PendingReactionCard & {
+      entryType: 'REACT_MAGIC';
+      targetAvatarId?: string;
+      respondedTo: ReactionTrigger;
+    })
+  | {
+      entryType: 'TRIGGER_ABILITY';
+      sourceCardId: string;
+      controllerId: string;
+      triggerId: string;
+      effects: import('./effectResolver').EffectDefinition[];
+      cancelled: boolean;
+      eventId: string;
+      respondedTo: ReactionTrigger;
+    }
+  | {
+      entryType: 'ACTIVATED_ABILITY';
+      sourceCardId: string;
+      controllerId: string;
+      triggerId: string;
+      effects: import('./effectResolver').EffectDefinition[];
+      cancelled: boolean;
+      eventId: string;
+      respondedTo: ReactionTrigger;
+    };
 
 export interface ReactionWindow {
   id: string;
@@ -266,6 +288,8 @@ export interface GameState {
   gameEvents?: Array<{ sequence: number; event: import('./gameEvents').GameEvent }>;
   /** Turn-scoped keys for structured once-per-turn triggered abilities. */
   triggerUsage?: string[];
+  /** Per-turn execution caps prevent EACH_EVENT triggers from creating unbounded loops. */
+  triggerLoopCounts?: Record<string, number>;
   /** Event ids already fully dispatched to triggers, preventing duplicate/reentrant loops. */
   processedTriggerEventIds?: string[];
   /** Activated protection attempts already used for a particular leaving-card event. */
