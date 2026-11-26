@@ -28,7 +28,8 @@ function isEffectTarget(source: CardInstance, effect: ContinuousPowerEffect, tar
   const relation = effect.targetController ?? 'SOURCE_CONTROLLER';
   if (relation === 'SOURCE_CONTROLLER' && target.controllerId !== source.controllerId) return false;
   if (relation === 'OPPONENT' && target.controllerId === source.controllerId) return false;
-  if (effect.targetSymbol && !calculateEffectiveSymbol(target)?.includes(effect.targetSymbol)) return false;
+  const targetSymbols = effect.targetSymbols ?? (effect.targetSymbol ? [effect.targetSymbol] : []);
+  if (targetSymbols.length > 0 && !targetSymbols.some(symbol => calculateEffectiveSymbol(target)?.includes(symbol))) return false;
   if (effect.targetNameIncludes && !target.card.name.includes(effect.targetNameIncludes)) return false;
   return true;
 }
@@ -38,13 +39,15 @@ function cardPowerMod(card: CardInstance): number {
   return match ? Number.parseInt(match[1], 10) : 0;
 }
 
-function legacyAuras(state: GameState, sources: CardInstance[], target: CardInstance): Array<{ layer: 1 | 2; powerMod: number; sourceCardId: string }> {
+function legacyAuras(state: GameState, sources: CardInstance[], target: CardInstance): Array<{ layer: 1 | 2; powerMod: number; symbolMod?: string; sourceCardId: string }> {
   if (target.card.type !== 'Avatar') return [];
   const result: Array<{ layer: 1 | 2; powerMod: number; sourceCardId: string }> = [];
   for (const attached of target.attachedInstances) {
+    const text = attached.card.mainEffect ?? '';
     const powerMod = cardPowerMod(attached);
-    if (attached.card.type === 'Magic' && attached.card.subtype === 'Modification' && powerMod !== 0) {
-      result.push({ layer: 1, powerMod, sourceCardId: `aura-mod-${attached.instanceId}` });
+    const symbolMod = text.match(/(?:ถูกเปลี่ยน|เปลี่ยน)\s*Symbol\s*(?:เป็น)?\s*\{?([^}\n.]+)\}?/i)?.[1]?.trim();
+    if (attached.card.type === 'Magic' && attached.card.subtype === 'Modification' && (powerMod !== 0 || symbolMod)) {
+      result.push({ layer: 1, powerMod, ...(symbolMod ? { symbolMod } : {}), sourceCardId: `aura-mod-${attached.instanceId}` });
     }
   }
   for (const source of sources) {

@@ -353,39 +353,39 @@ These are text triage counts, not unique mechanics or verified cards. Adapter te
 - Named Hell recovery to hand and named Avatar special summon are bound to explicit instance IDs in the actor's Hell. The resolver rejects absent, wrong-type, wrong-name, duplicate, or insufficient selections and keeps all-or-nothing semantics. Other Hell-selection phrasing remains unsupported until its selector/destination behavior is represented.
 - Modification Magic equip restrictions implement Rule Book pp.13, 18 quoted-word versus exact-name matching. Illegal attempts send the card to its owner's Hell; recomputation rechecks an existing attachment continuously and sends it to Hell if the restriction ceases to hold. Unparseable restriction syntax fails closed.
 
-### Current 1,833-row audit
+### Phase 4B: current 1,833-row audit
 
 | Status | Rows |
 |---|---:|
-| VERIFIED_WORKING (exact individual row state tests) | 18 |
-| PARSED_READY (not automatically verified) | 229 |
-| UNSUPPORTED | 1,600 |
+| VERIFIED_WORKING (subset of PARSED_READY; exact individual row state tests) | 71 |
+| PARSED_READY (including verified) | 226 |
+| PARSED_READY not yet verified | 155 |
+| UNSUPPORTED | 1,603 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 
-The Phase 3 baseline had 231 `PARSED_READY` rows. Phase 4 added one narrowly bound Hell recovery mapping while strict multi-player text checks demoted three formerly ready records; the remaining adapter output is 229 ready. The deterministic suite runs each of those 229 records and fail-closed tests for the 35 overlapping multi-player reason rows. Exactly 18 records pass the additional full-clause, event-free, exact before/after verification gate; the other 211 ready rows are not promoted. Row-level evidence and IDs are in `CARD_EFFECT_AUDIT.md`.
+The deterministic suite attempts each of the 226 parser-ready catalog rows using exact rows from `cards_clean.json`; 71 pass full-clause before/after Game State assertions, while 155 remain unverified. Fixture generation now seeds legal catalog targets, named Deck/Hell choices, LIFE and board context when the typed AST requires them, and checks applicable shuffle and exit-prevention outcomes. This does not make unresolved trigger/choice semantics verified. Reproduce counts with `npx tsx scripts/audit-card-text-adapter.ts`; row-level evidence is in `CARD_EFFECT_AUDIT.md`.
 
-### Current overlapping unsupported-reason counts
+### Phase 4B overlapping unsupported-reason counts
 
 | Reason | Rows |
 |---|---:|
-| No complete mapped effect clause | 1,522 |
-| Targeted/zone-changing operation without a complete bound plan | 1,117 |
+| No complete mapped effect clause | 1,504 |
+| Targeted/zone-changing operation without a complete bound plan | 1,113 |
 | Condition expression gap | 439 |
 | Unrecognized cost syntax | 171 |
 | Inherent `#` Rule Text without executable spec | 103 |
+| Continuous board condition gap | 47 |
 | Cost primitive outside the atomic resolver | 47 |
 | Multi-player target resolution not represented by the supported plan | 35 |
 | Explicit ambiguity marker | 4 |
 
-### Priority deck archetypes
+### Top remaining unparsed catalog clusters
 
-- **Verified direct draw effects:** `ความเจริญ` rows `BT01-038`, `CC01-056`, `ODY1-068`, `PRMO-019`, `KD01-013`, `KD03-012`, `KD04-018`, `APFD-001`, and `B2SA-008` (including repeated database rows), plus the other exact records listed as `VERIFIED_WORKING` in `CARD_EFFECT_AUDIT.md`.
-- **Parsed but not individually verified:** `อุบัติเหตุ!!!` printings; the effect body is parsed, but the Avatar-summon event/target lifecycle is not proven end-to-end by Phase 4A.
-- **Still unsupported:** `ลูเซเน่ โพลีกอน`, `อีสานสลิงเกอร์ เปอร์`, `โคกอีสานนูน` (the catalog name nearest the requested `โคกอีสานมูล`), `ชายจากอนาคต`, `หมอมาแล้วววว`, `อย่าให้มีครั้งที่ 2`, `ความกล้าหาญ`, `ไปเลยมอนตี้`, and `มนุษย์ดัดแปลง`; their event/cancellation/prevention/combat/continuous or multi-step equip plans are not fully bound. No `อีสานสลิงเกอร์ บิ๊ก` exact card name was found in `cards_clean.json`.
+Counts below are overlapping pattern matches across exact database rows; duplicates count separately. Opponent Avatar-summon reactions 2; opponent Magic-use clauses 10; cancellation 44; destruction prevention 2; Modification equip restriction 38; continuous POWER/Symbol modifiers 170; end-of-turn self-exit/removal 37; conditional `ถ้า...:` clauses 18; Hell recovery/summon/banish 310; ability-counts-as-Normal-Magic pattern 0. Representative exact `printId` and names are in the audit output; examples include SD06-015 `ปืนใหญ่ไทยประดิษฐ์`, BT08-036 `ขงเบ้ง กุนซือซ่อนกายแห่งจ๊กก๊ก`, BT10-073 `ดวงจันทร์วันเพ็ญ`, BT10-009 `K-BO ยอดหุ่นยนต์`, SD03-003 `นายนิรยบาล แว่น`, and SD02-004 `ริกกี้ เพื่อนรัก`.
 
-### Phase 4A verification boundary
+### Phase 4B verification boundary
 
-The 18 verified rows are restricted to direct, complete, event-free plans whose printed clause set is exercised through the typed resolver with exact zone/stat assertions. This is not an assertion that all 229 parser-ready rows or all 1,833 catalog effects work. Triggered Magic timing, Scout choices, complex multi-player instructions, unsupported costs, and unsupported rule text stay fail-closed or unverified. Reproduce counts with `npx tsx scripts/audit-card-text-adapter.ts`; the Phase 4 suite is `tests/phase4CardVerification.test.ts`.
+`VERIFIED_WORKING` requires an exact catalog row and actual before/after Game State assertions. The 155 remaining `PARSED_READY` rows are not promoted: they include event timing, keywords, Scout player choices, missing catalog fixture selectors and unresolved multi-clause effects. The 1,607 `UNSUPPORTED` and 4 `AMBIGUOUS` records remain fail-closed. Existing typed Reaction Chain, cancellation, exit-prevention, continuous-effect, condition and equip primitives are not equivalent to parsing every printed clause or proving every card lifecycle. Rule Book 3.2 remains authoritative; unsupported/underspecified Ad-Mua priority is not invented.
 
-**Phase 4A validation:** `npx tsc --noEmit`, `npm test` (**20 files / 441 tests**), `npm run build`, and `git diff --check` passed. The game preview opened to the playable board at 346×503 in dark mode; no browser errors were reported.
+**Phase 4B validation:** `npx tsc --noEmit` passed; `npm test` passed (**20 files / 440 tests**); `npm run build` passed; `git diff --check` passed.

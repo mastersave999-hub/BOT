@@ -38,7 +38,8 @@ export type EffectDefinition =
   | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck' | 'hand' }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
-  | { kind: 'cancel_chain_entry'; targetId: string };
+  | { kind: 'cancel_chain_entry'; targetId: string }
+  | { kind: 'cancel_pending_magic' };
 
 export type EffectPlanStep = { kind: 'cost'; cost: EffectCost } | { kind: 'effect'; effect: EffectDefinition };
 
@@ -447,6 +448,25 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       return entry;
     });
     return found ? { ...state, reactionWindow: { ...state.reactionWindow, chain } } : null;
+  },
+  cancel_pending_magic: ({ state, plan, effect }) => {
+    const pending = state.reactionWindow?.pendingAction;
+    if (effect.kind !== 'cancel_pending_magic' || !state.reactionWindow || pending?.type !== 'RESOLVE_MAGIC' ||
+      pending.sourceCard.card.ruleTextProtected || /#(?=\s|[ก-๙])/.test(pending.sourceCard.card.mainEffect ?? '')) return null;
+    const target = pending.sourceCard;
+    const ownerId = target.originalOwnerId ?? target.ownerId;
+    const moved = moveCardBetweenZones(state, {
+      instanceId: target.instanceId, actorId: plan.actorId, destination: 'hell', destinationPlayerId: ownerId, effectMove: true
+    });
+    if (!moved.ok || !moved.state.reactionWindow) return null;
+    const next = {
+      ...moved.state,
+      reactionWindow: { ...moved.state.reactionWindow, pendingAction: undefined }
+    };
+    return appendGameEvents(next, [{
+      type: 'ACTION_CANCELLED', actorId: plan.actorId, targetInstanceId: target.instanceId, targetKind: 'MAGIC_PLAY',
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-cancel-magic:${target.instanceId}:${plan.actorId}`
+    }]);
   },
   summon_from_hell: ({ state, plan, effect }) => {
     if (effect.kind !== 'summon_from_hell') return null;

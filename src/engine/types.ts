@@ -45,6 +45,7 @@ export interface ContinuousPowerEffect {
   targetCardType?: 'Avatar' | 'Construct' | 'Life';
   targetController?: 'SOURCE_CONTROLLER' | 'OPPONENT' | 'ANY';
   targetSymbol?: string;
+  targetSymbols?: string[];
   targetNameIncludes?: string;
   targetSelf?: boolean;
 }
@@ -173,14 +174,15 @@ export type ReactionChainEntry =
       entryType: 'TRIGGER_ABILITY';
       sourceCardId: string;
       controllerId: string;
-      triggerId: string;
-      effects: import('./effectResolver').EffectDefinition[];
-      cancelled: boolean;
-      eventId: string;
-      respondedTo: ReactionTrigger;
-    }
+  triggerId: string;
+  effects: import('./effectResolver').EffectDefinition[];
+  conditions?: import('./effectResolver').EffectCondition[];
+  cancelled: boolean;
+  eventId: string;
+  respondedTo: ReactionTrigger;
+  }
   | {
-      entryType: 'ACTIVATED_ABILITY';
+  entryType: 'ACTIVATED_ABILITY';
       sourceCardId: string;
       controllerId: string;
       triggerId: string;

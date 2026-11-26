@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
+import { appendGameEvents, type GameEvent } from '../src/engine/gameEvents';
+import { passReactionPriority } from '../src/engine/reactionEngine';
 import {
   calculateEffectiveSymbol,
   calculateNetPower,
@@ -9,8 +11,11 @@ import {
   parseCardNameRules,
   parseCardText,
   toCardTextEffectPlan,
+  toTriggerAbility,
 } from '../src/engine/cardTextAdapter';
-import { resolveEffectPlan } from '../src/engine/effectResolver';
+import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type EffectPlan } from '../src/engine/effectResolver';
+import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
+import { checkModificationEquip } from '../src/engine/equipLegality';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
 const catalog = JSON.parse(readFileSync(new URL('../cards_clean.json', import.meta.url), 'utf8')) as Card[];
@@ -21,7 +26,27 @@ const failClosedRows = effectRows.filter(card => {
   return parsed.status === 'UNSUPPORTED' && parsed.reason?.includes('multi-player target resolution');
 });
 const verifiedRows = new Set<string>();
+const unverifiedRows = new Map<string, { label: string; reasons: Set<string> }>();
 const base = catalog.find(card => card.printId === 'SD01-001')!;
+
+function recordUnverified(card: Card, reason: string) {
+  const key = `${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`;
+  const existing = unverifiedRows.get(key) ?? { label: `${card.printId}|${card.name}`, reasons: new Set<string>() };
+  existing.reasons.add(reason);
+  unverifiedRows.set(key, existing);
+}
+
+function verificationBlockers(card: Card, parsed: ReturnType<typeof parseCardText>): string[] {
+  const blockers = new Set<string>();
+  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction)) blockers.add('no executable effect in one or more clauses');
+  if (parsed.clauses.some(clause => clause.unresolved.length > 0)) blockers.add('unresolved AST clause');
+  if (parsed.clauses.some(clause => clause.timing.mode || clause.timing.event || clause.timing.frequency)) blockers.add('timing/event context not verified');
+  if (parsed.clauses.some(clause => clause.keywordSpecs.length > 0)) blockers.add('keyword behavior not verified');
+  if (parsed.clauses.some(clause => /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) blockers.add('timing/event context not verified');
+  if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) blockers.add('Scout requires player choice');
+  if (!card.mainEffect.trim()) blockers.add('empty printed effect');
+  return [...blockers];
+}
 
 type ZoneName = 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension';
 
@@ -77,6 +102,89 @@ function makeState(): GameState {
   };
 }
 
+function makeTriggerEvent(eventType: GameEvent['type'], eventId: string, actorId: string, sourceId: string): GameEvent {
+  if (eventType === 'AVATAR_SUMMONED') return { type: eventType, instanceId: sourceId, playerId: actorId, eventId };
+  if (eventType === 'AVATAR_DESTROYED' || eventType === 'CARD_LEFT_FIELD') return {
+    type: eventType, instanceId: sourceId, ownerId: actorId, controllerId: actorId, actorId, eventId
+  };
+  if (eventType === 'ATTACK_DECLARED' || eventType === 'BATTLE_ENDED') return {
+    type: eventType, attackerId: sourceId, targetId: 'p2-event-target', playerId: actorId, eventId
+  };
+  if (eventType === 'MAGIC_PLAYED') return { type: eventType, instanceId: sourceId, subtype: 'Normal', playerId: actorId, eventId };
+  if (eventType === 'TURN_ENDED') return { type: eventType, playerId: actorId, turnNumber: 1, eventId };
+  if (eventType === 'PHASE_STARTED') return { type: eventType, phase: 'END', playerId: actorId, turnNumber: 1, eventId };
+  if (eventType === 'LIFE_REVEALED') return { type: eventType, instanceId: sourceId, playerId: actorId, actorId, eventId };
+  throw new Error(`No Phase 4 event fixture for ${eventType}`);
+}
+
+function resolveTriggerChain(input: GameState): GameState {
+  let state = input;
+  let passes = 0;
+  while (state.reactionWindow && passes < 128) {
+    const first = passReactionPriority(state, state.reactionWindow.priorityPlayerId);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return state;
+    state = first.state;
+    passes += 1;
+    if (!state.reactionWindow) break;
+    const second = passReactionPriority(state, state.reactionWindow.priorityPlayerId);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return state;
+    state = second.state;
+    passes += 1;
+  }
+  expect(state.reactionWindow).toBeUndefined();
+  return state;
+}
+
+function verifyContinuousCard(card: Card, parsed: ReturnType<typeof parseCardText>, state: GameState): boolean {
+  const source = instance(`p1-continuous-${catalog.indexOf(card)}`, 'p1', card);
+  if (card.type === 'Avatar') state.players.p1.avatarZone.push(source);
+  else if (card.type === 'Construct') state.players.p1.constructZone.push(source);
+  else if (card.type === 'Magic' && card.subtype === 'Land') state.landMagicZone = source;
+  else return false;
+
+  const targets: Array<{ effectIndex: number; playerId: string; instanceId: string }> = [];
+  for (const [effectIndex, effect] of parsed.continuousEffects.entries()) {
+    if (effect.targetSelf) {
+      targets.push({ effectIndex, playerId: 'p1', instanceId: source.instanceId });
+      continue;
+    }
+    const targetSymbols = effect.targetSymbols ?? (effect.targetSymbol ? [effect.targetSymbol] : [undefined]);
+    for (const [symbolIndex, targetSymbol] of targetSymbols.entries()) {
+      const targetCard = catalog.find(candidate => candidate.type === (effect.targetCardType ?? 'Avatar') &&
+        (!targetSymbol || candidate.symbol?.includes(targetSymbol)) &&
+        (!effect.targetNameIncludes || candidate.name.includes(effect.targetNameIncludes)));
+      if (!targetCard) return false;
+      const playerId = effect.targetController === 'OPPONENT' ? 'p2' : 'p1';
+      const target = instance(`p1-continuous-target-${effectIndex}-${symbolIndex}`, playerId, targetCard);
+      if (targetCard.type === 'Avatar') state.players[playerId].avatarZone.push(target);
+      else if (targetCard.type === 'Construct') state.players[playerId].constructZone.push(target);
+      else return false;
+      targets.push({ effectIndex, playerId, instanceId: target.instanceId });
+    }
+  }
+
+  const after = recomputeContinuousEffects(state);
+  for (const target of targets) {
+    const effect = parsed.continuousEffects[target.effectIndex];
+    const changed = after.players[target.playerId].avatarZone.concat(after.players[target.playerId].constructZone)
+      .find(item => item.instanceId === target.instanceId);
+    expect(changed?.layerModifiers).toContainEqual(expect.objectContaining({
+      layer: effect.layer, powerMod: effect.powerMod,
+      ...(effect.symbolMod ? { symbolMod: effect.symbolMod } : {}),
+      sourceCardId: `card-text-continuous:${source.instanceId}:${target.effectIndex}`
+    }));
+    if (effect.targetCardType === 'Avatar' && effect.powerMod !== 0) {
+      const expectedPower = [...changed!.layerModifiers].sort((left, right) => left.layer - right.layer).reduce((power, modifier) =>
+        modifier.powerSet === undefined ? power + modifier.powerMod : modifier.powerSet, changed!.card.power);
+      expect(calculateNetPower(changed!)).toBe(expectedPower);
+    }
+    if (effect.symbolMod) expect(calculateEffectiveSymbol(changed!)).toBe(effect.symbolMod);
+  }
+  return targets.length > 0;
+}
+
 function zoneIds(state: GameState): Record<string, string[]> {
   const zones: Record<string, string[]> = {};
   for (const playerId of state.playerOrder) {
@@ -96,8 +204,61 @@ function targetRequirement(effect: ReturnType<typeof parseCardText>['clauses'][n
     'destroy_construct', 'bounce_construct', 'banish_construct', 'sacrifice_avatar'].includes(effect.kind) ? 1 : 0;
 }
 
+function catalogCandidate(selector: ReturnType<typeof parseCardText>['clauses'][number]['selector'], requiredType?: string): Card | undefined {
+  return catalog.find(candidate => (!requiredType || candidate.type === requiredType) &&
+    (!selector?.cardTypes.length || selector.cardTypes.includes(candidate.type)) &&
+    (!selector?.symbol || candidate.symbol?.includes(selector.symbol)) &&
+    (!selector?.name || matchesCardName(candidate.name, selector.name, parseCardNameRules(candidate))) &&
+    (!selector?.cost || (selector.cost.comparison === 'at_most' ? candidate.cost <= selector.cost.value : candidate.cost >= selector.cost.value)));
+}
+
+function seedConditionState(state: GameState, parsed: ReturnType<typeof parseCardText>): string[] {
+  const errors: string[] = [];
+  for (const condition of parsed.clauses.flatMap(clause => clause.conditions)) {
+    const playerId = condition.controller === 'self' ? 'p1' : 'p2';
+    const player = state.players[playerId];
+    if (condition.kind === 'critical') {
+      state.players[playerId] = { ...player, isCritical: true };
+      continue;
+    }
+    if (condition.kind === 'avatar_name' || condition.kind === 'avatar_symbol') {
+      const match = catalog.find(candidate => candidate.type === 'Avatar' && (condition.kind === 'avatar_name'
+        ? matchesCardName(candidate.name, condition.name, parseCardNameRules(candidate))
+        : candidate.symbol?.includes(condition.symbol)));
+      if (!match) {
+        errors.push(`no official catalog Avatar satisfies ${condition.kind} for ${playerId}`);
+        continue;
+      }
+      player.avatarZone.push(instance(`p4-condition-${playerId}-${player.avatarZone.length}`, playerId, match));
+      continue;
+    }
+    for (let index = 0; index < condition.minimum; index += 1) {
+      const match = catalog.find(candidate => (!condition.cardType || candidate.type === condition.cardType) &&
+        (!condition.nameIncludes || candidate.name.includes(condition.nameIncludes)));
+      if (!match) {
+        errors.push(`no official catalog card satisfies Hell condition for ${playerId}`);
+        break;
+      }
+      player.hell.push(instance(`p4-condition-hell-${playerId}-${index}`, playerId, match));
+    }
+  }
+  return errors;
+}
+
+function verifyEquipRestrictions(card: Card, parsed: ReturnType<typeof parseCardText>): boolean {
+  const clauses = parsed.clauses.filter(clause => clause.equipRestriction);
+  if (clauses.length === 0) return true;
+  const legalTarget = catalog.find(target => target.type === 'Avatar' && checkModificationEquip(card, target).legal);
+  const illegalTarget = catalog.find(target => target.type === 'Avatar' && !checkModificationEquip(card, target).legal);
+  if (!legalTarget || !illegalTarget) return false;
+  expect(checkModificationEquip(card, legalTarget)).toMatchObject({ legal: true, restricted: true });
+  expect(checkModificationEquip(card, illegalTarget).legal).toBe(false);
+  return clauses.every(clause => clause.equipRestriction !== undefined);
+}
+
 function makeBindings(card: Card, state: GameState) {
   const parsed = parseCardText(card);
+  const fixtureErrors = seedConditionState(state, parsed);
   const operationClauses = parsed.clauses.filter(clause => clause.effects.length > 0 || clause.cost);
   const bindings: Array<{ costInstanceIds?: string[]; targetInstanceIds?: string[] }> = [];
   let targetIndex = 0;
@@ -109,28 +270,34 @@ function makeBindings(card: Card, state: GameState) {
         const id = `p1-target-${targetIndex++}`;
         if (effect.kind === 'search_deck_to_hand') {
           const matchingCard = catalog.find(candidate => candidate.type === effect.cardType && matchesCardName(candidate.name, effect.name, parseCardNameRules(candidate)));
-          if (!matchingCard) continue;
+          if (!matchingCard) {
+            fixtureErrors.push(`no official catalog ${effect.cardType} matches the Deck search name ${effect.name.value}`);
+            continue;
+          }
           state.players.p1.deck.push(instance(id, 'p1', matchingCard));
         } else if (effect.kind === 'recover_from_hell' || effect.kind === 'summon_from_hell') {
-          const matchingCard = catalog.find(candidate => candidate.type === effect.cardType &&
-            (!effect.name || matchesCardName(candidate.name, effect.name, parseCardNameRules(candidate))));
-          if (!matchingCard) continue;
+          const references = effect.name ? [effect.name, ...(effect.kind === 'recover_from_hell' ? effect.alternateNames ?? [] : [])] : [];
+          const matchingCards = [...new Map(catalog.filter(candidate => candidate.type === effect.cardType &&
+            (references.length === 0 || references.some(reference => matchesCardName(candidate.name, reference, parseCardNameRules(candidate))))).map(candidate => [candidate.name, candidate])).values()];
+          const matchingCard = matchingCards[index % Math.max(matchingCards.length, 1)];
+          if (!matchingCard) {
+            fixtureErrors.push(`no official catalog ${effect.cardType} matches the Hell selection`);
+            continue;
+          }
           state.players.p1.hell.push(instance(id, 'p1', matchingCard));
         } else {
-          const cardType = effect.kind === 'return_to_deck' && clause.selector?.cardTypes[0]
-            ? clause.selector.cardTypes[0] as Card['type']
+          const requiredType = effect.kind === 'return_to_deck' ? undefined
             : effect.kind.includes('construct') ? 'Construct' : 'Avatar';
-          const targetCard: Card = {
-            ...base,
-            type: cardType,
-            cost: clause.selector?.cost?.value ?? base.cost,
-            symbol: clause.selector?.symbol ?? base.symbol,
-            name: clause.selector?.name?.value ?? `Fixture target ${targetIndex}`,
-          };
+          const targetCard = catalogCandidate(clause.selector, requiredType);
+          if (!targetCard) {
+            fixtureErrors.push(`no official catalog target matches selector for ${effect.kind}`);
+            continue;
+          }
           const targetPlayerId = clause.selector?.controller === 'opponent' ? 'p2' : 'p1';
           if (effect.kind === 'return_to_deck' && clause.selector?.zones.includes('ในนรก')) state.players[targetPlayerId].hell.push(instance(id, targetPlayerId, targetCard));
-          else if (effect.kind === 'return_to_deck') state.players[targetPlayerId].hand.push(instance(id, targetPlayerId, targetCard));
-          else if (cardType === 'Construct') state.players[targetPlayerId].constructZone.push(instance(id, targetPlayerId, targetCard));
+          else if (effect.kind === 'return_to_deck' && clause.selector?.zones.includes('บนมือ')) state.players[targetPlayerId].hand.push(instance(id, targetPlayerId, targetCard));
+          else if (effect.kind === 'return_to_deck') state.players[targetPlayerId].avatarZone.push(instance(id, targetPlayerId, targetCard));
+          else if (requiredType === 'Construct') state.players[targetPlayerId].constructZone.push(instance(id, targetPlayerId, targetCard));
           else state.players[targetPlayerId].avatarZone.push(instance(id, targetPlayerId, targetCard));
         }
         targetInstanceIds.push(id);
@@ -140,22 +307,82 @@ function makeBindings(card: Card, state: GameState) {
     for (let index = 0; index < (clause.cost?.count ?? 0); index += 1) {
       const id = `p1-cost-${handIndex++}`;
       const costType = clause.cost?.kind === 'discard_from_hand' && clause.cost.selector?.cardTypes[0]
-        ? clause.cost.selector.cardTypes[0]
-        : 'Avatar';
-      const costCard = { ...base, type: costType as Card['type'], symbol: clause.cost?.kind === 'discard_from_hand' ? clause.cost.selector?.symbol ?? base.symbol : base.symbol };
+        ? clause.cost.selector.cardTypes[0] : 'Avatar';
+      const costCard = catalogCandidate(clause.cost?.selector, costType);
+      if (!costCard) {
+        fixtureErrors.push(`no official catalog card matches ${clause.cost?.kind ?? 'cost'} selector`);
+        continue;
+      }
       state.players.p1.hand.push(instance(id, 'p1', costCard));
       costInstanceIds.push(id);
     }
     bindings.push({ costInstanceIds, targetInstanceIds });
   }
-  return { parsed, bindings };
+  return { parsed, bindings, fixtureErrors };
+}
+
+function stateWithoutConditions(input: GameState, conditions: EffectCondition[]): GameState {
+  const state = structuredClone(input);
+  for (const condition of conditions) {
+    if (!('playerId' in condition)) {
+      for (const player of Object.values(state.players)) player.avatarZone = player.avatarZone.filter(card => card.instanceId !== condition.targetId);
+      continue;
+    }
+    const player = state.players[condition.playerId];
+    if (condition.kind === 'player_is_critical') {
+      state.players[condition.playerId] = { ...player, isCritical: false };
+    } else if (condition.kind === 'player_has_avatar') {
+      const matches = (name: string) => condition.matching === 'EXACT_CARD_NAME' ? name.trim() === condition.nameIncludes
+        : condition.matching === 'DELIMITED_WORD_SEQUENCE'
+          ? matchesCardName(name, { kind: 'quoted-word', value: condition.nameIncludes, matching: 'DELIMITED_WORD_SEQUENCE' })
+          : name.includes(condition.nameIncludes);
+      player.avatarZone = player.avatarZone.filter(card => !matches(card.card.name));
+    } else if (condition.kind === 'player_has_avatar_symbol') {
+      player.avatarZone = player.avatarZone.filter(card => !calculateEffectiveSymbol(card)?.includes(condition.symbol));
+    } else if (condition.kind === 'player_hell_count') {
+      const matches = (card: CardInstance) => (condition.cardType === undefined || card.card.type === condition.cardType) &&
+        (condition.nameIncludes === undefined || (condition.matching === 'EXACT_CARD_NAME' ? card.card.name.trim() === condition.nameIncludes
+          : condition.matching === 'DELIMITED_WORD_SEQUENCE'
+            ? matchesCardName(card.card.name, { kind: 'quoted-word', value: condition.nameIncludes, matching: 'DELIMITED_WORD_SEQUENCE' })
+            : card.card.name.includes(condition.nameIncludes)));
+      player.hell = player.hell.filter(card => !matches(card));
+    }
+  }
+  return state;
 }
 
 function expectedToVerify(card: Card, parsed: ReturnType<typeof parseCardText>): boolean {
   if (parsed.status !== 'PARSED_READY' || parsed.clauses.length === 0) return false;
-  if (parsed.clauses.some(clause => clause.effects.length === 0 || clause.unresolved.length > 0 || clause.conditions.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้|ถ้า|หาก|ตราบเท่าที่/.test(clause.source))) return false;
+  if (parsed.clauses.some(clause => clause.effects.length === 0 && !clause.equipRestriction || clause.unresolved.length > 0 || clause.timing.mode || clause.timing.event || clause.timing.frequency || clause.keywordSpecs.length > 0 || /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) return false;
   if (parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))) return false;
-  return parsed.clauses.every(clause => clause.effects.length > 0) && !!card.mainEffect.trim();
+  return parsed.clauses.every(clause => clause.effects.length > 0 || clause.equipRestriction) && !!card.mainEffect.trim();
+}
+
+function assertExitPrevention(before: GameState, plan: EffectPlan, effect: EffectDefinition) {
+  if (effect.kind !== 'destroy_avatar' && effect.kind !== 'destroy_construct') return;
+  const zone = effect.kind === 'destroy_avatar' ? 'avatarZone' : 'constructZone';
+  const ownerId = before.playerOrder.find(playerId => before.players[playerId][zone].some(card => card.instanceId === effect.targetId));
+  if (!ownerId) throw new Error(`Missing destruction target ${effect.targetId}`);
+
+  for (const mode of ['AUTOMATIC', 'ACTIVATED'] as const) {
+    const shielded = structuredClone(before);
+    const target = shielded.players[ownerId][zone].find(card => card.instanceId === effect.targetId)!;
+    const shield = {
+      id: `phase4-${mode}-${effect.targetId}`, kind: 'DESTRUCTION' as const, mode,
+      sourceControllerId: target.controllerId, usesRemaining: 1
+    };
+    shielded.players[ownerId][zone] = shielded.players[ownerId][zone].map(card => card.instanceId === effect.targetId
+      ? { ...card, preventionShields: [shield] } : card);
+    const result = resolveEffectPlan(shielded, { actorId: plan.actorId, effects: [effect] });
+    expect(result.ok).toBe(true);
+    expect(result.state.players[ownerId][zone].some(card => card.instanceId === effect.targetId)).toBe(true);
+    if (mode === 'AUTOMATIC') {
+      expect(result.state.pendingExitPrevention).toBeUndefined();
+      expect(result.state.gameEvents?.some(item => item.event.type === 'PREVENTION_APPLIED' && item.event.targetId === effect.targetId)).toBe(true);
+    } else {
+      expect(result.state.pendingExitPrevention).toMatchObject({ targetCardId: effect.targetId, usedActivatedPrevention: false });
+    }
+  }
 }
 
 function assertEffectState(before: GameState, after: GameState, plan: NonNullable<ReturnType<typeof toCardTextEffectPlan>>) {
@@ -251,6 +478,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
       moveExpected(effect.targetId, `${old!.ownerId}.hell`);
       expect(afterZones[`${old!.ownerId}.avatarZone`]).toEqual(expectedZones[`${old!.ownerId}.avatarZone`]);
       expect(afterZones[`${old!.ownerId}.hell`]).toEqual(expectedZones[`${old!.ownerId}.hell`]);
+      if (effect.kind === 'destroy_avatar') assertExitPrevention(before, plan, effect);
     } else if (effect.kind === 'bounce_avatar' || effect.kind === 'banish_avatar') {
       const old = before.playerOrder.flatMap(id => before.players[id].avatarZone).find(card => card.instanceId === effect.targetId)!;
       const destination = effect.kind === 'bounce_avatar' ? 'hand' : 'darkDimension';
@@ -263,6 +491,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
       moveExpected(effect.targetId, `${old.ownerId}.${destination}`);
       expect(afterZones[`${old.ownerId}.constructZone`]).toEqual(expectedZones[`${old.ownerId}.constructZone`]);
       expect(afterZones[`${old.ownerId}.${destination}`]).toEqual(expectedZones[`${old.ownerId}.${destination}`]);
+      if (effect.kind === 'destroy_construct') assertExitPrevention(before, plan, effect);
     } else if (effect.kind === 'return_to_deck') {
       for (const id of effect.instanceIds) moveExpected(id, 'p1.deck', effect.position === 'top' ? 'top' : 'bottom');
       const afterDeck = afterZones['p1.deck'];
@@ -289,6 +518,17 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
       expect(afterZones[`${effect.playerId}.avatarZone`]).toEqual(expectedZones[`${effect.playerId}.avatarZone`]);
       expect(afterZones[`${effect.playerId}.hell`]).toEqual(expectedZones[`${effect.playerId}.hell`]);
       expect(after.players[effect.playerId].avatarZone.find(card => card.instanceId === effect.instanceId)?.isRested).toBe(effect.rested ?? false);
+    } else if (effect.kind === 'cancel_pending_magic') {
+      const pending = before.reactionWindow?.pendingAction;
+      expect(pending?.type).toBe('RESOLVE_MAGIC');
+      if (pending?.type === 'RESOLVE_MAGIC') {
+        const ownerId = pending.sourceCard.originalOwnerId ?? pending.sourceCard.ownerId;
+        moveExpected(pending.sourceCard.instanceId, `${ownerId}.hell`);
+        expect(afterZones[`${ownerId}.hell`]).toEqual(expectedZones[`${ownerId}.hell`]);
+        expect(afterZones[`${ownerId}.magicZone`]).toEqual(expectedZones[`${ownerId}.magicZone`]);
+        expect(after.reactionWindow?.pendingAction).toBeUndefined();
+        expect(after.gameEvents?.some(item => item.event.type === 'ACTION_CANCELLED' && item.event.targetInstanceId === pending.sourceCard.instanceId)).toBe(true);
+      }
     } else if (effect.kind === 'scout_cards') {
       throw new Error('Scout requires an explicit player-choice resolution and is not verified by an automatic selection');
     } else {
@@ -297,9 +537,10 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
   }
 }
 
-describe('Phase 4A per-card Game State verification', () => {
+describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
-    expect(parsedRows).toHaveLength(229);
+    expect(effectRows).toHaveLength(1833);
+    expect(parsedRows).toHaveLength(226);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 
@@ -311,29 +552,140 @@ describe('Phase 4A per-card Game State verification', () => {
 
   it.each(parsedRows.map((card, rowIndex) => [rowIndex + 1, card] as const))('tests catalog row %i: %s', (_rowNumber, card) => {
     const state = makeState();
-    const { parsed, bindings } = makeBindings(card, state);
+    const { parsed, bindings, fixtureErrors } = makeBindings(card, state);
+    fixtureErrors.forEach(error => recordUnverified(card, `fixture seed unavailable: ${error}`));
+    const equipVerified = verifyEquipRestrictions(card, parsed);
+    if (!equipVerified) recordUnverified(card, 'equip restriction has no positive and negative official catalog target pair');
     const before = structuredClone(state);
+    if (parsed.clauses.length > 0 && parsed.clauses.every(clause => clause.equipRestriction && clause.effects.length === 0 && !clause.cost)) {
+      if (equipVerified) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      return;
+    }
+    const continuousClause = parsed.clauses.length === 1 ? parsed.clauses[0] : undefined;
+    if (continuousClause?.timing.mode === 'CONTINUOUS' && parsed.continuousEffects.length > 0) {
+      const verified = verifyContinuousCard(card, parsed, state);
+      if (verified && continuousClause.unresolved.length === 0 && continuousClause.effects.length === 0) {
+        verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      } else {
+        recordUnverified(card, 'continuous effect did not produce a verified modifier for a legal catalog target');
+      }
+      return;
+    }
+    const triggerClause = parsed.clauses.length === 1 ? parsed.clauses[0] : undefined;
+    if (triggerClause?.timing.event && triggerClause.effects.length > 0) {
+      if (card.type === 'Life' || triggerClause.timing.event === 'AVATAR_DESTROYED' && triggerClause.timing.eventSubject === 'SOURCE') {
+        recordUnverified(card, 'trigger source is outside the active-field event dispatcher');
+        return;
+      }
+      const source = instance('p1-trigger-source', 'p1', card);
+      if (card.type === 'Avatar') state.players.p1.avatarZone.push(source);
+      else if (card.type === 'Construct') state.players.p1.constructZone.push(source);
+      else if (card.type === 'Magic') state.players.p1.magicZone.push(source);
+      else if (card.subtype === 'Land') state.landMagicZone = source;
+      else {
+        recordUnverified(card, `unsupported trigger source zone: ${card.type}`);
+        return;
+      }
+      const binding = bindings[0] ?? {};
+      const ability = toTriggerAbility(triggerClause, `phase4:${card.printId}:${catalog.indexOf(card)}`, 'p1', {
+        state, sourceInstanceId: source.instanceId,
+        ...(binding.costInstanceIds ? { costInstanceIds: binding.costInstanceIds } : {}),
+        ...(binding.targetInstanceIds ? { targetInstanceIds: binding.targetInstanceIds } : {})
+      });
+      if (!ability) {
+        recordUnverified(card, 'typed event ability could not compile its state-bound plan');
+        return;
+      }
+      source.triggerAbilities = [ability];
+      if (ability.effects.some(effect => effect.kind === 'scout_cards')) {
+        recordUnverified(card, 'Scout requires an explicit player choice');
+        return;
+      }
+      const eventActorId = ability.actorRelation === 'OPPONENT' ? 'p2'
+        : ability.actorRelation === 'SELF' || ability.eventSubject === 'SOURCE' ? 'p1' : 'p2';
+      const eventId = `phase4:${card.printId}:${catalog.indexOf(card)}:event`;
+      let event: GameEvent;
+      if (ability.eventType === 'MAGIC_PLAYED' && ability.effects.some(effect => effect.kind === 'cancel_pending_magic')) {
+        const pendingCardDefinition = catalog.find(candidate => candidate.type === 'Magic' && candidate.subtype !== 'Land' && !candidate.mainEffect.includes('#'));
+        if (!pendingCardDefinition) {
+          recordUnverified(card, 'no official catalog Magic can seed the pending cancellation context');
+          return;
+        }
+        const pendingCard = instance('p2-pending-magic', 'p2', pendingCardDefinition);
+        state.players.p2.magicZone.push(pendingCard);
+        state.reactionWindow = {
+          id: `${eventId}:window`, trigger: { type: 'MAGIC_PLAYED', actorId: 'p2', sourceInstanceId: pendingCard.instanceId },
+          turnOwnerId: 'p1', priorityPlayerId: 'p2', passedPlayerIds: [], priorityOrder: ['p2', 'p1'], chain: [], revision: 0,
+          pendingAction: { type: 'RESOLVE_MAGIC', actorId: 'p2', sourceCard: pendingCard }
+        };
+        event = { type: 'MAGIC_PLAYED', instanceId: pendingCard.instanceId, subtype: pendingCardDefinition.subtype ?? 'Normal', playerId: 'p2', eventId };
+      } else {
+        event = makeTriggerEvent(ability.eventType, eventId, eventActorId,
+          ability.eventSubject === 'SOURCE' ? source.instanceId : 'p2-event-subject');
+      }
+      const emitted = appendGameEvents(state, [event]);
+      const triggerWasQueued = emitted.reactionWindow?.chain?.some(entry => entry.entryType === 'TRIGGER_ABILITY' && entry.triggerId === `${source.instanceId}:${ability.id}`);
+      if (!triggerWasQueued) {
+        recordUnverified(card, 'event fixture did not satisfy the parsed trigger subject and actor context');
+        return;
+      }
+      const beforeResolution = structuredClone(emitted);
+      const resolved = resolveTriggerChain(emitted);
+      assertEffectState(beforeResolution, resolved, {
+        actorId: 'p1', ...(ability.conditions?.length ? { conditions: ability.conditions } : {}), effects: ability.effects
+      });
+      const triggerKeywordsOnly = triggerClause.keywordSpecs.every(spec => spec.kind === 'TRIGGER' || spec.kind === 'ONCE_PER_TURN');
+      if (equipVerified && fixtureErrors.length === 0 && triggerClause.unresolved.length === 0 && !triggerClause.cost && !triggerClause.conditions.length && triggerKeywordsOnly) {
+        verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      } else {
+        recordUnverified(card, 'trigger fired, but the card has additional unverified cost, condition, or keyword behavior');
+      }
+      return;
+    }
     const plan = toCardTextEffectPlan(parsed, 'p1', bindings, state);
     if (!plan) {
       expect(parsed.status).toBe('PARSED_READY');
+      for (const blocker of verificationBlockers(card, parsed)) recordUnverified(card, blocker);
+      recordUnverified(card, 'effect plan did not compile with generated bindings');
       return;
     }
     if (plan.effects.some(effect => effect.kind === 'scout_cards')) {
       expect(parsed.clauses.some(clause => clause.effects.some(effect => effect.kind === 'scout_cards'))).toBe(true);
+      recordUnverified(card, 'Scout requires an explicit player choice');
       return;
     }
     const result = resolveEffectPlan(state, plan);
     if (!result.ok) {
       expect(result.state).toBe(state);
+      recordUnverified(card, `effect resolution rejected: ${result.reason ?? 'unspecified'}`);
       return;
     }
     expect(result.state).not.toBe(state);
+    if (plan.conditions?.length) {
+      const unmet = stateWithoutConditions(before, plan.conditions);
+      const rejected = resolveEffectPlan(unmet, plan);
+      expect(rejected.ok).toBe(false);
+      expect(rejected.state).toBe(unmet);
+    }
     assertEffectState(before, result.state, plan);
-    if (expectedToVerify(card, parsed)) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+    const blockers = verificationBlockers(card, parsed);
+    if (equipVerified && fixtureErrors.length === 0 && blockers.length === 0 && expectedToVerify(card, parsed)) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+    else blockers.forEach(blocker => recordUnverified(card, blocker));
   });
 
   afterAll(() => {
-    console.info(`[phase4] PARSED_READY rows attempted=${parsedRows.length}; VERIFIED_WORKING=${verifiedRows.size}`);
+    const reasonCounts = new Map<string, number>();
+    const reasonExamples = new Map<string, string[]>();
+    for (const [row, entry] of unverifiedRows) {
+      for (const reason of entry.reasons) {
+        reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+        const examples = reasonExamples.get(reason) ?? [];
+        if (examples.length < 3) examples.push(row);
+        reasonExamples.set(reason, examples);
+      }
+    }
+    console.info(`[phase4] PARSED_READY rows attempted=${parsedRows.length}; VERIFIED_WORKING=${verifiedRows.size}; NOT_VERIFIED=${unverifiedRows.size}`);
+    console.info(`[phase4] NOT_VERIFIED reasons: ${[...reasonCounts].sort((left, right) => right[1] - left[1]).map(([reason, count]) => `${reason}=${count} (e.g. ${reasonExamples.get(reason)?.join(', ')})`).join('; ')}`);
     console.info(`[phase4] VERIFIED_WORKING rows: ${[...verifiedRows].sort().join('; ')}`);
   });
 });
