@@ -505,10 +505,12 @@ export function executeCardAbility(
   return { state: nextState, logs };
 }
 
-/**
- * Clears all end-of-turn temporary modifiers (Layer 1/4 one-turn buffs) at the start of End Phase / Turn change.
- */
-export function clearEndOfTurnModifiers(state: GameState): GameState {
+/** Expires only the modifiers whose explicit timing matches this boundary. */
+export function expireModifiersAt(
+  state: GameState,
+  timing: 'END_OF_BATTLE' | 'END_OF_TURN' | 'DRAW_PHASE',
+  playerId?: string
+): GameState {
   const newPlayers: Record<string, PlayerState> = {};
   for (const pid of state.playerOrder) {
     const p = state.players[pid];
@@ -517,9 +519,15 @@ export function clearEndOfTurnModifiers(state: GameState): GameState {
       ...p,
       avatarZone: p.avatarZone.map(a => ({
         ...a,
-        layerModifiers: a.layerModifiers.filter(m => m.expiresAt !== 'END_OF_TURN')
+        layerModifiers: pid === playerId || playerId === undefined
+          ? a.layerModifiers.filter(m => m.expiresAt !== timing)
+          : a.layerModifiers
       }))
     };
   }
   return recomputeContinuousAuras({ ...state, players: newPlayers });
+}
+
+export function clearEndOfTurnModifiers(state: GameState): GameState {
+  return expireModifiersAt(state, 'END_OF_TURN');
 }

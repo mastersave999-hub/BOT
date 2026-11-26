@@ -3,6 +3,8 @@ import {
   decodeNetMessage,
   encodeNetMessage,
   isReactionCommandCurrent,
+  isGameStateValidForSync,
+  isLegalGameStateSync,
   redactLifeCardsForViewer,
   redactLifeCardsInSetup,
   restoreHiddenZonesFromCanonical,
@@ -85,6 +87,46 @@ function makeState(): GameState {
 }
 
 describe('multiplayer LIFE card privacy', () => {
+  it('requires the outgoing player to discard exactly to seven before ending their turn', () => {
+    const previous = makeState();
+    previous.currentPhase = 'END';
+    previous.players['player-1'].hand = Array.from({ length: 9 }, (_, index) => ({
+      ...makeLifeInstance('player-1', index), instanceId: `hand-${index}`, card: { ...makeCard(`Hand ${index}`, `hand-${index}`), type: 'Magic' }
+    }));
+    const incoming = structuredClone(previous);
+    incoming.players['player-1'].hand = incoming.players['player-1'].hand.slice(0, 7);
+    incoming.players['player-1'].hell = [previous.players['player-1'].hand[7], previous.players['player-1'].hand[8]];
+    incoming.currentTurnPlayerIndex = 1;
+    incoming.currentPhase = 'DRAW';
+    incoming.turnNumber = 2;
+    expect(isLegalGameStateSync(previous, incoming, 'player-1')).toBe(true);
+    expect(isLegalGameStateSync(previous, incoming, 'player-2')).toBe(false);
+    const invalid = structuredClone(incoming);
+    invalid.players['player-1'].hell = [];
+    expect(isLegalGameStateSync(previous, invalid, 'player-1')).toBe(false);
+    const firstTurn = makeState();
+    firstTurn.currentPhase = 'MAIN';
+    firstTurn.turnNumber = 1;
+    const battle = structuredClone(firstTurn);
+    battle.currentPhase = 'BATTLE';
+    expect(isLegalGameStateSync(firstTurn, battle, 'player-1')).toBe(false);
+  });
+  it('rejects incoming state with invalid Construct capacity and duplicate names', () => {
+    const valid = makeState();
+    expect(isGameStateValidForSync(valid)).toBe(true);
+    const invalid = makeState();
+    invalid.players['player-1'].constructZone = Array.from({ length: 4 }, (_, index) => ({
+      ...makeLifeInstance('player-1', index),
+      instanceId: `construct-${index}`,
+      card: { ...makeCard(`Construct ${index}`, `construct-${index}`), type: 'Construct' }
+    }));
+    expect(isGameStateValidForSync(invalid)).toBe(false);
+    invalid.players['player-1'].constructZone = [
+      { ...invalid.players['player-1'].constructZone[0], instanceId: 'c1', card: { ...invalid.players['player-1'].constructZone[0].card, name: 'Duplicate' } },
+      { ...invalid.players['player-1'].constructZone[1], instanceId: 'c2', card: { ...invalid.players['player-1'].constructZone[1].card, name: 'Duplicate' } }
+    ];
+    expect(isGameStateValidForSync(invalid)).toBe(false);
+  });
   it('redacts face-down LIFE identity for opponents but preserves revealed cards', () => {
     const state = makeState();
     state.players['player-2'].hand = [makeLifeInstance('player-2', 2, true)];

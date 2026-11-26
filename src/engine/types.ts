@@ -172,6 +172,7 @@ export interface GameState {
   landMagicZone: CardInstance | null; // 1 shared global slot
   reactionWindow?: ReactionWindow;
   reactionSequence?: number;
+  pendingEndPhaseDiscardPlayerId?: string;
   /** Opening dice roll (d6) per player id; present only when turn order was decided by dice. */
   openingRolls?: Record<string, number>;
   battleContext?: {
@@ -190,4 +191,5 @@ export interface GameState {
     description: string;
     actorId: string;
   }>;
+  gameEvents?: Array<{ sequence: number; event: import('./gameEvents').GameEvent }>;
 }

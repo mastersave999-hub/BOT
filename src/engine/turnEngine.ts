@@ -1,8 +1,17 @@
 import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
-import { executeCardAbility } from './abilityEngine';
+import { executeCardAbility, expireModifiersAt } from './abilityEngine';
 
-export function executeDrawPhase(state: GameState): GameState {
-  const currentTurnPlayerId = state.playerOrder[state.currentTurnPlayerIndex];
+export function isFirstPlayerFirstTurn(state: GameState, playerId: string): boolean {
+  return state.turnNumber === 1 && state.playerOrder[0] === playerId && state.playerOrder[state.currentTurnPlayerIndex] === playerId;
+}
+
+export function nextPhaseAfterMain(state: GameState, playerId: string): 'BATTLE' | 'END' {
+  return isFirstPlayerFirstTurn(state, playerId) ? 'END' : 'BATTLE';
+}
+
+export function executeDrawPhase(inputState: GameState): GameState {
+  const currentTurnPlayerId = inputState.playerOrder[inputState.currentTurnPlayerIndex];
+  const state = expireModifiersAt(inputState, 'DRAW_PHASE', currentTurnPlayerId);
   const player = state.players[currentTurnPlayerId];
 
   if (!player) throw new Error('Player not found');

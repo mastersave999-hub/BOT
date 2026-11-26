@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { executeDrawPhase, eliminatePlayer } from '../src/engine/turnEngine.js';
+import { executeDrawPhase, eliminatePlayer, isFirstPlayerFirstTurn, nextPhaseAfterMain } from '../src/engine/turnEngine.js';
 import { GameState, PlayerState, CardInstance } from '../src/engine/types.js';
 
 function createMockCard(id: string): CardInstance {
@@ -30,6 +30,18 @@ function createMockCard(id: string): CardInstance {
 }
 
 describe('Turn Engine: Draw Phase Rules (Rule Book 3.2 p.21)', () => {
+  it('skips Battle only for the first player on their first turn', () => {
+    const first = { id: 'p1', name: 'P1', seat: 0, deck: [], hand: [], lifeDeck: [], avatarZone: [], constructZone: [], magicZone: [], hell: [], darkDimension: [], isCritical: false, reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }, usedMagicTypesThisTurn: new Set() };
+    const second = { ...first, id: 'p2', name: 'P2', seat: 1 };
+    const state: GameState = { id: 'first-turn', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0, currentPhase: 'MAIN', turnNumber: 1, roundNumber: 1, players: { p1: first, p2: second }, landMagicZone: null, eventLog: [] };
+    expect(isFirstPlayerFirstTurn(state, 'p1')).toBe(true);
+    expect(nextPhaseAfterMain(state, 'p1')).toBe('END');
+    expect(isFirstPlayerFirstTurn(state, 'p2')).toBe(false);
+    expect(nextPhaseAfterMain(state, 'p2')).toBe('BATTLE');
+    const nextPlayersTurn = { ...state, currentTurnPlayerIndex: 1, turnNumber: 2 };
+    expect(nextPhaseAfterMain(nextPlayersTurn, 'p2')).toBe('BATTLE');
+    expect(nextPhaseAfterMain({ ...state, turnNumber: 3 }, 'p1')).toBe('BATTLE');
+  });
   it('P1 Turn 1 should draw exactly 2 cards and awaken rested avatars', () => {
     const player: PlayerState = {
       id: 'p1',
@@ -99,9 +111,9 @@ describe('Turn Engine: Draw Phase Rules (Rule Book 3.2 p.21)', () => {
     lifeCard.card.mainEffect = 'จั่วการ์ด 1 ใบ';
     const player: PlayerState = {
       id: 'p1', name: 'Player 1', seat: 0,
-      deck: [createMockCard('D1'), createMockCard('D2'), createMockCard('D3')],
-      hand: [createMockCard('H1'), createMockCard('H2'), createMockCard('H3')],
-      lifeDeck: [{ ...lifeCard, isFaceUp: true }], pendingLifeEffects: ['LIFE-1'],
+      deck: [createMockCard('D1'), createMockCard('D2'), createMockCard('D3')].map(card => ({ ...card, ownerId: 'p1', controllerId: 'p1' })),
+      hand: [createMockCard('H1'), createMockCard('H2'), createMockCard('H3')].map(card => ({ ...card, ownerId: 'p1', controllerId: 'p1' })),
+      lifeDeck: [{ ...lifeCard, ownerId: 'p1', controllerId: 'p1', isFaceUp: true }], pendingLifeEffects: ['LIFE-1'],
       avatarZone: [], constructZone: [], magicZone: [], hell: [], darkDimension: [],
       isCritical: false, reactMagicBudget: { ownTurnRemaining: 0, opponentTurnRemaining: 0 },
       usedMagicTypesThisTurn: new Set()

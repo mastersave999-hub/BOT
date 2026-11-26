@@ -4,7 +4,8 @@ import {
   avatarHasKeyword,
   recomputeContinuousAuras,
   executeCardAbility,
-  clearEndOfTurnModifiers
+  clearEndOfTurnModifiers,
+  expireModifiersAt
 } from '../src/engine/abilityEngine';
 import { calculateNetPower } from '../src/engine/layers';
 import { Card, CardInstance, GameState } from '../src/engine/types';
@@ -366,6 +367,32 @@ describe('Ability Engine', () => {
 
     const endTurnState = clearEndOfTurnModifiers(res2.state);
     expect(calculateNetPower(endTurnState.players.p2.avatarZone[0])).toBe(5);
+  });
+
+  it('expires only modifiers at their specified boundary and preserves unrelated modifiers', () => {
+    const avatar = makeInstance(makeCard({ name: 'Duration target' }), 'p1', 'duration-target');
+    avatar.layerModifiers = [
+      { layer: 1, powerMod: 1, sourceCardId: 'battle-1', expiresAt: 'END_OF_BATTLE' },
+      { layer: 1, powerMod: 2, sourceCardId: 'draw-1', expiresAt: 'DRAW_PHASE' },
+      { layer: 1, powerMod: 3, sourceCardId: 'turn-1', expiresAt: 'END_OF_TURN' },
+      { layer: 1, powerMod: 4, sourceCardId: 'permanent' }
+    ];
+    const p1 = { id: 'p1', name: 'P1', seat: 0, deck: [], hand: [], lifeDeck: [], avatarZone: [avatar], constructZone: [], magicZone: [], hell: [], darkDimension: [], isCritical: false, reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 }, usedMagicTypesThisTurn: new Set() };
+    const p2 = { ...p1, id: 'p2', name: 'P2', seat: 1, avatarZone: [makeInstance(makeCard({ name: 'Opponent duration' }), 'p2', 'opponent-duration')] };
+    p2.avatarZone[0].layerModifiers = [{ layer: 1, powerMod: 8, sourceCardId: 'opponent-draw', expiresAt: 'DRAW_PHASE' }];
+    const state: GameState = { id: 'duration', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0, currentPhase: 'MAIN', turnNumber: 2, roundNumber: 1, landMagicZone: null, players: { p1, p2 }, eventLog: [] };
+    const before = calculateNetPower(state.players.p1.avatarZone[0]);
+    expect(before).toBe(12);
+    const afterBattle = expireModifiersAt(state, 'END_OF_BATTLE');
+    expect(calculateNetPower(afterBattle.players.p1.avatarZone[0])).toBe(11);
+    expect(afterBattle.players.p1.avatarZone[0].layerModifiers.map(modifier => modifier.sourceCardId)).toEqual(['draw-1', 'turn-1', 'permanent']);
+    const afterDraw = expireModifiersAt(afterBattle, 'DRAW_PHASE', 'p1');
+    expect(afterDraw.players.p1.avatarZone[0].layerModifiers.map(modifier => modifier.sourceCardId)).toEqual(['turn-1', 'permanent']);
+    expect(afterDraw.players.p2.avatarZone[0].layerModifiers[0].sourceCardId).toBe('opponent-draw');
+    const repeated = expireModifiersAt(afterDraw, 'DRAW_PHASE', 'p1');
+    expect(repeated.players.p1.avatarZone[0].layerModifiers).toHaveLength(2);
+    const afterTurn = clearEndOfTurnModifiers(repeated);
+    expect(afterTurn.players.p1.avatarZone[0].layerModifiers.map(modifier => modifier.sourceCardId)).toEqual(['permanent']);
   });
 
   it('applies one Layer 4 attack buff, includes it in combat power, preserves other modifiers, and clears it at turn end', () => {

@@ -1,4 +1,5 @@
 import type { Card, GameState } from './types';
+import { validateGameState } from './gameRules';
 
 const HIDDEN_PRIVATE_CARD: Card = {
   printId: 'hidden-private-card',
@@ -113,6 +114,30 @@ export function restoreHiddenZonesFromCanonical(
     };
   }
   return { ...incoming, players };
+}
+
+export function isGameStateValidForSync(state: GameState): boolean {
+  return validateGameState(state) === null;
+}
+
+export function isLegalGameStateSync(previous: GameState, incoming: GameState, senderPlayerId: string): boolean {
+  if (!isGameStateValidForSync(incoming) || incoming.id !== previous.id || incoming.mode !== previous.mode ||
+    JSON.stringify(incoming.playerOrder) !== JSON.stringify(previous.playerOrder) ||
+    Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
+    Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
+  const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
+  if (!activePlayerId || senderPlayerId !== activePlayerId) return false;
+  const outgoingPlayer = previous.players[activePlayerId];
+  const incomingOutgoingPlayer = incoming.players[activePlayerId];
+  const endedTurn = incoming.currentTurnPlayerIndex !== previous.currentTurnPlayerIndex || incoming.turnNumber !== previous.turnNumber;
+  if (previous.currentPhase === 'END' && endedTurn && outgoingPlayer.hand.length > 7) {
+    const removedIds = outgoingPlayer.hand.filter(card => !incomingOutgoingPlayer?.hand.some(next => next.instanceId === card.instanceId)).map(card => card.instanceId);
+    const movedToHell = new Set(incomingOutgoingPlayer?.hell.map(card => card.instanceId) ?? []);
+    if (incomingOutgoingPlayer?.hand.length !== 7 || removedIds.length !== outgoingPlayer.hand.length - 7 || removedIds.some(id => !movedToHell.has(id))) return false;
+  }
+  const firstPlayerFirstTurn = previous.turnNumber === 1 && activePlayerId === previous.playerOrder[0];
+  if (previous.currentPhase === 'MAIN' && firstPlayerFirstTurn && incoming.currentPhase === 'BATTLE') return false;
+  return true;
 }
 
 export type RoomMode = 'DUEL' | 'AD_MUA';
