@@ -304,14 +304,14 @@ Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test file
 
 ## 16. Phase 3 — Card Text Adapter dry-run
 
-`src/engine/cardTextAdapter.ts` preserves printed attributes, isolates inherent `#` Rule Text, separates colon-delimited clauses, records listed Thai keyword markers and quoted/exact name references, and distinguishes the two p.11 Magic-type statements. It now maps only the exact standalone self-draw grammar (`จั่วการ์ด X ใบ`, optionally `จาก Deck เรา`) to the Phase 2 typed `draw` effect. The effect adapter binds the acting player and the existing resolver enforces whole-plan atomicity. Costs, targets, choices, conditions, durations, keyword-trigger semantics, and unimplemented effect operations remain `UNSUPPORTED`; explicit unresolved wording remains `AMBIGUOUS`. If any clause is unsupported, typed effects are removed from the entire card result.
+`src/engine/cardTextAdapter.ts` separates printed attributes and inherent `#` Rule Text, parses line-level clauses and cost/effect headers, and records timing/frequency, typed cost forms, selector metadata (controller/type/zone/name/symbol/cost bound), durations, keywords, and both p.11 Magic declarations as independent AST nodes. The Phase 2 interpreter mapping remains conservative: self-draw compiles to an executable `EffectDefinition`; a recognized hand-discard cost compiles only with explicit instance IDs and a Game State proving the parsed card type/symbol/hand selector. Catalog SD01-005 (Juti header + draw 3) and SD01-018 (selector-checked discard + draw 2) have real typed Game State tests. Conditions, multi-effect transactions, non-draw effect execution, search/scout/mill composition, and complete static keyword behavior are not yet executable through this adapter and stay fail-closed. Any unresolved clause clears every typed effect for that card.
 
 ### Exact catalog coverage (rows with nonempty `mainEffect`)
 
 | Status | Rows |
 |---|---:|
-| PARSED_READY (exact standalone draw grammar; not per-card verification) | 14 |
-| UNSUPPORTED | 1,815 |
+| PARSED_READY (typed AST with complete supported discard/draw or draw-only plan; not per-card verification) | 35 |
+| UNSUPPORTED | 1,794 |
 | AMBIGUOUS | 4 |
 | **Total effect-bearing rows** | **1,833** |
 | Per-card Game State verified | **0** |

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveEffectPlan } from '../src/engine/effectResolver';
-import { createNameReference, matchesCardName, parseCardText, toEffectDefinitions } from '../src/engine/cardTextAdapter';
+import { createNameReference, matchesCardName, parseCardText, toEffectDefinitions, toEffectPlan } from '../src/engine/cardTextAdapter';
 import type { Card, CardInstance, GameState } from '../src/engine/types';
 
 const catalog = JSON.parse(readFileSync(new URL('../cards_clean.json', import.meta.url), 'utf8')) as Card[];
@@ -38,28 +38,40 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(parsed.reason).toContain('typed');
   });
 
-  it('parses Cost : Effect into separate immutable text fields without guessing a cost operation', () => {
+  it('parses Cost : Effect into a selector-bearing typed cost and defers concrete payment binding', () => {
     const parsed = parseCardText(byPrintId('SD01-018'));
     const clause = parsed.clauses.find(item => item.costEffectSeparator === ':');
     expect(clause?.costText).toContain('ทิ้ง Avatar');
     expect(clause?.effectText).toContain('จั่วการ์ด 2 ใบ');
-    expect(parsed.status).toBe('UNSUPPORTED');
-    expect(parsed.reason).toContain('cost plan');
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(clause?.cost).toMatchObject({ kind: 'discard_from_hand', count: 1, selector: { cardTypes: ['Avatar'], symbol: 'เทพ' } });
+    expect(toEffectPlan(clause!, 'p1')).toBeNull();
   });
 
-  it('keeps costed catalog text unsupported and Phase 2 rejects an incomplete cost plan atomically', () => {
+  it('parses and atomically executes real Cost : Effect text with a selector-checked payment', () => {
     const parsed = parseCardText(byPrintId('SD01-018'));
-    expect(parsed.status).toBe('UNSUPPORTED');
+    expect(parsed.status).toBe('PARSED_READY');
+    const clause = parsed.clauses[0];
+    expect(clause.cost).toMatchObject({ kind: 'discard_from_hand', count: 1, selector: { cardTypes: ['Avatar'], symbol: 'เทพ' } });
+    expect(clause.effects).toEqual([{ kind: 'draw_self', count: 2 }]);
+
     const initial = gameState();
-    const result = resolveEffectPlan(initial, {
-      actorId: 'p1',
-      costs: [{ kind: 'discard_from_hand', playerId: 'p1', instanceIds: ['missing-cost-card'] }],
+    initial.players.p1.deck.push(instance('p1-deck-2', 'p1'));
+    expect(toEffectPlan(clause, 'p1', ['p1-hand'], initial)).not.toBeNull();
+    const result = resolveEffectPlan(initial, toEffectPlan(clause, 'p1', ['p1-hand'], initial)!);
+    expect(result.ok).toBe(true);
+    expect(result.state.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-deck', 'p1-deck-2']);
+    expect(result.state.players.p1.hell.map(card => card.instanceId)).toContain('p1-hand');
+    expect(initial.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand']);
+
+    const invalid = toEffectPlan(clause, 'p1', ['p1-deck'], initial);
+    expect(invalid).toBeNull();
+    const incomplete = resolveEffectPlan(initial, {
+      actorId: 'p1', costs: [{ kind: 'discard_from_hand', playerId: 'p1', instanceIds: ['missing-cost-card'] }],
       effects: [{ kind: 'draw', playerId: 'p1', count: 1 }]
     });
-    expect(result.ok).toBe(false);
-    expect(result.state).toBe(initial);
-    expect(initial.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand']);
-    expect(initial.players.p1.deck.map(card => card.instanceId)).toEqual(['p1-deck']);
+    expect(incomplete.ok).toBe(false);
+    expect(incomplete.state).toBe(initial);
   });
 
   it('distinguishes quoted word-sequence references from unquoted exact names (p.13)', () => {
@@ -110,6 +122,25 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     });
     expect(result.ok).toBe(true);
     expect(result.state.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand', 'p1-deck']);
+    expect(initial.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand']);
+  });
+
+  it('compiles a real triggered Thai card into a typed timing/effect AST and resolves it deterministically', () => {
+    const parsed = parseCardText(byPrintId('SD01-005'));
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(parsed.clauses[0].timing).toMatchObject({ event: 'AVATAR_SUMMONED' });
+    expect(parsed.clauses[0].effects).toEqual([{ kind: 'draw_self', count: 3 }]);
+    const plan = toEffectPlan(parsed.clauses[0], 'p1');
+    expect(plan?.effects).toEqual([{ kind: 'draw', playerId: 'p1', count: 3 }]);
+
+    const initial = gameState();
+    initial.players.p1.deck.push(instance('p1-deck-2', 'p1'), instance('p1-deck-3', 'p1'));
+    const first = resolveEffectPlan(initial, plan!);
+    const second = resolveEffectPlan(initial, plan!);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(first.state.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand', 'p1-deck', 'p1-deck-2', 'p1-deck-3']);
+    expect(second.state.players.p1.hand.map(card => card.instanceId)).toEqual(first.state.players.p1.hand.map(card => card.instanceId));
     expect(initial.players.p1.hand.map(card => card.instanceId)).toEqual(['p1-hand']);
   });
 
