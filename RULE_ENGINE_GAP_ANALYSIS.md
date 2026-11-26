@@ -291,13 +291,57 @@ Ad-Mua three-or-more-player React priority remains **Unsupported** by official R
 
 Phase 2A validation: `npx tsc --noEmit` passed; `npm test` passed **13 test files / 105 tests**; `npm run build` passed; `git diff --check` passed.
 
-## 15. Phase 2C status — current branch `v0/phase2c-triggers-combat-keywords`
+## 15. Phase 2C status at PR #19 merge — branch `v0/phase2c-triggers-combat-keywords`
 
 - **Prevention — COMPLETE for Phase 2 engine scope:** centralized field-exit movement evaluates automatic shields before a single optional prevention choice; the activated choice is added to the LIFO Reaction Chain, opponent cancellation resumes the paused exit without a second optional attempt, and an uncancelled choice preserves the field card and records its attempt. Multiplayer commands enforce authenticated controller ownership, active pending-choice state, idempotency, and exact revision matching. Rule Book 3.2 pp.10,24; covered by `tests/gameRules.test.ts` and `tests/multiplayer.test.ts`. Fractional LIFE damage remains undefined by p.25.
 - **Cancellation — COMPLETE for the implemented typed chain scope:** pending Magic, activated ability continuations and chain entries preserve LIFO/type usage and `[#]` protection metadata; field-exit prevention participates as a cancelable activated chain entry. No mid-resolution interruption is introduced. Cancelled Magic destination is not given by v3.2 (owner Hell remains an app convention).
 - **Continuous Effects and Combat — COMPLETE for the Phase 2 typed engine scope:** source-derived Layer 1–2 recomputation, declared-battle Layer 3 snapshots, Layer 4 modifiers/transfer to declared Layer 1 or 2, and the implemented typed combat lifecycle are exercised by the engine and synthetic Game State suites. No general catalog-text parsing is implied.
 - **Control Change and Trigger Effects — COMPLETE for typed infrastructure scope:** typed control transfer preserves original-owner routing, attachments, capacity and Duo immunity; typed `TriggerAbility` definitions match recorded events, resolve ordered `EffectPlan`s transactionally, enforce once-per-turn/event idempotency, defer under Reaction Windows, and apply recursion/volume bounds. Event recording/dispatch remains typed and is not a general printed-card parser.
 - **Rule ambiguities retained:** p.23 lets a player order their own simultaneous abilities but does not state cross-controller priority for all simultaneous triggers; active-player-first in Duel is an implementation convention, not an official ruling. Ad-Mua 3+ React priority remains unsupported by the Rule Book. Rule Book p.25 does not define fractional LIFE damage prevention. Cancelled-Magic destination is unspecified; owner Hell is an application convention.
-- **Phase 3 boundary and audit:** No card-text parsing was started. Catalog card status remains **Verified by per-card Game State test: 0**; generic synthetic lifecycle tests do not change that count.
-- **Merge readiness:** **READY TO MERGE for Phase 2 engine systems.** The two remaining `pendingExitPrevention` gaps—Reaction Chain integration and multiplayer command validation/synchronization—are closed and covered by tests. PR #19 remains unmerged by request; Phase 3 has not started.
-- **Final validation:** `npx tsc --noEmit` passed; `npm test` passed **17 files / 148 tests**; `npm run build` passed; `git diff --check` passed.
+- **Phase 3 boundary and audit at merge:** No card-text parsing had started at that point. Catalog card status remained **Verified by per-card Game State test: 0**; generic synthetic lifecycle tests did not change that count.
+- **Merge readiness at that time:** **READY TO MERGE for Phase 2 engine systems.** The two remaining `pendingExitPrevention` gaps—Reaction Chain integration and multiplayer command validation/synchronization—were closed and covered by tests. PR #19 was subsequently merged into `main`; Phase 3 began on `v0/phase3-card-text-adapter`.
+- **Final validation at merge:** `npx tsc --noEmit` passed; `npm test` passed **17 files / 148 tests**; `npm run build` passed; `git diff --check` passed.
+
+## 16. Phase 3 — Card Text Adapter dry-run
+
+`src/engine/cardTextAdapter.ts` is a conservative structural adapter for Rule Book 3.2. It preserves printed card attributes; isolates inherent `#` Rule Text; separates colon-delimited cost/effect clauses; records the listed Thai keyword markers; preserves quoted name references as separated-word references and unquoted references as exact-name references; and keeps p.11 “ความสามารถนี้ถือเป็นการใช้ … Magic” separate from “โดยถือว่าเป็นการใช้ … Magic”. It does not promote a keyword or text match into an executable behavior. Costs, targets, choices, conditions, durations, or state-changing text without a typed, tested translation are rejected as `UNSUPPORTED`; explicit unresolved wording is `AMBIGUOUS`.
+
+### Exact catalog coverage (rows with nonempty `mainEffect`)
+
+| Status | Rows |
+|---|---:|
+| PARSED_READY (structural parse only; not execution verification) | 0 |
+| UNSUPPORTED | 1,829 |
+| AMBIGUOUS | 4 |
+| **Total effect-bearing rows** | **1,833** |
+| Per-card Game State verified | **0** |
+
+The full catalog has 2,014 rows; 1,462 distinct `printId` values occur among effect-bearing rows. Reproduce the dry run with `npx tsx scripts/audit-card-text-adapter.ts`.
+
+### Structural pattern inventory (overlapping row counts)
+
+| Pattern | Rows |
+|---|---:|
+| Inherent `#` Rule Text marker | 184 |
+| `:` cost/effect separator | 1,401 |
+| Quoted name token | 794 |
+| At least one named keyword | 1,335 |
+| Condition/timing marker | 1,211 |
+| Duration marker | 378 |
+| Ability consumes a Magic type | 2 |
+| Magic subtype override | 5 |
+
+### Highest-frequency unresolved patterns (overlapping reason counts)
+
+| Reason | Rows |
+|---|---:|
+| Free-form or unrecognized clause | 1,833 |
+| State-changing effect lacks a verified typed translation | 1,464 |
+| Cost needs typed atomic feasibility/payment handling | 1,349 |
+| Zone choice, search, or ordering | 619 |
+| Conditional expression | 603 |
+| Target selection/legality | 451 |
+| Duration | 377 |
+| Explicit ambiguity marker | 4 |
+
+These are text triage counts, not unique mechanics or verified cards. Adapter tests cover representative catalog rows and name/Magic semantics; Phase 2 resolver tests remain separate typed-Game-State tests. No card is marked Verified in Phase 4.

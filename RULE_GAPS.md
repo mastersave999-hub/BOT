@@ -93,11 +93,18 @@ Final Phase 2.2 validation: `npm test` passed **12 files / 97 tests**; `npx tsc 
 - **Historical Phase 2B scope boundary:** Trigger Effects and Combat Keywords were outside that earlier branch; Control Change was implemented in its merge PR. Phase 3 card-text parsing remains out of scope. Synthetic tests do not upgrade any catalog card to Verified.
 - **Phase 2B validation (historical at merge):** `npx tsc --noEmit` passed; `npm test` passed **14 files / 114 tests**; `npm run build` passed; `git diff --check` passed.
 
-## Current Phase 2C status — branch `v0/phase2c-triggers-combat-keywords`
+## Phase 2C status at PR #19 merge — branch `v0/phase2c-triggers-combat-keywords`
 
 - **Prevention — COMPLETE for Phase 2 engine scope:** all eligible field exits use the centralized pipeline, automatic protection precedes the optional p.24 choice, and activated prevention is a cancelable LIFO Chain entry. An uncancelled entry preserves the card and records its attempt; a cancelled entry immediately resumes the stored exit without a second optional attempt. Player-mandated removals bypass protection (p.10). Multiplayer use/decline commands enforce authenticated ownership and exact revision matching. Covered by Game State and multiplayer tests. Fractional LIFE damage remains unspecified.
 - **Typed Phase 2 engine systems — COMPLETE:** event/trigger infrastructure, Reaction Chain cancellation, continuous-effect and declared-battle systems, control-change routing and implemented combat keyword operations are covered by focused engine tests. This does not mean every printed card effect is implemented or verified.
 - **Rule ambiguities retained:** p.23 permits controllers to order their own simultaneous abilities but does not define universal cross-controller trigger ordering; active-player-first is a Duel implementation convention. Ad-Mua 3+ React priority remains undefined by v3.2. Fractional LIFE prevention and cancelled-Magic destination remain unspecified by the Rule Book. Layer 4 transfer follows p.16 and is not an open ambiguity.
-- Phase 3 card-text parsing has not started. Verified printed-card count remains **0**; generic tests do not promote catalog records.
-- **Merge readiness: READY TO MERGE for Phase 2 engine systems.** The final `pendingExitPrevention` Chain and multiplayer-command gaps are closed. PR #19 remains unmerged by request; Phase 3 has not started.
-- **Final validation:** `npx tsc --noEmit` passed; `npm test` passed **17 files / 148 tests**; `npm run build` passed; `git diff --check` passed.
+- At the time of PR #19 merge, Phase 3 card-text parsing had not started. Verified printed-card count remained **0**; generic tests did not promote catalog records.
+- **Merge readiness at that time: READY TO MERGE for Phase 2 engine systems.** PR #19 was subsequently merged into `main`; see the Phase 3 status below.
+- **Final validation at merge:** `npx tsc --noEmit` passed; `npm test` passed **17 files / 148 tests**; `npm run build` passed; `git diff --check` passed.
+
+## Phase 3 — Card Text Adapter (current branch)
+
+- **Rule Book 3.2 adapter:** `src/engine/cardTextAdapter.ts` separates printed attributes, inherent `#` Rule Text, colon-delimited cost/effect text, keyword markers, quoted word-token references, and the two distinct p.11 Magic-use declarations. Unknown cost, target, condition, duration, zone-choice, or state-changing clauses fail closed with `UNSUPPORTED`; explicit unresolved-rule markers fail as `AMBIGUOUS`. Parsed text is not automatically an executable effect plan.
+- **Full-corpus dry run:** 2,014 catalog rows; 1,833 effect-bearing rows (1,462 distinct effect-bearing `printId` values). `PARSED_READY: 0`, `UNSUPPORTED: 1,829`, `AMBIGUOUS: 4`. `PARSED_READY` is a structural parse status only, not proof of execution or card correctness. **Per-card Game State verified: 0.** Reproduce using `npx tsx scripts/audit-card-text-adapter.ts`.
+- **Overlapping text patterns:** `#` Rule Text 184; colon 1,401; quoted token 794; named keywords 1,335; condition/timing terms 1,211; duration 378; ability consumes Magic type 2; Magic subtype override 5.
+- **Most frequent unresolved categories:** free-form/unrecognized clause 1,830; state-changing behavior without verified typed translation 1,463; cost payment needing typed atomic plan 1,349; zone choice/search/order 619; condition parser 603; target legality 451; duration 377; ambiguity markers 4.
