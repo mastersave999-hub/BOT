@@ -83,6 +83,8 @@ export interface CardInstance {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
     sourceCardId: string;
+    /** Layer 4 combat status moves to this layer when the attack/combat ends (Rule Book 3.2 p.16). */
+    transferToLayer?: 1 | 2;
     expiresAt?: EffectDuration;
   }[];
 }

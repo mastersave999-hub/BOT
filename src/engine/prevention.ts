@@ -106,14 +106,18 @@ export function preventDestruction(
 ): PreventionResult {
   const found = findTarget(state, targetId);
   if (!found) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
-  const shield = [...(found.card.preventionShields ?? [])]
+  const shields = [...(found.card.preventionShields ?? [])]
     .filter(item => item.kind === 'DESTRUCTION' && (item.mode ?? 'AUTOMATIC') === 'AUTOMATIC' && item.usesRemaining !== 0 && matchesCause(item, cause))
-    .sort((left, right) => left.id.localeCompare(right.id))[0];
-  if (!shield) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
-  return {
-    prevented: true, preventedAmount: 1, remainingAmount: 0,
-    state: updateCardShield(state, targetId, shield.id, actorId, 'DESTRUCTION', found.playerId, 1)
-  };
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (shields.length === 0) return { prevented: false, preventedAmount: 0, remainingAmount: 0, state };
+  let next = state;
+  for (const shield of shields) {
+    const current = findTarget(next, targetId);
+    if (current?.card.preventionShields?.some(item => item.id === shield.id)) {
+      next = updateCardShield(next, targetId, shield.id, actorId, 'DESTRUCTION', current.playerId, 1);
+    }
+  }
+  return { prevented: true, preventedAmount: 1, remainingAmount: 0, state: next };
 }
 
 export function preventDestructionByReaction(

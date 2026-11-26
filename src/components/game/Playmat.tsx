@@ -25,7 +25,8 @@ import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
 import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain, transitionGamePhase } from '../../engine/turnEngine';
-import { resolveAvatarCombat, attackLifeZone } from '../../engine/combatEngine';
+import { declareCombatAttack, payCombatKeyword, resolveDeclaredBattle } from '../../engine/combatKeywords';
+import { resolveAvatarCombat } from '../../engine/combatEngine';
 import {
   parseCardAbility,
   avatarHasKeyword,
@@ -417,103 +418,51 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const resolveCombatAction = (
     state: GameState,
     attackerPlayerId: string,
-  targetPlayerId: string,
-  attackerInstanceId: string,
-  targetAvatarId: string,
-  checkedAvatarIds: string[] = []
+    targetPlayerId: string,
+    attackerInstanceId: string,
+    targetAvatarId: string,
+    checkedAvatarIds: string[] = []
   ): { state: GameState; events: string[] } => {
-    const attackerPlayer = state.players[attackerPlayerId];
-    const targetPlayer = state.players[targetPlayerId];
-    const attacker = attackerPlayer?.avatarZone.find(card => card.instanceId === attackerInstanceId);
-    const target = targetPlayer?.avatarZone.find(card => card.instanceId === targetAvatarId);
-    if (!attackerPlayer || !attacker) return { state, events: [] };
-    if (!targetPlayer || !target) {
-      const restedAttacker = { ...attacker, isRested: true };
-      return {
-        state: {
-          ...state,
-          players: {
-            ...state.players,
-            [attackerPlayerId]: {
-              ...attackerPlayer,
-              avatarZone: attackerPlayer.avatarZone.map(card =>
-                card.instanceId === attackerInstanceId ? restedAttacker : card
-              )
-            }
-          }
-        },
-        events: [`${attacker.card.name} — เป้าหมายไม่อยู่บนสนาม การโจมตีสิ้นสุดลง`]
-      };
-    }
-
-    const combat = resolveAvatarCombat(attacker, target);
-    const destroyedAvatars = [
-      combat.defenderDestroyed ? target : null,
-      combat.attackerDestroyed ? attacker : null
-    ].filter((avatar): avatar is CardInstance => avatar !== null);
-    // Phase 1 has a single-target pending action; simultaneous destruction target ordering remains unresolved.
-    if (destroyedAvatars.length === 1 && !checkedAvatarIds.includes(destroyedAvatars[0].instanceId)) {
-      const avatar = destroyedAvatars[0];
-      const reactionState = openReactionWindow(
-        state,
-        {
-          type: 'AVATAR_WOULD_BE_DESTROYED',
-          actorId: attackerPlayerId,
-          targetInstanceId: avatar.instanceId,
-          targetCardName: avatar.card.name,
-          sourceCardName: attacker.card.name
-        },
-        {
-          type: 'RESOLVE_COMBAT',
-          actorId: attackerPlayerId,
-          sourceCard: attacker,
-          targetPlayerId,
-          targetAvatarId,
-          checkedAvatarIds: [...checkedAvatarIds, avatar.instanceId]
-        }
+    const attacker = state.players[attackerPlayerId]?.avatarZone.find(card => card.instanceId === attackerInstanceId);
+    const target = state.players[targetPlayerId]?.avatarZone.find(card => card.instanceId === targetAvatarId);
+    if (!attacker || !target) return { state, events: [`${attacker?.card.name ?? 'Avatar'} — เป้าหมายไม่อยู่บนสนาม การโจมตีสิ้นสุดลง`] };
+    const declared = declareCombatAttack(state, attackerInstanceId, { type: 'AVATAR', playerId: targetPlayerId, instanceId: targetAvatarId });
+    if (!declared) return { state, events: [] };
+    const layerFourPower = attacker.layerModifiers
+      .filter(modifier => modifier.layer === 4)
+      .reduce((total, modifier) => total + modifier.powerMod, 0);
+    const preview = resolveAvatarCombat(attacker, target, declared.battleContext!.snapshotPower + layerFourPower);
+    const leavingAvatars = [
+      ...(preview.attackerDestroyed ? [attacker] : []),
+      ...(preview.defenderDestroyed ? [target] : [])
+    ].sort((left, right) => Number(left.controllerId !== attackerPlayerId) - Number(right.controllerId !== attackerPlayerId));
+    for (const leaving of leavingAvatars) {
+      const automaticShield = leaving.preventionShields?.some(shield =>
+        shield.kind === 'DESTRUCTION' && (shield.mode ?? 'AUTOMATIC') === 'AUTOMATIC' && shield.usesRemaining !== 0
       );
+      if (checkedAvatarIds.includes(leaving.instanceId) || automaticShield) continue;
+      const reactionState = openReactionWindow(state, {
+        type: 'AVATAR_WOULD_BE_DESTROYED',
+        actorId: attackerPlayerId,
+        targetInstanceId: leaving.instanceId,
+        targetCardName: leaving.card.name,
+        sourceCardName: attacker.card.name
+      }, {
+        type: 'RESOLVE_COMBAT',
+        actorId: attackerPlayerId,
+        sourceCard: attacker,
+        targetPlayerId,
+        targetAvatarId,
+        checkedAvatarIds: [...checkedAvatarIds, leaving.instanceId]
+      });
       if (reactionState !== state) {
-        return { state: reactionState, events: [`${avatar.card.name} กำลังจะถูกทำลาย — เปิด Reaction Window`] };
+        return { state: reactionState, events: [`${leaving.card.name} กำลังจะออกจากสนาม — เปิด Reaction Window`] };
       }
     }
-
-    const updatedAttackerZone = attackerPlayer.avatarZone
-      .map(card => card.instanceId === attacker.instanceId ? { ...card, isRested: true } : card)
-      .filter(card => !(combat.attackerDestroyed && card.instanceId === attacker.instanceId));
-    const updatedTargetZone = targetPlayer.avatarZone.filter(
-      card => !(combat.defenderDestroyed && card.instanceId === target.instanceId)
-    );
-    let nextState: GameState = {
-      ...state,
-      players: {
-        ...state.players,
-        [attackerPlayerId]: {
-          ...attackerPlayer,
-          avatarZone: updatedAttackerZone,
-          hell: combat.attackerDestroyed
-            ? [...attackerPlayer.hell, attacker, ...(attacker.attachedInstances || [])]
-            : attackerPlayer.hell
-        },
-        [targetPlayerId]: {
-          ...targetPlayer,
-          avatarZone: updatedTargetZone,
-          hell: combat.defenderDestroyed
-            ? [...targetPlayer.hell, target, ...(target.attachedInstances || [])]
-            : targetPlayer.hell
-        }
-      }
-    };
-
-    nextState = appendLogs(nextState, combat.events, 'COMBAT', attackerPlayerId);
-    if (combat.attackerDestroyed && parseCardAbility(attacker.card).hasLastWords) {
-      const result = executeCardAbility(nextState, attackerPlayerId, attacker, 'LAST_WORDS');
-      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', attackerPlayerId);
-    }
-    if (combat.defenderDestroyed && parseCardAbility(target.card).hasLastWords) {
-      const result = executeCardAbility(nextState, targetPlayerId, target, 'LAST_WORDS');
-      nextState = appendLogs(result.state, result.logs, 'LAST_WORDS', targetPlayerId);
-    }
-    return { state: expireModifiersAt(recomputeContinuousAuras(nextState), 'END_OF_BATTLE'), events: combat.events };
+    const result = resolveDeclaredBattle(declared);
+    if (!result.ok) return { state, events: [result.reason ?? 'การต่อสู้ไม่สำเร็จ'] };
+    const nextState = appendLogs(result.state, result.events, 'COMBAT', attackerPlayerId);
+    return { state: nextState, events: result.events };
   };
 
   const finishDeferredReactionAction = (state: GameState, action?: DeferredReactionAction) => {
@@ -839,34 +788,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     const ai = state.players[opponentId];
 
-    // AI Battle: Attack player's LIFE if player has no Avatars, or attack weaker Avatar
     const readyAiAvatar = state.players[opponentId].avatarZone.find(a => !a.isRested && calculateNetPower(a) > 0);
     if (readyAiAvatar) {
       const targetPlayerAvatars = state.players[meId].avatarZone;
-      if (targetPlayerAvatars.length === 0) {
-        const lifeRes = attackLifeZone(readyAiAvatar, state.players[meId]);
-        logs.push(`🤖 ${lifeRes.event}`);
-        if (lifeRes.isGameOver) {
-          setWinnerName(ai.name);
-        }
-        state.players[opponentId].avatarZone = state.players[opponentId].avatarZone.map(a =>
-          a.instanceId === readyAiAvatar.instanceId ? { ...a, isRested: true } : a
-        );
-      } else {
-        // Check if AI has stronger Avatar
-        const aiPwr = calculateNetPower(readyAiAvatar);
-        const weakestTarget = targetPlayerAvatars[0];
-        if (aiPwr >= calculateNetPower(weakestTarget)) {
-          const combatRes = resolveAvatarCombat(readyAiAvatar, weakestTarget);
-          logs.push(...combatRes.events.map(e => `🤖 ${e}`));
-          state.players[opponentId].avatarZone = state.players[opponentId].avatarZone
-            .map(a => (a.instanceId === readyAiAvatar.instanceId ? { ...a, isRested: true } : a))
-            .filter(a => !(combatRes.attackerDestroyed && a.instanceId === readyAiAvatar.instanceId));
-          state.players[meId].avatarZone = state.players[meId].avatarZone.filter(
-            a => !(combatRes.defenderDestroyed && a.instanceId === weakestTarget.instanceId)
-          );
-          if (combatRes.attackerDestroyed) state.players[opponentId].hell.push(readyAiAvatar);
-          if (combatRes.defenderDestroyed) state.players[meId].hell.push(weakestTarget);
+      const target = targetPlayerAvatars.length === 0
+        ? { type: 'LIFE' as const, playerId: meId }
+        : targetPlayerAvatars[0] && calculateNetPower(readyAiAvatar) >= calculateNetPower(targetPlayerAvatars[0])
+          ? { type: 'AVATAR' as const, playerId: meId, instanceId: targetPlayerAvatars[0].instanceId }
+          : null;
+      if (target) {
+        const declared = declareCombatAttack(state, readyAiAvatar.instanceId, target);
+        const battle = declared ? resolveDeclaredBattle(declared) : null;
+        if (battle?.ok) {
+          state = battle.state;
+          logs.push(...battle.events.map(event => `🤖 ${event}`));
+          if (battle.events.some(event => event.includes('lost the game'))) setWinnerName(ai.name);
         }
       }
     }
@@ -1301,34 +1237,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     // 3. Battle Phase: Click own Avatar
     if (isMyAvatar) {
-      // Check if we already have an attacker selected and this ally has สามัคคี (Unite)!
-      if (selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested && avatarHasKeyword(avatar, 'สามัคคี')) {
-        const unitePower = calculateNetPower(avatar);
-        let nextState = { ...gameState };
-        const updatedMyAvatars = me.avatarZone.map(a => {
-          if (a.instanceId === avatar.instanceId) {
-            return { ...a, isRested: true };
-          }
-          if (a.instanceId === selectedAttackerId) {
-            return {
-              ...a,
-              layerModifiers: [
-                ...a.layerModifiers,
-                {
-                  layer: 4 as const,
-                  powerMod: unitePower,
-                  sourceCardId: `unite-${avatar.instanceId}-${Date.now()}`,
-                  expiresAt: 'END_OF_BATTLE' as const
-                }
-              ]
-            };
-          }
-          return a;
-        });
-        nextState.players = { ...nextState.players, [meId]: { ...me, avatarZone: updatedMyAvatars } };
-        nextState = appendLogs(nextState, [`🤝 "${avatar.card.name}" ใช้ สามัคคี! นอนตัวและเพิ่ม +${unitePower} POWER`], 'ABILITY');
-        setGameState(nextState);
-        showNotification(`สามัคคี! +${unitePower} POWER ให้ตัวโจมตี`);
+      if (selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested &&
+        (avatarHasKeyword(avatar, 'สามัคคี') || avatarHasKeyword(avatar, 'แทงหลัง'))) {
+        const keyword = avatarHasKeyword(avatar, 'สามัคคี') ? 'สามัคคี' : 'แทงหลัง';
+        const nextState = payCombatKeyword(gameState, selectedAttackerId, avatar.instanceId, keyword);
+        if (!nextState) {
+          showNotification('ไม่สามารถใช้ความสามารถสนับสนุนการโจมตีนี้ได้');
+          return;
+        }
+        const bonus = nextState.players[meId].avatarZone.find(card => card.instanceId === selectedAttackerId)
+          ?.layerModifiers.at(-1)?.powerMod ?? 0;
+        setGameState(appendLogs(nextState, [`"${avatar.card.name}" ใช้ ${keyword} และเพิ่ม POWER ${bonus >= 0 ? '+' : ''}${bonus}`], 'ABILITY'));
+        showNotification(`${keyword}: POWER ${bonus >= 0 ? '+' : ''}${bonus} ให้ตัวโจมตี`);
         return;
       }
 
@@ -1438,31 +1358,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const oppClone: typeof opponent = {
-      ...opponent,
-      lifeDeck: opponent.lifeDeck.map(l => ({ ...l }))
-    };
-    const lifeRes = attackLifeZone(attacker, oppClone);
-    const newlyFlippedCard = lifeRes.revealedCardId
-      ? oppClone.lifeDeck.find(card => card.instanceId === lifeRes.revealedCardId)
-      : undefined;
-
-    const updatedMyAvatarZone = me.avatarZone.map(c =>
-      c.instanceId === attacker.instanceId ? { ...c, isRested: true } : c
-    );
-
-    let nextState: GameState = {
-      ...gameState,
-      players: {
-        ...gameState.players,
-        [meId]: { ...me, avatarZone: updatedMyAvatarZone },
-        [opponentId]: newlyFlippedCard
-          ? { ...oppClone, pendingLifeEffects: [...(oppClone.pendingLifeEffects ?? []), newlyFlippedCard.instanceId] }
-          : oppClone
-      }
-    };
-    nextState = appendLogs(nextState, [lifeRes.event], 'ATTACK_LIFE');
-    nextState = expireModifiersAt(nextState, 'END_OF_BATTLE', meId);
+    const declared = declareCombatAttack(gameState, attacker.instanceId, { type: 'LIFE', playerId: opponentId });
+    if (!declared) {
+      showNotification('การโจมตี LIFE ไม่ถูกต้อง');
+      return;
+    }
+    const battle = resolveDeclaredBattle(declared);
+    if (!battle.ok) {
+      showNotification(battle.reason ?? 'การโจมตี LIFE ไม่สำเร็จ');
+      return;
+    }
+    let nextState = appendLogs(battle.state, battle.events, 'ATTACK_LIFE');
+    const lifeRes = { isGameOver: battle.events.some(event => event.includes('lost the game')) };
 
     if (lifeRes.isGameOver) {
       if (gameState.mode === 'AD_MUA') {
@@ -1476,7 +1383,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     setGameState(nextState);
     setSelectedAttackerId(null);
-    showNotification(lifeRes.event);
+    showNotification(battle.events.join(' '));
   };
 
   // Toggle Construct Activation

@@ -4,7 +4,7 @@ import { calculateNetPower, calculateSnapshotPower } from './layers';
 import { getOriginalOwnerId, moveCardBetweenZones } from './gameRules';
 import { appendGameEvents } from './gameEvents';
 import { resolveAvatarCombat, attackLifeZone } from './combatEngine';
-import { expireModifiersAt } from './abilityEngine';
+import { expireModifiersAt, transferLayerFourModifiers } from './abilityEngine';
 import { recomputeContinuousEffects } from './continuousEffects';
 
 export type AttackTarget = { type: 'AVATAR'; playerId: string; instanceId: string } | { type: 'CONSTRUCT'; playerId: string; instanceId: string } | { type: 'LIFE'; playerId: string };
@@ -207,7 +207,7 @@ export function resolveDeclaredBattle(state: GameState): BattleLifecycleResult {
       ? next.players[targetPlayerId]?.constructZone.find(card => card.instanceId === redirectedTarget.instanceId)
       : undefined;
   if (redirectedTarget.type !== 'LIFE' && (!resolvedTarget || resolvedTarget.controllerId !== targetPlayerId)) {
-    next = expireModifiersAt(next, 'END_OF_BATTLE');
+    next = expireModifiersAt(transferLayerFourModifiers(next), 'END_OF_BATTLE');
     const { battleContext: _battleContext, ...closed } = next;
     return { ok: true, state: closed, events: ['The declared attack ended because its target left the field.'] };
   }
@@ -270,6 +270,9 @@ export function resolveDeclaredBattle(state: GameState): BattleLifecycleResult {
   } else {
     const defender = structuredClone(next.players[targetPlayerId]);
     const lifeResult = attackLifeZone({ ...attacker, card: { ...attacker.card, power: attackPower }, layerModifiers: [] }, defender);
+    if (lifeResult.revealedCardId) {
+      defender.pendingLifeEffects = [...(defender.pendingLifeEffects ?? []), lifeResult.revealedCardId];
+    }
     next = { ...next, players: { ...next.players, [targetPlayerId]: defender } };
     logs.push(lifeResult.event);
     if (lifeResult.damageDealt) next = appendGameEvents(next, [
@@ -295,7 +298,7 @@ export function resolveDeclaredBattle(state: GameState): BattleLifecycleResult {
     }
   }
 
-  next = expireModifiersAt(recomputeContinuousEffects(next), 'END_OF_BATTLE');
+  next = expireModifiersAt(transferLayerFourModifiers(recomputeContinuousEffects(next)), 'END_OF_BATTLE');
   const { battleContext: _battleContext, ...closedState } = next;
   const finalState = appendGameEvents(closedState, [{
     type: 'BATTLE_ENDED', attackerId: attacker.instanceId,

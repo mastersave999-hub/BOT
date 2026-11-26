@@ -119,6 +119,28 @@ describe('Battle lifecycle integration — Rule Book 3.2', () => {
     expect(result.state.players.p1.avatarZone.map(card => card.instanceId)).toContain(attacker.instanceId);
   });
 
+  it('transfers Layer 4 statuses to the declared Layer 2 type after combat', () => {
+    const attacker = makeCard('p1-attacker', 'Avatar', 5);
+    attacker.layerModifiers.push({
+      layer: 4,
+      powerMod: 2,
+      sourceCardId: 'continuous-status',
+      transferToLayer: 2,
+      expiresAt: 'END_OF_BATTLE'
+    });
+    const defender = makeCard('p2-defender', 'Avatar', 4);
+    const state = makeGame(makePlayer('p1', { avatarZone: [attacker] }), makePlayer('p2', { avatarZone: [defender] }));
+    const declared = declareCombatAttack(state, attacker.instanceId, {
+      type: 'AVATAR', playerId: 'p2', instanceId: defender.instanceId
+    });
+    const result = resolveDeclaredBattle(declared!);
+    expect(result.state.players.p1.avatarZone[0].layerModifiers).toEqual([
+      expect.objectContaining({ layer: 2, powerMod: 2, sourceCardId: 'continuous-status' })
+    ]);
+    expect(result.state.players.p1.avatarZone[0].layerModifiers[0]).not.toHaveProperty('expiresAt');
+    expect(result.state.players.p2.hell.map(card => card.instanceId)).toContain(defender.instanceId);
+  });
+
   it('applies the Backstab post-attack destruction only after a different-color helper is used', () => {
     const attacker = makeCard('p1-attacker', 'Avatar', 5);
     const backstab = makeCard('p1-backstab', 'Avatar', 1, 'แทงหลัง');
@@ -157,7 +179,11 @@ describe('Battle lifecycle integration — Rule Book 3.2', () => {
     const result = resolveDeclaredBattle(declared!);
     expect(result.ok).toBe(true);
     expect(result.state.players.p2.lifeDeck[0].isFaceUp).toBe(true);
+    expect(result.state.players.p2.pendingLifeEffects).toEqual([life.instanceId]);
     expect(result.state.gameEvents?.filter(item => item.event.type === 'DAMAGE_DEALT' || item.event.type === 'DAMAGE_TAKEN')).toHaveLength(2);
-    expect(result.state.players.p1.avatarZone[0].layerModifiers).toEqual([]);
+    expect(result.state.players.p1.avatarZone[0].layerModifiers).toEqual([
+      expect.objectContaining({ layer: 1, powerMod: 2, sourceCardId: 'battle-react' })
+    ]);
+    expect(result.state.players.p1.avatarZone[0].layerModifiers[0]).not.toHaveProperty('expiresAt');
   });
 });

@@ -72,6 +72,19 @@ describe('typed trigger engine', () => {
 });
 
 describe('prevention timing', () => {
+  it('resolves every automatic exit shield in the same prevention pass', () => {
+    const target = makeInstance('guarded-all', 'p2');
+    target.preventionShields = [
+      { id: 'automatic-a', kind: 'DESTRUCTION', usesRemaining: 1 },
+      { id: 'automatic-b', kind: 'DESTRUCTION', usesRemaining: 1 }
+    ];
+    const current = game(player('p1'), player('p2', { avatarZone: [target] }));
+    const result = preventDestruction(current, 'p1', target.instanceId, 'COMBAT');
+    expect(result.prevented).toBe(true);
+    expect(result.state.players.p2.avatarZone[0].preventionShields).toEqual([]);
+    expect(result.state.gameEvents?.filter(item => item.event.type === 'PREVENTION_APPLIED')).toHaveLength(2);
+  });
+
   it('resolves automatic shields before activated protection and permits one React attempt per exit event', () => {
     const target = makeInstance('guarded', 'p2');
     target.preventionShields = [{ id: 'automatic', kind: 'DESTRUCTION', usesRemaining: 1 }];

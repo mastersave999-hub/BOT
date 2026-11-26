@@ -216,7 +216,8 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
   if (request.destination === 'deck' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter the Main Deck' };
   if (request.destination === 'hand' && card.card.type === 'Life') return { ok: false, state, reason: 'LIFE cards cannot enter a hand' };
   if (request.destination === 'magicZone' && card.card.type !== 'Magic' && card.card.type !== 'Avatar') return { ok: false, state, reason: 'Only Magic cards or relocated Avatars may enter Magic Zone' };
-  if (request.cause === 'EFFECT' || request.cause === 'COMBAT' || request.cause === 'PLAYER_ACTION') {
+  // Rule Book 3.2 p.10: shields stop effect/combat removal, never a player-directed move.
+  if (request.cause === 'EFFECT' || request.cause === 'COMBAT') {
     const prevention = preventDestruction(state, request.actorId, card.instanceId, request.cause);
     if (prevention.prevented) return { ok: true, state: prevention.state, reason: 'Destruction was prevented' };
   }

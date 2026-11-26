@@ -79,6 +79,26 @@ describe('shared game rules', () => {
     expect(ownerDrawEvent).toHaveProperty('instanceId', 'private-card-id');
   });
 
+  it('does not let destruction shields block a player-mandated removal', () => {
+    const selectedAvatar = {
+      ...instance('chosen-avatar', 'p1', 'Chosen Avatar', 'Avatar'),
+      preventionShields: [{ id: 'destruction-shield', kind: 'DESTRUCTION' as const, includePlayerActions: true }]
+    };
+    const current = state(player('p1', { avatarZone: [selectedAvatar] }));
+    const moved = moveCardBetweenZones(current, {
+      instanceId: selectedAvatar.instanceId,
+      actorId: 'p1',
+      destination: 'deck',
+      deckPosition: 'bottom',
+      effectMove: true,
+      cause: 'PLAYER_ACTION'
+    });
+    expect(moved.ok).toBe(true);
+    expect(moved.state.players.p1.avatarZone).toHaveLength(0);
+    expect(moved.state.players.p1.deck.map(item => item.instanceId)).toContain(selectedAvatar.instanceId);
+    expect(moved.state.players.p1.avatarZone[0]?.preventionShields).toBeUndefined();
+  });
+
   it('uses controller authorization separately from original-owner return routing', () => {
     const borrowed = { ...instance('borrowed', 'p1', 'Owned by p1', 'Avatar'), controllerId: 'p2' };
     const current = state(player('p1'), player('p2', { avatarZone: [borrowed] }));
