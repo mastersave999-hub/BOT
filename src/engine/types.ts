@@ -64,7 +64,11 @@ export interface CardInstance {
   instanceId: string;
   card: Card;
   ownerId: string;
+  /** Immutable card holder; defaults to ownerId for older saved states. */
+  originalOwnerId?: string;
   controllerId: string;
+  /** Duo Avatars and card effects may explicitly forbid control changes. */
+  controlChangeImmune?: boolean;
   isRested: boolean;
   isFaceUp: boolean;
   duoWithInstanceId?: string;

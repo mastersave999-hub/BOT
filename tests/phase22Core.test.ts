@@ -6,6 +6,7 @@ import { calculateNetPower } from '../src/engine/layers';
 import {
   beginEndPhaseDiscard,
   canUseMagicTypeThisTurn,
+  changeAvatarControl,
   discardToHandLimit,
   moveCardBetweenZones,
   validateMagicPlay
@@ -56,6 +57,7 @@ function makeInstance(
     instanceId: id,
     card: makeCard(name, type, subtype),
     ownerId,
+    originalOwnerId: ownerId,
     controllerId,
     isRested: false,
     isFaceUp: true,
@@ -122,6 +124,76 @@ describe('Phase 2.2 core rules and infrastructure', () => {
     expect(rejected.ok).toBe(false);
     expect(rejected.state).toBe(current);
     expect(rejected.state.gameEvents).toEqual(current.gameEvents);
+  });
+
+  it('changes an Avatar controller atomically while preserving original owner and attached cards', () => {
+    const attachment = makeInstance('borrowed-modification', 'Magic', 'p1', 'Attachment', 'Modification');
+    const borrowed = {
+      ...makeInstance('borrowed-avatar', 'Avatar', 'p1', 'Borrowed'),
+      attachedInstances: [attachment],
+      continuousEffects: [{ layer: 1 as const, powerMod: 1, targetCardType: 'Avatar' as const, targetController: 'SOURCE_CONTROLLER' as const }]
+    };
+    const companion = makeInstance('original-companion', 'Avatar', 'p1');
+    const state = makeState(makePlayer('p1', { avatarZone: [borrowed, companion] }));
+    const controlChange = changeAvatarControl(state, 'p1', borrowed.instanceId, 'p2');
+    expect(controlChange.ok, controlChange.reason).toBe(true);
+    const result = resolveEffectPlan(state, {
+      actorId: 'p1',
+      effects: [{ kind: 'change_avatar_control', targetId: borrowed.instanceId, controllerId: 'p2' }]
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.state.players.p1.avatarZone.map(item => item.instanceId)).toEqual(['original-companion']);
+    expect(result.state.players.p1.avatarZone[0].layerModifiers).toEqual([]);
+    const changed = result.state.players.p2.avatarZone.find(item => item.instanceId === borrowed.instanceId)!;
+    expect(changed).toMatchObject({ ownerId: 'p1', originalOwnerId: 'p1', controllerId: 'p2' });
+    expect(changed.attachedInstances).toEqual([attachment]);
+    expect(changed.layerModifiers).toContainEqual(expect.objectContaining({ sourceCardId: 'continuous:borrowed-avatar:0', powerMod: 1 }));
+    expect(result.state.gameEvents?.some(({ event }) => event.type === 'CONTROL_CHANGED' && event.controllerId === 'p2')).toBe(true);
+  });
+
+  it('rejects control changes for Duo, immune, and over-capacity Avatars without state loss', () => {
+    const duoAvatar = { ...makeInstance('duo-avatar', 'Avatar', 'p1'), duoWithInstanceId: 'duo-mate' };
+    const duoMate = makeInstance('duo-mate', 'Avatar', 'p1');
+    const duoState = makeState(makePlayer('p1', { avatarZone: [duoAvatar, duoMate] }));
+    expect(changeAvatarControl(duoState, 'p1', 'duo-avatar', 'p2')).toMatchObject({ ok: false, state: duoState });
+
+    const immune = { ...makeInstance('immune-avatar', 'Avatar', 'p1'), controlChangeImmune: true };
+    const immuneState = makeState(makePlayer('p1', { avatarZone: [immune] }));
+    expect(changeAvatarControl(immuneState, 'p1', 'immune-avatar', 'p2')).toMatchObject({ ok: false, state: immuneState });
+
+    const target = makeInstance('target-avatar', 'Avatar', 'p1');
+    const fullZone = Array.from({ length: 4 }, (_, index) => makeInstance(`p2-avatar-${index}`, 'Avatar', 'p2'));
+    const fullState = makeState(makePlayer('p1', { avatarZone: [target] }), makePlayer('p2', { avatarZone: fullZone }));
+    expect(changeAvatarControl(fullState, 'p1', 'target-avatar', 'p2')).toMatchObject({ ok: false, state: fullState });
+  });
+
+  it('re-summons a relocated Avatar under its new controller and returns it to the original Hell', () => {
+    const relocated = {
+      ...makeInstance('relocated-avatar', 'Avatar', 'p1', 'Relocated', null, 'p1', [{ layer: 4, powerMod: 2, sourceCardId: 'temporary' }]),
+      isRested: true,
+      isFaceUp: false
+    };
+    const state = makeState(makePlayer('p1', { magicZone: [relocated] }));
+    const summoned = moveCardBetweenZones(state, {
+      instanceId: relocated.instanceId, actorId: 'p2', destination: 'avatarZone', destinationPlayerId: 'p2', effectMove: true
+    });
+    expect(summoned.ok).toBe(true);
+    expect(summoned.state.players.p2.avatarZone[0]).toMatchObject({
+      ownerId: 'p1', originalOwnerId: 'p1', controllerId: 'p2', isRested: false, isFaceUp: true, layerModifiers: []
+    });
+
+    const returned = moveCardBetweenZones(summoned.state, {
+      instanceId: relocated.instanceId, actorId: 'p2', destination: 'hell', destinationPlayerId: 'p1', effectMove: true
+    });
+    expect(returned.ok).toBe(true);
+    expect(returned.state.players.p1.hell.map(card => card.instanceId)).toContain(relocated.instanceId);
+    expect(returned.state.players.p2.hell).toHaveLength(0);
+    const wrongOwnerDestination = moveCardBetweenZones(summoned.state, {
+      instanceId: relocated.instanceId, actorId: 'p2', destination: 'hell', destinationPlayerId: 'p2', effectMove: true
+    });
+    expect(wrongOwnerDestination.ok).toBe(false);
+    expect(wrongOwnerDestination.state).toBe(summoned.state);
   });
 
   it('applies once-per-active-turn Magic restrictions to all four types, including Modification', () => {

@@ -1,5 +1,5 @@
 import type { CardInstance, GameState } from './types';
-import { moveCardBetweenZones, validateGameState } from './gameRules';
+import { changeAvatarControl, getOriginalOwnerId, moveCardBetweenZones, validateGameState } from './gameRules';
 import { runGameTransaction } from './gameTransaction';
 import { preventTargeting } from './prevention';
 
@@ -19,7 +19,8 @@ export type EffectDefinition =
   | { kind: 'bounce_avatar'; targetId: string }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; destination: 'deck' | 'hand' }
-  | { kind: 'summon_from_hell'; playerId: string; instanceId: string };
+  | { kind: 'summon_from_hell'; playerId: string; instanceId: string }
+  | { kind: 'change_avatar_control'; targetId: string; controllerId: string };
 
 export interface EffectPlan {
   actorId: string;
@@ -64,7 +65,7 @@ function applyCost(state: GameState, cost: EffectCost): GameState | null {
       const card = player.hand.find(item => item.instanceId === instanceId);
       if (!card) return null;
       const moved = moveCardBetweenZones(next, {
-        instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: card.ownerId, effectMove: true
+        instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(card), effectMove: true
       });
       if (!moved.ok) return null;
       next = moved.state;
@@ -74,7 +75,7 @@ function applyCost(state: GameState, cost: EffectCost): GameState | null {
   const avatar = player.avatarZone.find(item => item.instanceId === cost.instanceId);
   if (!avatar) return null;
   const moved = moveCardBetweenZones(state, {
-    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: avatar.ownerId, effectMove: true
+    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true
   });
   if (!moved.ok) return null;
   return moved.state;
@@ -139,7 +140,7 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (targeting.prevented) return targeting.state;
     const movement = moveCardBetweenZones(state, {
       instanceId: effect.targetId, actorId: plan.actorId, destination: 'hell',
-      destinationPlayerId: found.avatar.ownerId, effectMove: true, cause: 'EFFECT'
+      destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true, cause: 'EFFECT'
     });
     if (!movement.ok) return null;
     return movement.state;
@@ -152,10 +153,10 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (targeting.prevented) return targeting.state;
     const movement = moveCardBetweenZones(state, {
       instanceId: effect.targetId, actorId: plan.actorId, destination: 'hand',
-      destinationPlayerId: found.avatar.ownerId, effectMove: true
+      destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true
     });
     if (!movement.ok) return null;
-    const owner = movement.state.players[found.avatar.ownerId];
+    const owner = movement.state.players[getOriginalOwnerId(found.avatar)];
     if (!owner) return null;
     return { ...movement.state, players: { ...movement.state.players, [owner.id]: {
       ...owner,
@@ -173,7 +174,7 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       for (const avatar of avatars) {
         const moved = moveCardBetweenZones(next, {
           instanceId: avatar.instanceId, actorId: plan.actorId, destination: 'hell',
-          destinationPlayerId: avatar.ownerId, effectMove: true, cause: 'EFFECT'
+          destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true, cause: 'EFFECT'
         });
         if (!moved.ok) return null;
         next = moved.state;
@@ -191,18 +192,23 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     for (const card of cards) {
       const moved = moveCardBetweenZones(next, {
         instanceId: card.instanceId, actorId: plan.actorId, destination: effect.destination,
-        destinationPlayerId: card.ownerId, effectMove: true
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true
       });
       if (!moved.ok) return null;
       next = moved.state;
       if (effect.destination === 'deck') {
-        const owner = next.players[card.ownerId];
+        const owner = next.players[getOriginalOwnerId(card)];
         next = { ...next, players: { ...next.players, [owner.id]: {
           ...owner, deck: owner.deck.map(item => item.instanceId === card.instanceId ? { ...item, isFaceUp: false } : item)
         } } };
       }
     }
     return next;
+  },
+  change_avatar_control: ({ state, plan, effect }) => {
+    if (effect.kind !== 'change_avatar_control') return null;
+    const moved = changeAvatarControl(state, plan.actorId, effect.targetId, effect.controllerId);
+    return moved.ok ? moved.state : null;
   },
   summon_from_hell: ({ state, plan, effect }) => {
     if (effect.kind !== 'summon_from_hell') return null;
