@@ -11,6 +11,7 @@ export type EffectCondition =
   | { kind: 'player_has_avatar'; playerId: string; nameIncludes: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
   | { kind: 'player_has_avatar_symbol'; playerId: string; symbol: string }
   | { kind: 'player_hell_count'; playerId: string; minimum: number; cardType?: string; nameIncludes?: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
+  | { kind: 'player_zone_count'; playerId: string; zone: 'avatarZone' | 'hand' | 'lifeDeck'; comparison: 'at_least' | 'at_most'; value: number }
   | { kind: 'player_is_critical'; playerId: string }
   | { kind: 'target_exists'; targetId: string };
 
@@ -517,9 +518,13 @@ function resolveEffectPlanInTransaction(
               : condition.matching === 'DELIMITED_WORD_SEQUENCE'
                 ? matchesExpectedName(card.card.name, condition.nameIncludes, 'DELIMITED_WORD_SEQUENCE')
                 : card.card.name.includes(condition.nameIncludes)))).length >= condition.minimum
-          : condition.kind === 'player_is_critical'
-            ? !!player?.isCritical
-            : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
+          : condition.kind === 'player_zone_count'
+            ? !!player && (condition.comparison === 'at_least'
+              ? player[condition.zone].length >= condition.value
+              : player[condition.zone].length <= condition.value)
+            : condition.kind === 'player_is_critical'
+              ? !!player?.isCritical
+              : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
     if (!passed) return fail(state, 'effect condition failed');
   }
   for (const effect of plannedEffects) {

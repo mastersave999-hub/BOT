@@ -312,6 +312,20 @@ function seedConditionState(state: GameState, parsed: ReturnType<typeof parseCar
       state.players[playerId] = { ...player, isCritical: true };
       continue;
     }
+    if (condition.kind === 'zone_count') {
+      const zone = player[condition.zone];
+      const required = condition.comparison === 'at_least' ? condition.value : 0;
+      while (zone.length < required) {
+        const cardType = condition.zone === 'avatarZone' ? 'Avatar' : condition.zone === 'lifeDeck' ? 'Life' : undefined;
+        const candidate = catalog.find(item => !cardType || item.type === cardType);
+        if (!candidate) {
+          errors.push(`no official catalog card can satisfy ${condition.zone} count for ${playerId}`);
+          break;
+        }
+        zone.push(instance(`p4-condition-${condition.zone}-${playerId}-${zone.length}`, playerId, candidate));
+      }
+      continue;
+    }
     if (condition.kind === 'avatar_name' || condition.kind === 'avatar_symbol') {
       const match = catalog.find(candidate => candidate.type === 'Avatar' && (condition.kind === 'avatar_name'
         ? matchesCardName(candidate.name, condition.name, parseCardNameRules(candidate))
@@ -480,6 +494,8 @@ function stateWithoutConditions(input: GameState, conditions: EffectCondition[])
     const player = state.players[condition.playerId];
     if (condition.kind === 'player_is_critical') {
       state.players[condition.playerId] = { ...player, isCritical: false };
+    } else if (condition.kind === 'player_zone_count') {
+      player[condition.zone] = [];
     } else if (condition.kind === 'player_has_avatar') {
       const matches = (name: string) => condition.matching === 'EXACT_CARD_NAME' ? name.trim() === condition.nameIncludes
         : condition.matching === 'DELIMITED_WORD_SEQUENCE'

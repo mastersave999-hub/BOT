@@ -39,6 +39,7 @@ export type CardTextCondition =
   | { kind: 'avatar_name'; controller: 'self' | 'opponent'; name: NameReference }
   | { kind: 'avatar_symbol'; controller: 'self' | 'opponent'; symbol: string }
   | { kind: 'hell_count'; controller: 'self' | 'opponent'; minimum: number; cardType?: string; nameIncludes?: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
+  | { kind: 'zone_count'; controller: 'self' | 'opponent'; zone: 'avatarZone' | 'hand' | 'lifeDeck'; comparison: 'at_least' | 'at_most'; value: number }
   | { kind: 'critical'; controller: 'self' | 'opponent' };
 export type CardTextSelector = {
   controller: 'self' | 'opponent' | 'either';
@@ -275,6 +276,18 @@ function parseConditionAtom(source: string): CardTextCondition | undefined {
   const anyHellCount = source.match(/(?:ในนรก|นรก)(?:ฝ่ายเรา|ของเรา|เรา|ฝ่ายตรงข้าม|ของอีกฝ่าย)?[\s\S]*?(\d+)\s*ใบ\s*(?:หรือมากกว่า|ขึ้นไป)/);
   if (anyHellCount) return { kind: 'hell_count', controller, minimum: Number(anyHellCount[1]) };
 
+  const resourceCount = source.match(/(?:Avatar Zone|บนสนาม)[^:]{0,60}?(?:มี|เหลือ)\s*(?:Avatar\s*)?(\d+)\s*ใบ(?:\s*(หรือมากกว่า|ขึ้นไป|หรือต่ำกว่า|หรือน้อยกว่า))?/u)
+    ?? source.match(/(?:บนมือ|ในมือ)[^:]{0,60}?(?:มี|เหลือ)\s*(\d+)\s*(?:ใบ|การ์ด)(?:\s*(หรือมากกว่า|ขึ้นไป|หรือต่ำกว่า|หรือน้อยกว่า))?/u)
+    ?? source.match(/(?:LIFE Card|LIFE)[^:]{0,60}?(?:มี|เหลือ)\s*(\d+)\s*ใบ(?:\s*(หรือมากกว่า|ขึ้นไป|หรือต่ำกว่า|หรือน้อยกว่า))?/u);
+  if (resourceCount) {
+    const beforeCount = source.slice(0, resourceCount.index);
+    const zone = /LIFE/i.test(resourceCount[0]) || /LIFE/i.test(beforeCount) ? 'lifeDeck'
+      : /บนมือ|ในมือ/.test(resourceCount[0]) || /บนมือ|ในมือ/.test(beforeCount) ? 'hand' : 'avatarZone';
+    const isNegated = /(?:ไม่มี|ไม่เหลือ)/.test(beforeCount.slice(-20));
+    const comparison = /หรือต่ำกว่า|หรือน้อยกว่า/.test(resourceCount[2] ?? '') || isNegated ? 'at_most' : 'at_least';
+    const value = isNegated ? 0 : Number(resourceCount[1]);
+    if (Number.isSafeInteger(value) && value >= 0) return { kind: 'zone_count', controller, zone, comparison, value };
+  }
   const boardCondition = /Avatar Zone|บนสนาม/.test(source);
   const symbol = source.match(/\{\s*[Ss]ymbol\s+([^}]+)\}/)?.[1]?.trim();
   if (boardCondition && symbol && /Avatar/.test(source)) return { kind: 'avatar_symbol', controller, symbol };
@@ -597,6 +610,10 @@ export function toEffectPlan(
       ...(condition.cardType ? { cardType: condition.cardType } : {}),
       ...(condition.nameIncludes ? { nameIncludes: condition.nameIncludes } : {}),
       ...(condition.matching ? { matching: condition.matching } : {})
+    });
+    else if (condition.kind === 'zone_count') conditions.push({
+      kind: 'player_zone_count', playerId, zone: condition.zone,
+      comparison: condition.comparison, value: condition.value
     });
     else conditions.push({ kind: 'player_is_critical', playerId });
   }

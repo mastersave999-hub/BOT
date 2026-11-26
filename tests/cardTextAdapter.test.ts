@@ -121,6 +121,32 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(matchesCardName('นาย ผู้เจริญนาย', exact)).toBe(false);
   });
 
+  it('parses explicit conditional Avatar, hand, and LIFE count gates and enforces them in Game State', () => {
+    const base = byPrintId('SD01-001');
+    const cases = [
+      ['ถ้าบน Avatar Zone ฝ่ายเรามี Avatar 2 ใบ : จั่วการ์ด 1 ใบ', 'avatarZone', 2],
+      ['หากบนมือเรามี 3 ใบ : จั่วการ์ด 1 ใบ', 'hand', 3],
+      ['ถ้า LIFE Card เรามี 2 ใบหรือต่ำกว่า : จั่วการ์ด 1 ใบ', 'lifeDeck', 2],
+    ] as const;
+    for (const [mainEffect, zone, value] of cases) {
+      const parsed = parseCardText({ ...base, mainEffect });
+      expect(parsed.status).toBe('PARSED_READY');
+      expect(parsed.clauses[0].conditions).toEqual([expect.objectContaining({ kind: 'zone_count', zone, value })]);
+      const initial = gameState();
+      const player = initial.players.p1;
+      if (zone === 'avatarZone') player.avatarZone.push(instance('conditional-extra-avatar', 'p1'));
+      if (zone === 'hand') player.hand.push(instance('conditional-extra-hand', 'p1'), instance('conditional-extra-hand-2', 'p1'));
+      if (zone === 'lifeDeck') player.lifeDeck.push(instance('conditional-extra-life', 'p1'), instance('conditional-extra-life-2', 'p1'));
+      const plan = toEffectPlan(parsed.clauses[0], 'p1', [], initial);
+      expect(plan).not.toBeNull();
+      const result = resolveEffectPlan(initial, plan!);
+      expect(result.ok).toBe(true);
+      const failed = resolveEffectPlan(initial, { ...plan!, conditions: [{ kind: 'player_zone_count', playerId: 'p1', zone, comparison: 'at_least', value: 100 }] });
+      expect(failed.ok).toBe(false);
+      expect(failed.state).toBe(initial);
+    }
+  });
+
   it('preserves unsupported scouting while compiling standalone combat keywords as typed specs', () => {
     const parsed = parseCardText(byPrintId('SD04-001'));
     expect(parsed.clauses.flatMap(clause => clause.keywords)).toContain('สอดแนม');

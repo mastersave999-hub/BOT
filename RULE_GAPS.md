@@ -74,6 +74,10 @@ Baseline `npm test` on the Phase 1.5 inspected commit: **10 test files, 72 tests
 
 Final Phase 2.2 validation: `npm test` passed **12 files / 97 tests**; `npx tsc --noEmit`, `npm run build`, and `git diff --check` all passed. See `RULE_ENGINE_GAP_ANALYSIS.md` for the source-backed matrix and `CARD_EFFECT_AUDIT.md` for per-record status limits.
 
+## Batch 4C — card-text conditional count grammar
+
+The adapter now compiles a narrow, explicit subset of `ถ้า...:` / `หาก...:` state gates into typed Avatar Zone, hand-size, and LIFE count conditions. The resolver enforces these before applying effects, and focused Game State tests cover success and rollback on a false gate. Existing name/symbol/Hell-count and Critical gates remain supported. The 1,833-row audit is unchanged at **VERIFIED_WORKING 117 / PARSED_READY 226 / UNSUPPORTED 1,603 / AMBIGUOUS 4**: no catalog row currently uses this new count grammar in isolation with an otherwise fully supported effect. Event provenance, unmodeled side effects, choice-dependent multi-clause effects, and timing remain unsupported rather than inferred. Current top remaining clusters: Hell recovery/summon/banish (310), continuous POWER/Symbol (170), equip restrictions (38), end-of-turn self-exit/removal (37), and cancellation (44), overlapping.
+
 ## Phase 2A — Deck Operations
 
 - **Implemented core APIs:** seeded/live `shuffleDeck`, `millCards`, authorized/revisioned `scoutCards`, and typed `searchDeck`; see `src/engine/deckOperations.ts` and `tests/deckOperations.test.ts`.
