@@ -207,6 +207,7 @@ function zoneIds(state: GameState): Record<string, string[]> {
 function targetRequirement(effect: ReturnType<typeof parseCardText>['clauses'][number]['effects'][number]): number {
   if (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' || effect.kind === 'recover_from_hell') return effect.count;
   if (effect.kind === 'summon_from_hell') return 1;
+  if (effect.kind === 'modify_power' && effect.target === 'source_avatar') return 0;
   return ['modify_power', 'set_power', 'change_symbol', 'destroy_avatar', 'bounce_avatar', 'banish_avatar',
     'destroy_construct', 'bounce_construct', 'banish_construct', 'sacrifice_avatar'].includes(effect.kind) ? 1 : 0;
 }
@@ -264,8 +265,19 @@ function assertResolvedChoiceOutcomes() {
 function resolvePlayerChoices(input: GameState): GameState {
   let state = input;
   let choices = 0;
-  while (state.pendingDeckChoice && choices < 5) {
-    const pending = state.pendingDeckChoice;
+  while ((state.pendingDeckChoice || state.pendingHellChoice) && choices < 5) {
+    if (state.pendingHellChoice) {
+      const pending = state.pendingHellChoice;
+      const selectedInstanceIds = pending.candidateInstanceIds.slice(0, pending.minSelect);
+      const resolved = resolveHellChoice(state, pending.authorizedViewerId, selectedInstanceIds, pending.expectedRevision,
+        `phase4-hell-choice:${pending.effectKind}:${choices}`);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) break;
+      state = resolved.state;
+      choices += 1;
+      continue;
+    }
+    const pending = state.pendingDeckChoice!;
     const selectedCount = pending.minSelect > 0 ? pending.minSelect
       : pending.maxSelect > 0 && (pending.destination !== 'deck' || pending.selectedDeckPosition) ? pending.maxSelect : 0;
     const selectedInstanceIds = pending.candidateInstanceIds.slice(0, selectedCount);
@@ -278,6 +290,7 @@ function resolvePlayerChoices(input: GameState): GameState {
     choices += 1;
   }
   expect(state.pendingDeckChoice).toBeUndefined();
+  expect(state.pendingHellChoice).toBeUndefined();
   expect(choices).toBeLessThanOrEqual(5);
   return state;
 }
@@ -385,10 +398,15 @@ function verifyModificationLifecycle(card: Card, parsed: ReturnType<typeof parse
     const basePower = Number(conditionalPower?.[3] ?? text.match(/POWER\s*([+-])\s*(\d+)/i)?.[2]);
     const sign = conditionalPower?.[2] ?? text.match(/POWER\s*([+-])\s*(\d+)/i)?.[1];
     const expectedMod = basePower * (sign === '-' ? -1 : 1);
-    expect(updatedHost.layerModifiers).toContainEqual(expect.objectContaining({
-      layer: 1, powerMod: expectedMod, sourceCardId: `aura-mod-${modificationId}`
-    }));
-    expect(calculateNetPower(updatedHost)).toBe(Math.max(0, hostCard.power + expectedMod));
+    if (expectedMod === 0) {
+      expect(updatedHost.layerModifiers).not.toContainEqual(expect.objectContaining({ sourceCardId: `aura-mod-${modificationId}` }));
+      expect(calculateNetPower(updatedHost)).toBe(hostCard.power);
+    } else {
+      expect(updatedHost.layerModifiers).toContainEqual(expect.objectContaining({
+        layer: 1, powerMod: expectedMod, sourceCardId: `aura-mod-${modificationId}`
+      }));
+      expect(calculateNetPower(updatedHost)).toBe(Math.max(0, hostCard.power + expectedMod));
+    }
   }
   if (hasSymbolAura) expect(calculateEffectiveSymbol(updatedHost)).not.toBe(hostCard.symbol ?? null);
   const movedHost = moveCardBetweenZones(recalculated, {
@@ -910,7 +928,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
 describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
     expect(effectRows).toHaveLength(1833);
-    expect(parsedRows).toHaveLength(232);
+    expect(parsedRows).toHaveLength(241);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 
@@ -996,6 +1014,10 @@ describe('Phase 4B per-card Game State verification', () => {
         return;
       }
       const source = instance('p1-trigger-source', 'p1', card);
+      if (triggerClause.timing.eventSubject === 'SOURCE' && triggerClause.effects.some(effect =>
+        effect.kind === 'modify_power' && effect.target === 'source_avatar')) {
+        state.players.p1.avatarZone.push(source);
+      }
       const binding = bindings[0] ?? {};
       const triggerClauseForFixture = card.printId === 'ODY1-022'
         ? {
@@ -1030,19 +1052,22 @@ describe('Phase 4B per-card Game State verification', () => {
           recordUnverified(card, 'combat trigger source cannot remain eligible in the battle fixture');
           return;
         }
-        const defenderCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 &&
-          !candidate.mainEffect.includes('ลูกฮึด'));
-        const attackerCard = catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power > (defenderCard?.power ?? -1))
+        const sourceAttacks = ability.eventSubject === 'SOURCE' && ability.eventType === 'ATTACK_DECLARED';
+        const defenderCard = sourceAttacks
+          ? catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power < card.power)
+            .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0]
+          : catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 && !candidate.mainEffect.includes('ลูกฮึด'));
+        const attackerCard = sourceAttacks ? card : catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power > (defenderCard?.power ?? -1))
           .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0];
         if (!defenderCard || !attackerCard) {
           recordUnverified(card, 'combat trigger fixture has no official higher-POWER attacker and lower-POWER defender');
           return;
         }
         state.currentPhase = 'BATTLE';
-        state.players.p1.avatarZone.push(source);
-        const attacker = instance(`${eventId}:attacker`, 'p1', attackerCard);
+        if (!state.players.p1.avatarZone.some(item => item.instanceId === source.instanceId)) state.players.p1.avatarZone.push(source);
+        const attacker = sourceAttacks ? source : instance(`${eventId}:attacker`, 'p1', attackerCard);
         const defender = instance(`${eventId}:defender`, 'p2', defenderCard);
-        state.players.p1.avatarZone.push(attacker);
+        if (attacker !== source) state.players.p1.avatarZone.push(attacker);
         state.players.p2.avatarZone.push(defender);
         const declared = declareCombatAttack(state, attacker.instanceId,
           { type: 'AVATAR', playerId: 'p2', instanceId: defender.instanceId });

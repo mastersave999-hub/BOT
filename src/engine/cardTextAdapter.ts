@@ -6,7 +6,7 @@ import type { GameEvent } from './gameEvents';
 
 export type CardTextEffect =
   | { kind: 'draw_self'; count: number }
-  | { kind: 'modify_power'; amount: number; target: 'selected_avatar'; duration: CardTextDuration }
+  | { kind: 'modify_power'; amount: number; target: 'selected_avatar' | 'source_avatar'; duration: CardTextDuration }
   | { kind: 'set_power'; value: number; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'change_symbol'; symbol: string; target: 'selected_avatar'; duration: CardTextDuration }
   | { kind: 'flip_life'; face: 'up' | 'down'; count: number; player: 'self' | 'opponent'; allowWhileCritical: boolean }
@@ -82,6 +82,7 @@ export interface ParsedCardTextClause {
   conditions: CardTextCondition[];
   selector?: CardTextSelector;
   equipRestriction?: CardTextEquipRestriction;
+  attachedPowerModifier?: number;
   duration?: CardTextDuration;
   quotedReferences: NameReference[];
   exactNameReferences: NameReference[];
@@ -115,7 +116,7 @@ const EVENT_HEADERS: Array<[RegExp, string]> = [
   [/เมื่อ[^:]*ใช้[^:]*Magic(?:\s+Card)?/i, 'MAGIC_PLAYED'],
   [/เมื่อฝ่ายตรงข้าม[^:]*อัญเชิญ[^:]*Avatar|เมื่ออีกฝ่าย[^:]*อัญเชิญ[^:]*Avatar/, 'AVATAR_SUMMONED'],
   [/เมื่อ(?:มี\s*)?Avatar[^:]*อัญเชิญลงมาบนสนาม/, 'AVATAR_SUMMONED'],
-  [/เมื่อโจมตี/, 'ATTACK_DECLARED'], [/เมื่อต่อสู้/, 'BATTLE_STARTED'],
+  [/เมื่อ\s+Avatar\s+(?:ใบนี้|ตัวนี้)\s*โจมตี/, 'ATTACK_DECLARED'], [/เมื่อโจมตี/, 'ATTACK_DECLARED'], [/เมื่อต่อสู้/, 'BATTLE_STARTED'],
   [/เมื่อจบเทิร์น/i, 'TURN_ENDED'], [/ในช่วง End Phase/i, 'PHASE_STARTED'], [/ก่อนเริ่ม Main Phase/, 'BEFORE_MAIN_PHASE'],
   [/เมื่อหงาย LIFE Card|เมื่อ LIFE Card ถูกหงาย/, 'LIFE_REVEALED'],
   [/จุติ(?:\s*\(|\s*:)/, 'AVATAR_SUMMONED'], [/คำสั่งเสีย(?:\s*\(|\s*:)/, 'AVATAR_DESTROYED'],
@@ -325,6 +326,10 @@ function parseClause(source: string): ParsedCardTextClause {
   const continuousAura = (timing.mode === 'CONTINUOUS' || modificationAura) &&
     (parseContinuousPowerEffects(source).length > 0 || modificationAura);
   const equipRestriction = parseEquipRestriction(source);
+  const attachedPowerMatch = source.match(/^Avatar\s+ที่สวมใส่การ์ดใบนี้\s+POWER\s*([+-])\s*(\d+)$/u);
+  const attachedPowerModifier = attachedPowerMatch
+    ? Number(attachedPowerMatch[2]) * (attachedPowerMatch[1] === '-' ? -1 : 1)
+    : undefined;
   const partnerName = source.match(/คู่หู\s*[-–:]\s*([^\n(]+)/)?.[1]?.trim();
   const keywordSpecs: CardTextKeywordSpec[] = keywords.map(keyword => {
     if (['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) {
@@ -352,7 +357,7 @@ function parseClause(source: string): ParsedCardTextClause {
   const standaloneKeywordDefinition = keywords.some(keyword => ['สามัคคี', 'โล่มนุษย์', 'เตะไข่', 'ลูกฮึด', 'แทงหลัง', 'คู่หู'].includes(keyword)) &&
     !split.costText && !split.separator && /^\s*(?:สามัคคี|โล่มนุษย์|เตะไข่|ลูกฮึด|แทงหลัง|คู่หู)(?:\s*\([^)]*\)|\s*[-–:]\s*[^\n]+)?\s*$/.test(effectText);
   const equipEffectText = equipRestriction ? effectText.replace(/สวมใส่ได้เฉพาะ[\s\S]*?เท่านั้น/u, '').trim() : effectText;
-  const parts = standaloneKeywordDefinition || continuousAura || !equipEffectText
+  const parts = standaloneKeywordDefinition || continuousAura || attachedPowerModifier !== undefined || !equipEffectText
     ? [] : equipEffectText.split(/\s+(?:และ|จากนั้น)\s+/).map(part => part.trim()).filter(Boolean);
   for (const part of parts) {
     const draw = part.match(/^(?:จั่วการ์ด(?:จาก\s+Deck(?:\s+เรา)?)?)\s*(\d+)\s*ใบ(?:\s*หลังจากนั้นสับ Deck)?$/i);
@@ -375,6 +380,8 @@ function parseClause(source: string): ParsedCardTextClause {
     const mill = part.match(/ธรณีสูบ(?:\s*\([^)]*\))?[^\d]*(\d+)\s*ใบ/);
     const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card\s*ใบนั้น/.test(part);
     const duration = /จนจบการต่อสู้/.test(part) ? 'END_OF_BATTLE' : /จนจบการโจมตี/.test(part) ? 'END_OF_ATTACK' : /จนจบเทิร์น/.test(part) ? 'END_OF_TURN' : /จนถึง Draw Phase ถัดไป/.test(part) ? 'NEXT_DRAW_PHASE' : undefined;
+    const sourceTriggeredSelfPower = timing.event === 'ATTACK_DECLARED' && timing.eventSubject === 'SOURCE' &&
+      /^POWER\s*[+-]\s*\d+\s+จนจบเทิร์น$/u.test(part);
     if (destroy) effects.push({ kind: 'destroy_avatar', target: 'selected_avatar' });
     else if (bounce) effects.push({ kind: 'bounce_avatar', target: 'selected_avatar' });
     else if (banish) effects.push({ kind: 'banish_avatar', target: 'selected_avatar' });
@@ -436,9 +443,10 @@ function parseClause(source: string): ParsedCardTextClause {
       const symbol = symbolChange[1].replace(/^เป็น\s*/, '').trim();
       if (symbol) effects.push({ kind: 'change_symbol', symbol, target: 'selected_avatar', duration });
       else unresolved.push('Symbol change has no unambiguous destination Symbol');
-    } else if ((power || setPower) && duration && /Avatar/.test(part) && !/ทุกใบ|ทั้งหมด/.test(part)) {
+    } else if ((power || setPower) && duration && (/Avatar/.test(part) || sourceTriggeredSelfPower) && !/ทุกใบ|ทั้งหมด/.test(part)) {
       effects.push(power
-        ? { kind: 'modify_power', amount: Number(power[2]) * (power[1] === '-' ? -1 : 1), target: 'selected_avatar', duration }
+        ? { kind: 'modify_power', amount: Number(power[2]) * (power[1] === '-' ? -1 : 1),
+          target: sourceTriggeredSelfPower ? 'source_avatar' : 'selected_avatar', duration }
         : { kind: 'set_power', value: Number(setPower![1]), target: 'selected_avatar', duration });
     } else {
       unresolved.push('effect clause has no complete verified Phase 2 primitive mapping');
@@ -454,7 +462,8 @@ function parseClause(source: string): ParsedCardTextClause {
   return {
     source, ...(split.costText ? { costText: split.costText } : {}), effectText: split.effectText,
     costEffectSeparator: split.separator, keywords, keywordSpecs, timing, ...(cost ? { cost } : {}), conditions,
-    ...(parseEffectSelector(effectText) ? { selector: parseEffectSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}), ...(duration ? { duration } : {}),
+    ...(parseEffectSelector(effectText) ? { selector: parseEffectSelector(effectText) } : {}), ...(equipRestriction ? { equipRestriction } : {}),
+    ...(attachedPowerModifier !== undefined ? { attachedPowerModifier } : {}), ...(duration ? { duration } : {}),
     quotedReferences, exactNameReferences, effects, unresolved: [...new Set(unresolved)]
   };
 }
@@ -755,7 +764,11 @@ export function toTriggerAbility(
 ): TriggerAbility | null {
   const eventType = clause.timing.event ? TRIGGER_EVENT_TYPES[clause.timing.event] : undefined;
   if (!eventType || clause.timing.mode === 'CONTINUOUS' || clause.timing.mode === 'ACTIVATED') return null;
-  const plan = toEffectPlan(clause, actorId, options.costInstanceIds, options.state, options.targetInstanceIds);
+  const isSourceBoundPower = clause.effects.some(effect => effect.kind === 'modify_power' && effect.target === 'source_avatar');
+  const targetInstanceIds = options.targetInstanceIds?.length
+    ? options.targetInstanceIds
+    : isSourceBoundPower && options.sourceInstanceId ? [options.sourceInstanceId] : undefined;
+  const plan = toEffectPlan(clause, actorId, options.costInstanceIds, options.state, targetInstanceIds);
   if (!plan) return null;
   return {
     id, eventType, effects: plan.effects,
@@ -795,13 +808,17 @@ export function parseCardText(card: Card): CardTextAdapterResult {
     ...(overrideMagic.length === 1 ? { magicSubtypeOverride: overrideMagic[0] } : {})
   };
   const reasons = clauses.flatMap(clause => clause.unresolved);
+  if (clauses.some(clause => clause.attachedPowerModifier !== undefined) &&
+    (card.type !== 'Magic' || card.subtype !== 'Modification')) {
+    reasons.push('attached POWER modifier requires a Modification Magic attachment context');
+  }
   const nameRules = parseCardNameRules(card);
   const executableNameRuleCount = nameRules.secondaryNames.length + nameRules.additionalPrimaryNames.length;
   if (ruleTexts.length > executableNameRuleCount) reasons.push('inherent # Rule Text is retained as rule metadata but has no complete executable specification');
   if (taggedMagic.length > 1 || overrideMagic.length > 1) reasons.push('multiple or conflicting Magic type declarations');
   if (taggedMagic.length > 0 && overrideMagic.length > 0 && (taggedMagic.length !== 1 || overrideMagic.length !== 1)) reasons.push('cannot disambiguate mixed Magic-use declarations');
   const hasExecutableRule = clauses.some(clause => clause.effects.length > 0 || clause.equipRestriction !== undefined ||
-    clause.keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD')) || continuousEffects.length > 0;
+    clause.attachedPowerModifier !== undefined || clause.keywordSpecs.some(spec => spec.kind === 'COMBAT_KEYWORD')) || continuousEffects.length > 0;
   if (!hasExecutableRule) reasons.push('card has no executable effect, combat keyword, equip restriction, or continuous rule');
   if (AMBIGUOUS_WORDING.test(source)) reasons.push('wording explicitly matches an unresolved or ambiguous-rule marker');
   const status: CardTextStatus = AMBIGUOUS_WORDING.test(source) || reasons.some(reason => /conflicting|cannot disambiguate|ambiguous-rule/.test(reason))

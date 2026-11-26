@@ -653,6 +653,39 @@ describe('Card Text Adapter — Rule Book 3.2', () => {
     expect(calculateNetPower(recalculated.players.p1.avatarZone.find(card => card.instanceId === otherHost.instanceId)! ) - host.power).toBe(1);
   });
 
+  it('binds the exact self-attack POWER trigger to its source Avatar', () => {
+    const card = byPrintId('SD01-002');
+    const parsed = parseCardText(card);
+    expect(parsed.status).toBe('PARSED_READY');
+    const clause = parsed.clauses[0];
+    expect(clause.timing).toMatchObject({ event: 'ATTACK_DECLARED', eventSubject: 'SOURCE' });
+    expect(clause.effects[0]).toMatchObject({ kind: 'modify_power', amount: 2, target: 'source_avatar', duration: 'END_OF_TURN' });
+
+    const state = gameState();
+    const source = { ...instance('source-attacker', 'p1'), card };
+    state.players.p1.avatarZone.push(source);
+    const ability = toTriggerAbility(clause, 'source-attack-power', 'p1', { state, sourceInstanceId: source.instanceId });
+    expect(ability?.effects).toEqual([{ kind: 'modify_power', targetId: source.instanceId, amount: 2,
+      layer: 1, expiresAt: 'END_OF_TURN' }]);
+  });
+
+  it('recognizes exact attached-Avatar POWER modifiers and keeps extra clauses fail-closed', () => {
+    const base = byPrintId('SD01-016');
+    const parsed = parseCardText(base);
+    expect(parsed.status).toBe('PARSED_READY');
+    expect(parsed.clauses[0].attachedPowerModifier).toBe(1);
+
+    const zero = parseCardText({ ...base, mainEffect: 'Avatar ที่สวมใส่การ์ดใบนี้ POWER +0' });
+    expect(zero.status).toBe('PARSED_READY');
+    expect(zero.clauses[0].attachedPowerModifier).toBe(0);
+    const nonModification = parseCardText({ ...base, type: 'Avatar', mainEffect: 'Avatar ที่สวมใส่การ์ดใบนี้ POWER +1' });
+    expect(nonModification.status).toBe('UNSUPPORTED');
+
+    const extraRule = parseCardText({ ...base, mainEffect: 'Avatar ที่สวมใส่การ์ดใบนี้ POWER +1 และ ความสามารถของ Avatar ใบนี้ไร้ผล' });
+    expect(extraRule.status).toBe('UNSUPPORTED');
+    expect(extraRule.clauses[0].attachedPowerModifier).toBeUndefined();
+  });
+
   it('parses explicit Hell recovery destinations without conflating their zone semantics', () => {
     const card = byPrintId('SD01-001');
     const cases = [
