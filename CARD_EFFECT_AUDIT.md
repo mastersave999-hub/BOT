@@ -44,6 +44,10 @@ Audited all 2014 catalog records from `cards_clean.json`: 1633 unique printId va
 - Parser errors: not measurable from the current parser API, because `parseCardAbility` returns default flags and has no parse-error result. Use `Missing / unsupported` for text with no candidate operation match; do not describe it as a parser failure.
 - `tests/abilityEngine.test.ts` resolves the real catalog record SD01-001 against a Game State and checks POWER changes from 6 to 2. It does not verify all text details (notably duration); therefore the record is not marked Verified. Other tests use synthetic card fixtures, not individually audited catalog records.
 
+## Phase 2.1 verification boundary
+
+The Phase 2.1 tests exercise shared rules and engine infrastructure against selected synthetic Game States; they are not individual card-effect verification. No card row is upgraded to **Working** or **Verified** by Construct/Magic rule tests, shared transactions, event ordering, zone movement, or UI implementation. A card remains verified only when a test names that catalog print and asserts its complete relevant before-and-after Game State behavior. The narrow SD01-001 POWER test remains insufficient to verify the full printed effect. No claim is made that all 1,833 effect-bearing records were individually verified.
+
 ## Engine findings (current source, not prior report claims)
 
 - `parseCardAbility` uses Thai substring/regex flags. `getUnsupportedEffectReason` blocks several free-text patterns, but there is no grammar, complete target/cost choice model, or parse-error channel.

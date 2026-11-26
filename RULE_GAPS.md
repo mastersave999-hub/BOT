@@ -20,7 +20,7 @@ Do not infer card correctness from parser/text matching. No catalog card is mark
 | Gap | Rule Book | Current source evidence | Status / impact |
 |---|---|---|---|
 | Construct Zone capacity and names | p.2: max 3, unique names per player | `gameRules.ts` validator and shared zone move; UI checks and multiplayer SYNC validator | **Partial** — engine/UI/sync boundaries now reject over-capacity and duplicate names; direct in-memory producers must use shared movement or validate before commit |
-| Avatar + Token capacity and Token exit | pp.1, 19: up to 4 Avatar, 6 total; Token moves to zone then leaves game | State stores shared zone; no complete mixed-capacity or Token removal lifecycle | **Missing / partial** |
+| Avatar + Token capacity and Token exit | pp.1, 19: up to 4 Avatar, 6 total; Token moves to zone then leaves game | `gameRules.ts:validateAvatarZone` validates 4 Avatar / 6 combined; shared movement enforces it | **Partial** — capacities have Game State boundary tests; Token destination-then-remove lifecycle remains unsupported |
 | Magic subtype limit | p.10: one use of each Magic type per turn, including opponent’s turn | `gameRules.ts:canUseMagicTypeThisTurn`; `Playmat.tsx` checks effective type | **Partial** — Modification exemption removed and helper tests cover repeated use; some reaction/ability granted-use paths remain unverified |
 | Effect duration cleanup | pp.7, 16, 21–22: attack/turn/draw timing and Layer 4 | `expireModifiersAt` filters only the matching expiry; called after Avatar combat and at that player’s Draw Phase | **Partial** — direct Game State timing tests pass for END_OF_BATTLE, DRAW_PHASE, END_OF_TURN and unrelated modifiers; Construct/LIFE attack routes and Layer 4 transfer ambiguity remain |
 | First player’s first-turn Battle Phase | pp.21–22: skipped | `turnEngine.ts:isFirstPlayerFirstTurn` / `nextPhaseAfterMain`; Playmat transitions to END | **Partial** — helper boundary tests pass for both players and later turns; full reaction/network turn flow lacks an integration test |
@@ -47,7 +47,7 @@ The repository has community multiplayer guidance in prior documentation, but it
 
 ## Test snapshot
 
-Baseline `npm test` on the Phase 1.5 inspected commit: **10 test files, 72 tests passed**. The Phase 2.1 implementation branch now has **11 test files, 83 tests passing** (current rerun); the added `gameRules.test.ts` and expanded engine suites assert actual before/after Game State. This does not mean 83 rules or 1,833 effect texts are verified.
+Baseline `npm test` on the Phase 1.5 inspected commit: **10 test files, 72 tests passed**. Final Phase 2.1 rerun: **11 test files, 84 tests passed**. The suites assert actual before/after Game State for the narrow scenarios listed in `RULE_ENGINE_GAP_ANALYSIS.md`; this does not mean 84 rules or 1,833 effect texts are verified. Discard reconnect, stale-revision/idempotency and global pending-action lockout are not covered by current Game State tests, so Phase 2.1 is not declared complete.
 
 ## Phase 2.1 implementation status (current branch)
 

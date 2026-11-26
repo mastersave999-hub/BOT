@@ -20,6 +20,20 @@ describe('shared game rules', () => {
     const afterNormal = player('p1', { usedMagicTypesThisTurn: new Set(['Normal']) });
     expect(canUseMagicTypeThisTurn(afterNormal, 'Normal')).toBe(false);
   });
+  it('enforces the combined Avatar and Token limits at legal boundaries', () => {
+    const avatars = Array.from({ length: 3 }, (_, index) => instance(`avatar-${index}`, 'p1', `Avatar ${index}`, 'Avatar'));
+    const tokens = Array.from({ length: 2 }, (_, index) => instance(`token-${index}`, 'p1', `Token ${index}`, 'Token'));
+    const nextAvatar = instance('avatar-3', 'p1', 'Avatar 3', 'Avatar');
+    const atLimit = state(player('p1', { avatarZone: [...avatars, ...tokens], hand: [nextAvatar, instance('extra-token', 'p1', 'Extra token', 'Token')] }));
+    const fourthAvatar = moveCardBetweenZones(atLimit, { instanceId: nextAvatar.instanceId, actorId: 'p1', destination: 'avatarZone', destinationPlayerId: 'p1' });
+    expect(fourthAvatar.ok).toBe(true);
+    expect(validateGameState(fourthAvatar.state)).toBeNull();
+    const tooMany = moveCardBetweenZones(fourthAvatar.state, { instanceId: 'extra-token', actorId: 'p1', destination: 'avatarZone', destinationPlayerId: 'p1' });
+    expect(tooMany.ok).toBe(false);
+    const fiveAvatars = state(player('p1', { avatarZone: [...avatars, nextAvatar, instance('avatar-4', 'p1', 'Avatar 4', 'Avatar')] }));
+    expect(validateGameState(fiveAvatars)).toMatch(/limit is 4 Avatars/);
+  });
+
   it('enforces three unique Constructs per player but permits the same name for the opponent', () => {
     const first = instance('a', 'p1', 'Shared'), second = instance('b', 'p1', 'B'), third = instance('c', 'p1', 'C');
     const current = state(player('p1', { hand: [first, second, third] }), player('p2', { constructZone: [instance('other', 'p2', 'Shared')] }));

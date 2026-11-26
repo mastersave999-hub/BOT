@@ -214,7 +214,14 @@ Unchanged Phase 1.5 findings include: p.14 name/deck rules; complete attack snap
 
 ## 10. Current validation and PR
 
-Phase 1.5 baseline `c92cd77`: 10 test files / 72 tests. Current Phase 2.1 working tree at validation: `npx tsc --noEmit` passed; `npm test -- --reporter=dot` passed 11 files / 83 tests. Production build, browser interaction checks and final `git diff --check` are recorded after the final code/documentation edits. PR #15 remains open; this phase does not merge it.
+Phase 1.5 baseline `c92cd77`: 10 test files / 72 tests. Final Phase 2.1 verification on the final working tree is recorded below after the documentation edits. The current tests establish narrow Game State behaviors, not full compliance for all listed rule paths. PR #15 remains open; this phase does not merge it.
+
+### Final verification snapshot (Phase 2.1)
+
+- Test suites: 11 files; 84 tests passed. Coverage includes Construct movement/capacity/name checks, Magic subtype rule helper checks, modifier duration state changes, first-turn phase helper transitions, selected End Phase discard validation and state changes, transaction rollback, event order on successful effect resolution, zone movement/ownership/privacy, reaction priority and Chain/LIFO, Layer 4 calculations, and multiplayer message/privacy/validation state.
+- TypeScript: `npx tsc --noEmit` passed. Production build: `npm run build` passed. Final `git diff --check` passed.
+- **Not fully verified:** the suite does not prove discard pending-state action lockout, reconnect/idempotent/stale-revision safety for discard commands, end-to-end multiplayer discard selection synchronization, or all event rollback/loop/duplicate scenarios. The existing stale-revision/duplicate-command tests concern Reaction commands, not discard commands. Thus End Phase discard and overall Phase 2.1 remain **Partial**, not complete.
+- Core-rule statuses remain narrow/partial: Construct max/name rules have state movement tests; Modification usage is tested at the shared rule-helper boundary, not every play path; duration cleanup and first-player turn-one helper transitions have state tests but not every relevant integration path; End Phase selection/count and Hell movement are tested but the discard destination is only an application convention. No card is promoted to Working/Verified absent an individual card Game State test.
 
 ## 11. Phase 2.1 shared infrastructure API and limitations
 
