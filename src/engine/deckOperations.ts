@@ -126,7 +126,7 @@ function shuffleInside(state: GameState, playerId: string, random: Randomization
 export function shuffleDeck(state: GameState, playerId: string, options: RandomizationOptions = {}): DeckOperationResult {
   const events: GameEvent[] = [];
   const transaction = runGameTransaction(state, draft => {
-    if (draft.pendingDeckChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
+    if (draft.pendingDeckChoice || draft.pendingHellChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
     return shuffleInside(draft, playerId, options, events);
   }, events);
   return failure(state, transaction);
@@ -138,7 +138,7 @@ export function millCards(state: GameState, playerId: string, count: number): De
   const events: GameEvent[] = [];
   let milledIds: string[] = [];
   const transaction = runGameTransaction(state, draft => {
-    if (draft.pendingDeckChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
+    if (draft.pendingDeckChoice || draft.pendingHellChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
     let next: GameState = draft;
     const available = Math.min(count, draft.players[playerId]?.deck.length ?? 0);
     if (!draft.players[playerId]) return null;
@@ -310,7 +310,7 @@ export function scoutCards(
   if (!Number.isSafeInteger(count) || count < 0) return { ok: false, state, reason: 'Scout count must be a non-negative integer' };
   const owner = state.players[deckOwnerId];
   if (!owner) return { ok: false, state, reason: 'Deck owner does not exist' };
-  if (state.pendingDeckChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || state.reactionWindow) return { ok: false, state, reason: 'Another game action is pending' };
+  if (state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || state.reactionWindow) return { ok: false, state, reason: 'Another game action is pending' };
   if (options.expectedRevision !== undefined && options.expectedRevision !== state.stateRevision) return { ok: false, state, reason: 'Stale Scout revision' };
   const viewerId = options.viewerId ?? deckOwnerId;
   if (!state.players[viewerId]) return { ok: false, state, reason: 'Authorized viewer does not exist' };
@@ -354,7 +354,7 @@ export function searchDeck(
 ): DeckOperationResult {
   const owner = state.players[deckOwnerId];
   if (!owner) return { ok: false, state, reason: 'Deck owner does not exist' };
-  if (state.pendingDeckChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || state.reactionWindow) return { ok: false, state, reason: 'Another game action is pending' };
+  if (state.pendingDeckChoice || state.pendingHellChoice || state.pendingDeckSearchVerification || state.pendingEndPhaseDiscardPlayerId || state.reactionWindow) return { ok: false, state, reason: 'Another game action is pending' };
   if (options.expectedRevision !== undefined && options.expectedRevision !== state.stateRevision) return { ok: false, state, reason: 'Stale Search revision' };
   if (!Number.isSafeInteger(options.selectCount ?? 1) || (options.selectCount ?? 1) < 1) return { ok: false, state, reason: 'Search count must be a positive integer' };
   const actorId = options.actorId ?? deckOwnerId;
@@ -384,7 +384,7 @@ export function searchDeck(
     const verifierPlayerIds = state.playerOrder.filter(id => id !== actorId);
     if (verifierPlayerIds.length === 0) return { ok: false, state, reason: 'A second player is required to verify an empty search' };
     const transaction = runGameTransaction(state, draft => {
-      if (draft.pendingDeckChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
+      if (draft.pendingDeckChoice || draft.pendingHellChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
       const next = shuffleInside(draft, deckOwnerId, options, events);
       if (!next) return null;
       events.push({ type: 'DECK_SEARCHED', deckOwnerId, actorId, destination, found: false, eventId: eventId(next, `search:${deckOwnerId}:none`) });
@@ -406,7 +406,7 @@ export function searchDeck(
   const selectedIds = options.selectedInstanceIds ?? (candidates.length === count ? candidates : undefined);
   if (selectedIds) {
     const transaction = runGameTransaction(state, draft => {
-      if (draft.pendingDeckChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
+      if (draft.pendingDeckChoice || draft.pendingHellChoice || draft.pendingDeckSearchVerification || draft.pendingEndPhaseDiscardPlayerId || draft.reactionWindow) return null;
       const staged = { ...draft, pendingDeckChoice: pending, stateRevision: pending.expectedRevision };
       return applyChoice(staged, pending, selectedIds, { seed: options.seed, random: options.random, commandId: options.commandId }, events);
     }, events);

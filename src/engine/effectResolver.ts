@@ -5,12 +5,14 @@ import { preventTargeting } from './prevention';
 import { appendGameEvents } from './gameEvents';
 import { recomputeContinuousEffects } from './continuousEffects';
 import { resolveDeckChoice, scoutCards } from './deckOperations';
+import { beginHellChoice, resolveHellChoice } from './hellChoice';
 import { calculateEffectiveSymbol } from './layers';
 
 export type EffectCondition =
   | { kind: 'player_has_avatar'; playerId: string; nameIncludes: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
   | { kind: 'player_has_avatar_symbol'; playerId: string; symbol: string }
   | { kind: 'player_hell_count'; playerId: string; minimum: number; cardType?: string; nameIncludes?: string; matching?: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }
+  | { kind: 'player_zone_count'; playerId: string; zone: 'avatarZone' | 'hand' | 'lifeDeck'; comparison: 'at_least' | 'at_most'; value: number }
   | { kind: 'player_is_critical'; playerId: string }
   | { kind: 'target_exists'; targetId: string };
 
@@ -35,8 +37,8 @@ export type EffectDefinition =
   | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom'; selectionMin?: number; selectionMax?: number; unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle' }
   | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
-  | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck' | 'hand' }
-  | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean }
+  | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish'; cardType?: 'Avatar' | 'Construct' | 'Magic'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }> }
+  | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean; cardType?: 'Avatar'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }> }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
   | { kind: 'cancel_chain_entry'; targetId: string }
   | { kind: 'cancel_pending_magic' };
@@ -412,20 +414,31 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
   },
   recover_from_hell: ({ state, plan, effect }) => {
     if (effect.kind !== 'recover_from_hell' || !Number.isInteger(effect.count) || effect.count < 1 ||
-      effect.instanceIds.length !== effect.count || new Set(effect.instanceIds).size !== effect.instanceIds.length) return null;
+      (effect.instanceIds.length !== 0 && effect.instanceIds.length !== effect.count) || new Set(effect.instanceIds).size !== effect.instanceIds.length) return null;
     const player = state.players[effect.playerId];
+    if (effect.instanceIds.length === 0) {
+      if (!effect.cardType) return null;
+      const choice = beginHellChoice(state, {
+        effectKind: 'recover_from_hell', playerId: effect.playerId, actorId: plan.actorId, authorizedViewerId: plan.actorId,
+        count: effect.count, cardType: effect.cardType, names: effect.names, destination: effect.destination
+      });
+      return choice.ok ? choice.state : null;
+    }
     if (!player) return null;
     const cards = effect.instanceIds.map(id => player.hell.find(card => card.instanceId === id));
     if (cards.some(card => !card || card.card.type === 'Life')) return null;
     let next = state;
     for (const card of cards as CardInstance[]) {
+      const toDeck = effect.destination === 'deck_top' || effect.destination === 'deck_bottom';
       const moved = moveCardBetweenZones(next, {
-        instanceId: card.instanceId, actorId: plan.actorId, destination: effect.destination,
-        destinationPlayerId: getOriginalOwnerId(card), effectMove: true
+        instanceId: card.instanceId, actorId: plan.actorId,
+        destination: toDeck ? 'deck' : effect.destination === 'banish' ? 'darkDimension' : 'hand',
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true,
+        ...(toDeck ? { deckPosition: effect.destination === 'deck_top' ? 'top' as const : 'bottom' as const } : {})
       });
       if (!moved.ok) return null;
       next = moved.state;
-      if (effect.destination === 'deck') {
+      if (toDeck) {
         const owner = next.players[getOriginalOwnerId(card)];
         next = { ...next, players: { ...next.players, [owner.id]: {
           ...owner, deck: owner.deck.map(item => item.instanceId === card.instanceId ? { ...item, isFaceUp: false } : item)
@@ -473,6 +486,13 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
   },
   summon_from_hell: ({ state, plan, effect }) => {
     if (effect.kind !== 'summon_from_hell') return null;
+    if (!effect.instanceId && effect.cardType === 'Avatar') {
+      const choice = beginHellChoice(state, {
+        effectKind: 'summon_from_hell', playerId: effect.playerId, actorId: plan.actorId, authorizedViewerId: plan.actorId,
+        count: 1, cardType: 'Avatar', names: effect.names, destination: 'avatarZone', rested: effect.rested
+      });
+      return choice.ok ? choice.state : null;
+    }
     const player = state.players[effect.playerId];
     const card = player?.hell.find(item => item.instanceId === effect.instanceId && item.card.type === 'Avatar');
     if (!player || !card) return null;
@@ -517,9 +537,13 @@ function resolveEffectPlanInTransaction(
               : condition.matching === 'DELIMITED_WORD_SEQUENCE'
                 ? matchesExpectedName(card.card.name, condition.nameIncludes, 'DELIMITED_WORD_SEQUENCE')
                 : card.card.name.includes(condition.nameIncludes)))).length >= condition.minimum
-          : condition.kind === 'player_is_critical'
-            ? !!player?.isCritical
-            : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
+          : condition.kind === 'player_zone_count'
+            ? !!player && (condition.comparison === 'at_least'
+              ? player[condition.zone].length >= condition.value
+              : player[condition.zone].length <= condition.value)
+            : condition.kind === 'player_is_critical'
+              ? !!player?.isCritical
+              : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
     if (!passed) return fail(state, 'effect condition failed');
   }
   for (const effect of plannedEffects) {
@@ -577,6 +601,12 @@ export function resolveEffectPlan(
 ): EffectResolution {
   let failure: EffectResolution | null = null;
   const plannedEffects = plan.sequence ? plan.sequence.flatMap(step => step.kind === 'effect' ? [step.effect] : []) : plan.effects;
+  const events = plannedEffects.flatMap((effect, index) => {
+    const choicePending = effect.kind === 'recover_from_hell' && effect.instanceIds.length === 0 ||
+      effect.kind === 'summon_from_hell' && !effect.instanceId;
+    return choicePending ? [] : [{ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId,
+      effectKind: effect.kind, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:${plan.actorId}:${index}:${effect.kind}` }];
+  });
   const transaction = runGameTransaction(state, draft => {
     const result = resolveEffectPlanInTransaction(draft, plan, handlers);
     if (!result.ok) {
@@ -584,7 +614,7 @@ export function resolveEffectPlan(
       return null;
     }
     return result.state;
-  }, plannedEffects.map((effect, index) => ({ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId, effectKind: effect.kind, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:${plan.actorId}:${index}:${effect.kind}` })));
+  }, events);
   if (transaction.ok === false) return fail(state, failure?.reason ?? transaction.reason);
   return { ok: true, state: transaction.state, logs: [] };
 }

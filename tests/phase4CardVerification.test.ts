@@ -14,6 +14,7 @@ import {
   toTriggerAbility,
 } from '../src/engine/cardTextAdapter';
 import { resolveEffectPlan, type EffectCondition, type EffectDefinition, type EffectPlan } from '../src/engine/effectResolver';
+import { resolveHellChoice } from '../src/engine/hellChoice';
 import { recomputeContinuousEffects } from '../src/engine/continuousEffects';
 import { resolveDeckChoice, scoutCards } from '../src/engine/deckOperations';
 import { checkModificationEquip } from '../src/engine/equipLegality';
@@ -206,6 +207,7 @@ function zoneIds(state: GameState): Record<string, string[]> {
 function targetRequirement(effect: ReturnType<typeof parseCardText>['clauses'][number]['effects'][number]): number {
   if (effect.kind === 'return_to_deck' || effect.kind === 'search_deck_to_hand' || effect.kind === 'recover_from_hell') return effect.count;
   if (effect.kind === 'summon_from_hell') return 1;
+  if (effect.kind === 'modify_power' && effect.target === 'source_avatar') return 0;
   return ['modify_power', 'set_power', 'change_symbol', 'destroy_avatar', 'bounce_avatar', 'banish_avatar',
     'destroy_construct', 'bounce_construct', 'banish_construct', 'sacrifice_avatar'].includes(effect.kind) ? 1 : 0;
 }
@@ -263,8 +265,19 @@ function assertResolvedChoiceOutcomes() {
 function resolvePlayerChoices(input: GameState): GameState {
   let state = input;
   let choices = 0;
-  while (state.pendingDeckChoice && choices < 5) {
-    const pending = state.pendingDeckChoice;
+  while ((state.pendingDeckChoice || state.pendingHellChoice) && choices < 5) {
+    if (state.pendingHellChoice) {
+      const pending = state.pendingHellChoice;
+      const selectedInstanceIds = pending.candidateInstanceIds.slice(0, pending.minSelect);
+      const resolved = resolveHellChoice(state, pending.authorizedViewerId, selectedInstanceIds, pending.expectedRevision,
+        `phase4-hell-choice:${pending.effectKind}:${choices}`);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) break;
+      state = resolved.state;
+      choices += 1;
+      continue;
+    }
+    const pending = state.pendingDeckChoice!;
     const selectedCount = pending.minSelect > 0 ? pending.minSelect
       : pending.maxSelect > 0 && (pending.destination !== 'deck' || pending.selectedDeckPosition) ? pending.maxSelect : 0;
     const selectedInstanceIds = pending.candidateInstanceIds.slice(0, selectedCount);
@@ -277,6 +290,7 @@ function resolvePlayerChoices(input: GameState): GameState {
     choices += 1;
   }
   expect(state.pendingDeckChoice).toBeUndefined();
+  expect(state.pendingHellChoice).toBeUndefined();
   expect(choices).toBeLessThanOrEqual(5);
   return state;
 }
@@ -312,6 +326,20 @@ function seedConditionState(state: GameState, parsed: ReturnType<typeof parseCar
       state.players[playerId] = { ...player, isCritical: true };
       continue;
     }
+    if (condition.kind === 'zone_count') {
+      const zone = player[condition.zone];
+      const required = condition.comparison === 'at_least' ? condition.value : 0;
+      while (zone.length < required) {
+        const cardType = condition.zone === 'avatarZone' ? 'Avatar' : condition.zone === 'lifeDeck' ? 'Life' : undefined;
+        const candidate = catalog.find(item => !cardType || item.type === cardType);
+        if (!candidate) {
+          errors.push(`no official catalog card can satisfy ${condition.zone} count for ${playerId}`);
+          break;
+        }
+        zone.push(instance(`p4-condition-${condition.zone}-${playerId}-${zone.length}`, playerId, candidate));
+      }
+      continue;
+    }
     if (condition.kind === 'avatar_name' || condition.kind === 'avatar_symbol') {
       const match = catalog.find(candidate => candidate.type === 'Avatar' && (condition.kind === 'avatar_name'
         ? matchesCardName(candidate.name, condition.name, parseCardNameRules(candidate))
@@ -345,6 +373,51 @@ function verifyEquipRestrictions(card: Card, parsed: ReturnType<typeof parseCard
   expect(checkModificationEquip(card, legalTarget)).toMatchObject({ legal: true, restricted: true });
   expect(checkModificationEquip(card, illegalTarget).legal).toBe(false);
   return clauses.every(clause => clause.equipRestriction !== undefined);
+}
+
+function verifyModificationLifecycle(card: Card, parsed: ReturnType<typeof parseCardText>, state: GameState): boolean {
+  const text = card.mainEffect ?? '';
+  const hasPowerAura = /POWER\s*[+-]\s*\d+/i.test(text) && /สวมใส่/.test(text);
+  const hasSymbolAura = /เปลี่ยน\s*Symbol/i.test(text) && !/ไม่ถูกเปลี่ยน\s*Symbol/i.test(text) && /สวมใส่/.test(text);
+  if (card.type !== 'Magic' || card.subtype !== 'Modification' || (!hasPowerAura && !hasSymbolAura) ||
+    parsed.clauses.some(clause => clause.effects.length > 0 || clause.timing.event || clause.timing.mode === 'ACTIVATED')) return false;
+  const conditionalPower = text.match(/ถ้า\s+Avatar\s+ที่สวมใส่การ์ดใบนี้คือ\s*["“]([^"”]+)["”][\s\S]{0,60}?POWER\s*([+-])\s*(\d+)\s*แทน/u);
+  const hostCard = catalog.find(candidate => candidate.type === 'Avatar' && checkModificationEquip(card, candidate).legal &&
+    (!conditionalPower || candidate.name.includes(conditionalPower[1])));
+  if (!hostCard) return false;
+  const hostId = `p4-mod-host-${card.printId}`;
+  const modificationId = `p4-mod-${card.printId}`;
+  const host = instance(hostId, 'p1', hostCard, {
+    attachedInstances: [instance(modificationId, 'p1', card)]
+  });
+  state.players.p1.avatarZone.push(host);
+  const recalculated = recomputeContinuousEffects(state);
+  const updatedHost = recalculated.players.p1.avatarZone.find(item => item.instanceId === hostId);
+  if (!updatedHost) return false;
+  if (hasPowerAura) {
+    const basePower = Number(conditionalPower?.[3] ?? text.match(/POWER\s*([+-])\s*(\d+)/i)?.[2]);
+    const sign = conditionalPower?.[2] ?? text.match(/POWER\s*([+-])\s*(\d+)/i)?.[1];
+    const expectedMod = basePower * (sign === '-' ? -1 : 1);
+    if (expectedMod === 0) {
+      expect(updatedHost.layerModifiers).not.toContainEqual(expect.objectContaining({ sourceCardId: `aura-mod-${modificationId}` }));
+      expect(calculateNetPower(updatedHost)).toBe(hostCard.power);
+    } else {
+      expect(updatedHost.layerModifiers).toContainEqual(expect.objectContaining({
+        layer: 1, powerMod: expectedMod, sourceCardId: `aura-mod-${modificationId}`
+      }));
+      expect(calculateNetPower(updatedHost)).toBe(Math.max(0, hostCard.power + expectedMod));
+    }
+  }
+  if (hasSymbolAura) expect(calculateEffectiveSymbol(updatedHost)).not.toBe(hostCard.symbol ?? null);
+  const movedHost = moveCardBetweenZones(recalculated, {
+    instanceId: hostId, actorId: 'p1', destination: 'hell', destinationPlayerId: 'p1',
+    effectMove: true, playerMandated: true
+  });
+  expect(movedHost.ok).toBe(true);
+  if (!movedHost.ok) return false;
+  expect(movedHost.state.players.p1.hell.map(item => item.instanceId)).toEqual(expect.arrayContaining([hostId, modificationId]));
+  expect(movedHost.state.players.p1.avatarZone.some(item => item.instanceId === hostId)).toBe(false);
+  return true;
 }
 
 function exactPaymentCards(target: Card, requiredCost: number): Card[] | null {
@@ -480,6 +553,8 @@ function stateWithoutConditions(input: GameState, conditions: EffectCondition[])
     const player = state.players[condition.playerId];
     if (condition.kind === 'player_is_critical') {
       state.players[condition.playerId] = { ...player, isCritical: false };
+    } else if (condition.kind === 'player_zone_count') {
+      player[condition.zone] = [];
     } else if (condition.kind === 'player_has_avatar') {
       const matches = (name: string) => condition.matching === 'EXACT_CARD_NAME' ? name.trim() === condition.nameIncludes
         : condition.matching === 'DELIMITED_WORD_SEQUENCE'
@@ -793,14 +868,24 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
         expectedZones[`${effect.playerId}.deck`] = afterZones[`${effect.playerId}.deck`];
       } else expect(afterZones[`${effect.playerId}.deck`]).toEqual(expectedZones[`${effect.playerId}.deck`]);
     } else if (effect.kind === 'recover_from_hell') {
-      for (const id of effect.instanceIds) moveExpected(id, `${effect.playerId}.hand`);
-      expect(afterZones[`${effect.playerId}.hand`]).toEqual(expectedZones[`${effect.playerId}.hand`]);
+      const destination = effect.destination === 'banish' ? 'darkDimension'
+        : effect.destination === 'hand' ? 'hand' : 'deck';
+      const deckPosition = effect.destination === 'deck_top' ? 'top' : 'bottom';
+      const chosenIds = effect.instanceIds.length > 0 ? effect.instanceIds
+        : before.players[effect.playerId].hell.filter(card => !afterZones[`${effect.playerId}.hell`].includes(card.instanceId))
+          .map(card => card.instanceId);
+      for (const id of chosenIds) moveExpected(id, `${effect.playerId}.${destination}`,
+        destination === 'deck' ? deckPosition : undefined);
+      expect(afterZones[`${effect.playerId}.${destination}`]).toEqual(expectedZones[`${effect.playerId}.${destination}`]);
       expect(afterZones[`${effect.playerId}.hell`]).toEqual(expectedZones[`${effect.playerId}.hell`]);
     } else if (effect.kind === 'summon_from_hell') {
-      moveExpected(effect.instanceId, `${effect.playerId}.avatarZone`);
+      const instanceId = effect.instanceId || before.players[effect.playerId].hell
+        .find(card => !afterZones[`${effect.playerId}.hell`].includes(card.instanceId))?.instanceId;
+      expect(instanceId).toBeTruthy();
+      moveExpected(instanceId!, `${effect.playerId}.avatarZone`);
       expect(afterZones[`${effect.playerId}.avatarZone`]).toEqual(expectedZones[`${effect.playerId}.avatarZone`]);
       expect(afterZones[`${effect.playerId}.hell`]).toEqual(expectedZones[`${effect.playerId}.hell`]);
-      expect(after.players[effect.playerId].avatarZone.find(card => card.instanceId === effect.instanceId)?.isRested).toBe(effect.rested ?? false);
+      expect(after.players[effect.playerId].avatarZone.find(card => card.instanceId === instanceId)?.isRested).toBe(effect.rested ?? false);
     } else if (effect.kind === 'cancel_pending_magic') {
       const pending = before.reactionWindow?.pendingAction;
       expect(pending?.type).toBe('RESOLVE_MAGIC');
@@ -843,7 +928,7 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
 describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
     expect(effectRows).toHaveLength(1833);
-    expect(parsedRows).toHaveLength(226);
+    expect(parsedRows).toHaveLength(241);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 
@@ -906,6 +991,12 @@ describe('Phase 4B per-card Game State verification', () => {
       if (equipVerified) verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
       return;
     }
+    if (verifyModificationLifecycle(card, parsed, state)) {
+      if (equipVerified && fixtureErrors.length === 0 && parsed.clauses.every(clause => clause.unresolved.length === 0)) {
+        verifiedRows.add(`${catalog.indexOf(card) + 1}|${card.printId}|${card.name}`);
+      } else recordUnverified(card, 'Modification host restriction or printed continuous stat lifecycle could not be verified');
+      return;
+    }
     const continuousClause = parsed.clauses.length === 1 ? parsed.clauses[0] : undefined;
     if (continuousClause?.timing.mode === 'CONTINUOUS' && parsed.continuousEffects.length > 0) {
       const verified = verifyContinuousCard(card, parsed, state);
@@ -923,12 +1014,16 @@ describe('Phase 4B per-card Game State verification', () => {
         return;
       }
       const source = instance('p1-trigger-source', 'p1', card);
+      if (triggerClause.timing.eventSubject === 'SOURCE' && triggerClause.effects.some(effect =>
+        effect.kind === 'modify_power' && effect.target === 'source_avatar')) {
+        state.players.p1.avatarZone.push(source);
+      }
       const binding = bindings[0] ?? {};
       const triggerClauseForFixture = card.printId === 'ODY1-022'
         ? {
           ...triggerClause,
           effects: triggerClause.effects.map(effect => {
-            if (effect.kind !== 'recover_from_hell' || !effect.name.value.includes('{symbol')) return effect;
+            if (effect.kind !== 'recover_from_hell' || !effect.name?.value.includes('{symbol')) return effect;
             const target = state.players.p1.hell.find(item => item.instanceId === binding.targetInstanceIds?.[0]);
             return target ? { ...effect, name: { kind: 'exact-name' as const, value: target.card.name, matching: 'EXACT_CARD_NAME' as const } } : effect;
           })
@@ -957,19 +1052,22 @@ describe('Phase 4B per-card Game State verification', () => {
           recordUnverified(card, 'combat trigger source cannot remain eligible in the battle fixture');
           return;
         }
-        const defenderCard = catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 &&
-          !candidate.mainEffect.includes('ลูกฮึด'));
-        const attackerCard = catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power > (defenderCard?.power ?? -1))
+        const sourceAttacks = ability.eventSubject === 'SOURCE' && ability.eventType === 'ATTACK_DECLARED';
+        const defenderCard = sourceAttacks
+          ? catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power < card.power)
+            .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0]
+          : catalog.find(candidate => candidate.type === 'Avatar' && candidate.power >= 0 && !candidate.mainEffect.includes('ลูกฮึด'));
+        const attackerCard = sourceAttacks ? card : catalog.filter(candidate => candidate.type === 'Avatar' && candidate.power > (defenderCard?.power ?? -1))
           .sort((left, right) => (right.power ?? 0) - (left.power ?? 0))[0];
         if (!defenderCard || !attackerCard) {
           recordUnverified(card, 'combat trigger fixture has no official higher-POWER attacker and lower-POWER defender');
           return;
         }
         state.currentPhase = 'BATTLE';
-        state.players.p1.avatarZone.push(source);
-        const attacker = instance(`${eventId}:attacker`, 'p1', attackerCard);
+        if (!state.players.p1.avatarZone.some(item => item.instanceId === source.instanceId)) state.players.p1.avatarZone.push(source);
+        const attacker = sourceAttacks ? source : instance(`${eventId}:attacker`, 'p1', attackerCard);
         const defender = instance(`${eventId}:defender`, 'p2', defenderCard);
-        state.players.p1.avatarZone.push(attacker);
+        if (attacker !== source) state.players.p1.avatarZone.push(attacker);
         state.players.p2.avatarZone.push(defender);
         const declared = declareCombatAttack(state, attacker.instanceId,
           { type: 'AVATAR', playerId: 'p2', instanceId: defender.instanceId });
@@ -1089,18 +1187,31 @@ describe('Phase 4B per-card Game State verification', () => {
       }
       return;
     }
-    const plan = toCardTextEffectPlan(parsed, 'p1', bindings, state);
+    const operationClauses = parsed.clauses.filter(clause => clause.effects.length > 0 || clause.cost);
+    const deterministicHellBindings = operationClauses.length === 1 && operationClauses[0].effects.length === 1 &&
+      (operationClauses[0].effects[0].kind === 'recover_from_hell' || operationClauses[0].effects[0].kind === 'summon_from_hell')
+      ? bindings.map(binding => ({ ...binding, targetInstanceIds: [] }))
+      : bindings;
+    const plan = toCardTextEffectPlan(parsed, 'p1', deterministicHellBindings, state);
     if (!plan) {
       expect(parsed.status).toBe('PARSED_READY');
       for (const blocker of verificationBlockers(card, parsed, combatKeywordVerified)) recordUnverified(card, blocker);
       recordUnverified(card, 'effect plan did not compile with generated bindings');
       return;
     }
-    const result = resolveEffectPlan(state, plan, {
+    let result = resolveEffectPlan(state, plan, {
       scout_cards: ({ state: scoutState, effect }) => effect.kind === 'scout_cards'
         ? resolveScoutEffectInHarness(scoutState, effect, card)
         : null
     });
+    if (result.ok && result.state.pendingHellChoice) {
+      const pending = result.state.pendingHellChoice;
+      const selectedIds = pending.candidateInstanceIds.slice(0, pending.maxSelect);
+      const choiceResult = resolveHellChoice(result.state, pending.authorizedViewerId, selectedIds, pending.expectedRevision,
+        `phase4-hell-choice:${card.printId}:${catalog.indexOf(card)}`);
+      expect(choiceResult.ok).toBe(true);
+      if (choiceResult.ok) result = { ...result, state: choiceResult.state };
+    }
     if (!result.ok) {
       expect(result.state).toBe(state);
       recordUnverified(card, `effect resolution rejected: ${result.reason ?? 'unspecified'}`);
@@ -1135,5 +1246,6 @@ describe('Phase 4B per-card Game State verification', () => {
     console.info(`[phase4] PARSED_READY rows attempted=${parsedRows.length}; VERIFIED_WORKING=${verifiedRows.size}; NOT_VERIFIED=${unverifiedRows.size}`);
     console.info(`[phase4] NOT_VERIFIED reasons: ${[...reasonCounts].sort((left, right) => right[1] - left[1]).map(([reason, count]) => `${reason}=${count} (e.g. ${reasonExamples.get(reason)?.join(', ')})`).join('; ')}`);
     console.info(`[phase4] VERIFIED_TIMING rows=${verifiedTimingRows.size}`);
+
   });
 });

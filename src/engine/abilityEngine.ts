@@ -353,7 +353,7 @@ export function executeCardAbility(
   else if (targetAvatarId && parsed.resetsPower) addEffect('ปรับ', { kind: 'reset_power', targetId: targetAvatarId });
   else if (targetAvatarId && parsed.powerMod !== 0) addEffect('POWER', { kind: 'modify_power', targetId: targetAvatarId, amount: parsed.powerMod });
   if (parsed.recoversFromHell > 0) {
-    const destination = /นรก.{0,80}นำขึ้นมือ|นำขึ้นมือ.{0,80}นรก/.test(effectText) ? 'hand' : 'deck';
+    const destination = /นรก.{0,80}นำขึ้นมือ|นำขึ้นมือ.{0,80}นรก/.test(effectText) ? 'hand' : 'deck_bottom';
     addEffect('นรก', { kind: 'recover_from_hell', playerId: actorId, count: parsed.recoversFromHell, instanceIds: [], destination });
   }
   if (parsed.summonsFromHell) {

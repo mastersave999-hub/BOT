@@ -60,9 +60,10 @@ export function restoreOwnLifeCardsFromSetup(
 }
 
 export function redactLifeCardsForViewer(state: GameState, viewerId: string): GameState {
-  const inspectedCardIds = state.pendingDeckChoice?.authorizedViewerId === viewerId
-    ? new Set(state.pendingDeckChoice.candidateInstanceIds)
-    : new Set<string>();
+  const inspectedCardIds = new Set([
+    ...(state.pendingDeckChoice?.authorizedViewerId === viewerId ? state.pendingDeckChoice.candidateInstanceIds : []),
+    ...(state.pendingHellChoice?.authorizedViewerId === viewerId ? state.pendingHellChoice.candidateInstanceIds : []),
+  ]);
   const gameEvents = state.gameEvents?.map(({ sequence, event }) => {
     if (event.type === 'CARD_DRAWN' && event.playerId !== viewerId) {
       const { instanceId: _privateInstanceId, ...publicEvent } = event;
@@ -99,6 +100,9 @@ export function redactLifeCardsForViewer(state: GameState, viewerId: string): Ga
     pendingDeckChoice: state.pendingDeckChoice && state.pendingDeckChoice.authorizedViewerId !== viewerId
       ? { ...state.pendingDeckChoice, candidateInstanceIds: [], minSelect: 0, maxSelect: 0 }
       : state.pendingDeckChoice,
+    pendingHellChoice: state.pendingHellChoice && state.pendingHellChoice.authorizedViewerId !== viewerId
+      ? { ...state.pendingHellChoice, candidateInstanceIds: [], minSelect: 0, maxSelect: 0 }
+      : state.pendingHellChoice,
     ...(gameEvents ? { gameEvents } : {})
   };
 }
@@ -164,7 +168,7 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
   const activePlayerId = previous.playerOrder[previous.currentTurnPlayerIndex];
-  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingDeckSearchVerification || previous.pendingExitPrevention) return false;
+  if (!activePlayerId || senderPlayerId !== activePlayerId || previous.pendingEndPhaseDiscardPlayerId || previous.pendingDeckChoice || previous.pendingHellChoice || previous.pendingDeckSearchVerification || previous.pendingExitPrevention) return false;
   const outgoingPlayer = previous.players[activePlayerId];
   const incomingOutgoingPlayer = incoming.players[activePlayerId];
   const completedDrawPhase = previous.currentPhase === 'DRAW' && incoming.currentPhase === 'MAIN' &&

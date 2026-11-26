@@ -44,7 +44,11 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
   const result: Array<{ layer: 1 | 2; powerMod: number; sourceCardId: string }> = [];
   for (const attached of target.attachedInstances) {
     const text = attached.card.mainEffect ?? '';
-    const powerMod = cardPowerMod(attached);
+    let powerMod = cardPowerMod(attached);
+    const conditionalPower = text.match(/ถ้า\s+Avatar\s+ที่สวมใส่การ์ดใบนี้คือ\s*["“]([^"”]+)["”][\s\S]{0,60}?POWER\s*([+-])\s*(\d+)\s*แทน/u);
+    if (conditionalPower && target.card.name.includes(conditionalPower[1])) {
+      powerMod = Number(conditionalPower[3]) * (conditionalPower[2] === '-' ? -1 : 1);
+    }
     const symbolMod = text.match(/(?:ถูกเปลี่ยน|เปลี่ยน)\s*Symbol\s*(?:เป็น)?\s*\{?([^}\n.]+)\}?/i)?.[1]?.trim();
     if (attached.card.type === 'Magic' && attached.card.subtype === 'Modification' && (powerMod !== 0 || symbolMod)) {
       result.push({ layer: 1, powerMod, ...(symbolMod ? { symbolMod } : {}), sourceCardId: `aura-mod-${attached.instanceId}` });
