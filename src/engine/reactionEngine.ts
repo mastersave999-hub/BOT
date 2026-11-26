@@ -460,7 +460,11 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
   }
   if (entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') {
     if (entry.cancelled) return { state, logs: [`${entry.triggerId}: trigger cancelled`] };
-    const resolved = resolveEffectPlan(state, { actorId: entry.controllerId, effects: entry.effects });
+    const conditions = entry.entryType === 'TRIGGER_ABILITY' ? entry.conditions : undefined;
+    const resolved = resolveEffectPlan(state, {
+      actorId: entry.controllerId, ...(conditions?.length ? { conditions } : {}),
+      ...(entry.entryType === 'TRIGGER_ABILITY' && entry.costs?.length ? { costs: entry.costs } : {}), effects: entry.effects
+    });
     if (!resolved.ok) return { state, logs: [`${entry.triggerId}: trigger failed and was rolled back (${resolved.reason ?? 'invalid effect'})`] };
     return { state: resolved.state, logs: [`${entry.triggerId}: trigger resolved`] };
   }

@@ -1,6 +1,8 @@
 import type { CardInstance, ContinuousPowerEffect, GameState, PlayerState, PreventionShield } from './types';
 import { calculateEffectiveSymbol } from './layers';
 import { parseCardText } from './cardTextAdapter';
+import { appendGameEvents, type GameEvent } from './gameEvents';
+import { checkModificationEquip } from './equipLegality';
 
 function flattenFieldCard(card: CardInstance): CardInstance[] {
   return [card, ...card.attachedInstances.flatMap(flattenFieldCard)];
@@ -26,7 +28,8 @@ function isEffectTarget(source: CardInstance, effect: ContinuousPowerEffect, tar
   const relation = effect.targetController ?? 'SOURCE_CONTROLLER';
   if (relation === 'SOURCE_CONTROLLER' && target.controllerId !== source.controllerId) return false;
   if (relation === 'OPPONENT' && target.controllerId === source.controllerId) return false;
-  if (effect.targetSymbol && !calculateEffectiveSymbol(target)?.includes(effect.targetSymbol)) return false;
+  const targetSymbols = effect.targetSymbols ?? (effect.targetSymbol ? [effect.targetSymbol] : []);
+  if (targetSymbols.length > 0 && !targetSymbols.some(symbol => calculateEffectiveSymbol(target)?.includes(symbol))) return false;
   if (effect.targetNameIncludes && !target.card.name.includes(effect.targetNameIncludes)) return false;
   return true;
 }
@@ -36,13 +39,15 @@ function cardPowerMod(card: CardInstance): number {
   return match ? Number.parseInt(match[1], 10) : 0;
 }
 
-function legacyAuras(state: GameState, sources: CardInstance[], target: CardInstance): Array<{ layer: 1 | 2; powerMod: number; sourceCardId: string }> {
+function legacyAuras(state: GameState, sources: CardInstance[], target: CardInstance): Array<{ layer: 1 | 2; powerMod: number; symbolMod?: string; sourceCardId: string }> {
   if (target.card.type !== 'Avatar') return [];
   const result: Array<{ layer: 1 | 2; powerMod: number; sourceCardId: string }> = [];
   for (const attached of target.attachedInstances) {
+    const text = attached.card.mainEffect ?? '';
     const powerMod = cardPowerMod(attached);
-    if (attached.card.type === 'Magic' && attached.card.subtype === 'Modification' && powerMod !== 0) {
-      result.push({ layer: 1, powerMod, sourceCardId: `aura-mod-${attached.instanceId}` });
+    const symbolMod = text.match(/(?:ถูกเปลี่ยน|เปลี่ยน)\s*Symbol\s*(?:เป็น)?\s*\{?([^}\n.]+)\}?/i)?.[1]?.trim();
+    if (attached.card.type === 'Magic' && attached.card.subtype === 'Modification' && (powerMod !== 0 || symbolMod)) {
+      result.push({ layer: 1, powerMod, ...(symbolMod ? { symbolMod } : {}), sourceCardId: `aura-mod-${attached.instanceId}` });
     }
   }
   for (const source of sources) {
@@ -107,9 +112,54 @@ function recalculatePlayer(state: GameState, player: PlayerState, sources: CardI
   };
 }
 
+function enforceModificationEquipLegality(state: GameState): GameState {
+  const players = { ...state.players };
+  const events: GameEvent[] = [];
+  for (const playerId of state.playerOrder) {
+    const player = players[playerId];
+    if (!player) continue;
+    const avatarZone = player.avatarZone.map(avatar => {
+      const kept: CardInstance[] = [];
+      for (const attached of avatar.attachedInstances) {
+        if (attached.card.type !== 'Magic' || attached.card.subtype !== 'Modification') {
+          kept.push(attached);
+          continue;
+        }
+        const legality = checkModificationEquip(attached.card, avatar.card);
+        if (legality.legal) {
+          kept.push(attached);
+          continue;
+        }
+        const ownerId = attached.originalOwnerId ?? attached.ownerId;
+        const owner = players[ownerId];
+        if (!owner) {
+          kept.push(attached);
+          continue;
+        }
+        players[ownerId] = { ...owner, hell: [...owner.hell, { ...attached, attachedInstances: [] }] };
+        events.push({
+          type: 'CARD_MOVED', instanceId: attached.instanceId, ownerId, controllerId: attached.controllerId,
+          from: `${playerId}:attached:${avatar.instanceId}`, to: `${ownerId}:hell`, actorId: avatar.controllerId,
+          eventId: `${state.id}:${state.gameEvents?.length ?? 0}:equip-illegal:${attached.instanceId}:${avatar.instanceId}`
+        });
+        events.push({
+          type: 'CARD_LEFT_FIELD', instanceId: attached.instanceId, ownerId, controllerId: attached.controllerId,
+          actorId: avatar.controllerId,
+          eventId: `${state.id}:${state.gameEvents?.length ?? 0}:equip-illegal-left:${attached.instanceId}:${avatar.instanceId}`
+        });
+      }
+      return kept.length === avatar.attachedInstances.length ? avatar : { ...avatar, attachedInstances: kept };
+    });
+    players[playerId] = { ...players[playerId], avatarZone };
+  }
+  const next = { ...state, players };
+  return events.length ? appendGameEvents(next, events) : next;
+}
+
 /** Rebuilds only derived source-based modifiers; printed card.power is never mutated. */
 export function recomputeContinuousEffects(state: GameState): GameState {
-  const activeCards = activeFieldCards(state);
+  const legallyEquippedState = enforceModificationEquipLegality(state);
+  const activeCards = activeFieldCards(legallyEquippedState);
   const sources = activeCards.filter(card => card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
   const activeSourceIds = new Set(activeCards.map(card => card.instanceId));
   const cleanShields = (card: CardInstance): CardInstance => {
@@ -141,9 +191,9 @@ export function recomputeContinuousEffects(state: GameState): GameState {
     hell: player.hell.map(cleanShields),
     darkDimension: player.darkDimension.map(cleanShields)
   });
-  const cleanedPlayers = Object.fromEntries(Object.entries(state.players).map(([id, player]) => [id, cleanPlayer(player)]));
-  const cleanedLand = state.landMagicZone ? cleanShields(state.landMagicZone) : null;
-  const cleanedState = { ...state, players: cleanedPlayers, landMagicZone: cleanedLand };
+  const cleanedPlayers = Object.fromEntries(Object.entries(legallyEquippedState.players).map(([id, player]) => [id, cleanPlayer(player)]));
+  const cleanedLand = legallyEquippedState.landMagicZone ? cleanShields(legallyEquippedState.landMagicZone) : null;
+  const cleanedState = { ...legallyEquippedState, players: cleanedPlayers, landMagicZone: cleanedLand };
   const cleanedSources = activeFieldCards(cleanedState).filter(card => card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
   const players = Object.fromEntries(Object.entries(cleanedState.players).map(([id, player]) => [id, recalculatePlayer(cleanedState, player, cleanedSources)]));
   return { ...cleanedState, players };

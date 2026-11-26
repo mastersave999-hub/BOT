@@ -4,6 +4,8 @@ import type { Card } from '../src/engine/types';
 
 const cards = JSON.parse(readFileSync(new URL('../cards_clean.json', import.meta.url), 'utf8')) as Card[];
 const effectCards = cards.filter(card => (card.mainEffect ?? '').trim().length > 0);
+const databaseRows = new Map(cards.map((card, index) => [card, index + 1]));
+const unparsedRows: Array<{ dbRow: number; card: Card; reason?: string }> = [];
 const statusCounts = { PARSED_READY: 0, UNSUPPORTED: 0, AMBIGUOUS: 0 };
 const patternCounts = new Map<string, number>();
 const structuralPatterns: Record<string, RegExp> = {
@@ -21,6 +23,7 @@ const structuralCounts = Object.fromEntries(Object.keys(structuralPatterns).map(
 for (const card of effectCards) {
   const parsed = parseCardText(card);
   statusCounts[parsed.status] += 1;
+  if (parsed.status !== 'PARSED_READY') unparsedRows.push({ dbRow: databaseRows.get(card) ?? 0, card, reason: parsed.reason });
   if (parsed.reason) {
     for (const reason of new Set(parsed.reason.split('; '))) patternCounts.set(reason, (patternCounts.get(reason) ?? 0) + 1);
   }
@@ -31,11 +34,35 @@ for (const card of effectCards) {
 
 const topUnparsedPatterns = [...patternCounts.entries()]
   .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+const clauseClusterPatterns: Array<[string, RegExp]> = [
+  ['React — opponent summons an Avatar', /เมื่อ(?:ฝ่ายตรงข้าม|อีกฝ่าย)[^:]*อัญเชิญ[^:]*Avatar/],
+  ['React — opponent uses Magic', /เมื่อ(?:ฝ่ายตรงข้าม|อีกฝ่าย)[^:]*ใช้[^:]*Magic/i],
+  ['Cancellation — cancel an action/effect', /ยกเลิก/],
+  ['Prevention — prevent destruction', /(?:ป้องกัน[^<\n]*(?:ทำลาย|ถูกทำลาย)|ไม่สามารถถูกทำลาย)/],
+  ['Modification — equip restriction', /สวมใส่ได้เฉพาะ/],
+  ['Continuous — POWER or Symbol buff', /ต่อเนื่อง[^<\n]*(?:POWER|Symbol)/i],
+  ['End-of-turn — self exit/removal', /(?:เมื่อจบเทิร์น|จบเทิร์น|End Phase)[^<\n]*(?:ทำลาย|เนรเทศ|ลงนรก|กลับเข้า Deck|ใต้ Deck)/i],
+  ['Conditional — if/when colon clause', /(?:^|<br\s*\/?\s*>\s*)(?:ถ้า|หาก)[^:]{1,180}:/i],
+  ['Hell — recover, summon, or banish', /นรก[^<\n]*(?:ขึ้นมือ|กลับขึ้นมือ|อัญเชิญ|เนรเทศ|กลับเข้า Deck)|(?:ขึ้นมือ|กลับขึ้นมือ|อัญเชิญ|เนรเทศ|กลับเข้า Deck)[^<\n]*นรก/],
+  ['Magic quota — ability counts as Normal Magic', /ความสามารถนี้ถือเป็นการใช้\s*Normal\s*Magic/i]
+];
+const unparsedClauseClusters = clauseClusterPatterns.map(([name, pattern]) => {
+  const matches = unparsedRows.filter(({ card }) => pattern.test(card.mainEffect ?? ''));
+  return {
+    name,
+    rowCount: matches.length,
+    examples: matches.slice(0, 5).map(({ dbRow, card }) => ({
+      dbRow, printId: card.printId, name: card.name,
+      excerpt: (card.mainEffect ?? '').replace(/<br\s*\/?\s*>/gi, ' / ').replace(/\s+/g, ' ').slice(0, 200)
+    }))
+  };
+});
 console.log(JSON.stringify({
   databaseRows: cards.length,
   effectBearingRows: effectCards.length,
   uniqueEffectPrintIds: new Set(effectCards.map(card => card.printId)).size,
   statusCounts,
   structuralPatternRows: structuralCounts,
-  topUnparsedPatterns
+  topUnparsedPatterns,
+  unparsedClauseClusters
 }, null, 2));

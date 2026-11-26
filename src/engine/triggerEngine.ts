@@ -1,4 +1,4 @@
-import type { EffectDefinition } from './effectResolver';
+import type { EffectCondition, EffectCost, EffectDefinition } from './effectResolver';
 import { resolveEffectPlan } from './effectResolver';
 import type { GameEvent } from './gameEvents';
 import type { CardInstance, GameState, ReactionTrigger } from './types';
@@ -11,7 +11,13 @@ export interface TriggerAbility {
   frequency?: TriggerFrequency;
   /** Optional predicates keep trigger matching typed; card text is never parsed here. */
   sourceInstanceId?: string;
+  actorRelation?: 'SELF' | 'OPPONENT';
+  eventSubject?: 'SOURCE';
+  requiresExactGemPaid?: boolean;
+  phase?: import('./types').Phase;
+  conditions?: EffectCondition[];
   effects: EffectDefinition[];
+  costs?: EffectCost[];
 }
 
 export interface TriggerMatch {
@@ -43,10 +49,38 @@ function allFieldCards(state: GameState): CardInstance[] {
   return cards;
 }
 
+function eventActorId(event: GameEvent): string | undefined {
+  if ('playerId' in event && typeof event.playerId === 'string') return event.playerId;
+  if ('actorId' in event && typeof event.actorId === 'string') return event.actorId;
+  const controllerId = (event as { controllerId?: unknown }).controllerId;
+  return typeof controllerId === 'string' ? controllerId : undefined;
+}
+
+function eventSubjectId(event: GameEvent): string | undefined {
+  const instanceId = (event as { instanceId?: unknown }).instanceId;
+  if (typeof instanceId === 'string') return instanceId;
+  if (event.type === 'ATTACK_DECLARED' || event.type === 'BATTLE_ENDED') return event.attackerId;
+  return undefined;
+}
+
 /** Discovers explicitly-declared structured triggers from the immutable event snapshot. */
 export function collectTriggers(state: GameState, event: GameEvent): TriggerMatch[] {
-  return allFieldCards(state).flatMap(source => (source.triggerAbilities ?? [])
+  const actorId = eventActorId(event);
+  const subjectId = eventSubjectId(event);
+  const sources = allFieldCards(state);
+  if (event.type === 'AVATAR_DESTROYED') {
+    for (const player of Object.values(state.players)) {
+      const destroyed = player.hell.find(card => card.instanceId === event.instanceId);
+      if (destroyed && !sources.some(card => card.instanceId === destroyed.instanceId)) sources.push(destroyed);
+    }
+  }
+  return sources.flatMap(source => (source.triggerAbilities ?? [])
     .filter(ability => ability.eventType === event.type && (!ability.sourceInstanceId || ability.sourceInstanceId === source.instanceId))
+    .filter(ability => !ability.actorRelation || (actorId !== undefined && (ability.actorRelation === 'SELF'
+      ? actorId === source.controllerId : actorId !== source.controllerId)))
+    .filter(ability => ability.eventSubject !== 'SOURCE' || subjectId === source.instanceId)
+    .filter(ability => !ability.requiresExactGemPaid || (event.type === 'AVATAR_SUMMONED' && event.exactGemPaid === true))
+    .filter(ability => !ability.phase || ((event.type === 'PHASE_STARTED' || event.type === 'PHASE_ENDED') && event.phase === ability.phase))
     .map(ability => ({ ability, source, controllerId: source.controllerId, event })));
 }
 
@@ -91,6 +125,8 @@ export function dispatchTriggersForEvent(state: GameState, event: GameEvent): Ga
     controllerId: match.controllerId,
     triggerId: `${match.source.instanceId}:${match.ability.id}`,
     effects: match.ability.effects,
+    ...(match.ability.costs?.length ? { costs: match.ability.costs } : {}),
+    ...(match.ability.conditions?.length ? { conditions: match.ability.conditions } : {}),
     cancelled: false,
     eventId: event.eventId,
     respondedTo: { ...actorTrigger, targetInstanceId: match.source.instanceId }
@@ -159,7 +195,10 @@ export function resolveTriggeredEvent(
     if (!current.players[controllerId] || ability.effects.length === 0) {
       return { ok: false, state, resolved: [], pending: matches, reason: 'Trigger has no valid controller or effects' };
     }
-    const result = resolveEffectPlan(current, { actorId: controllerId, effects: ability.effects });
+    const result = resolveEffectPlan(current, {
+      actorId: controllerId, ...(ability.conditions?.length ? { conditions: ability.conditions } : {}),
+      ...(ability.costs?.length ? { costs: ability.costs } : {}), effects: ability.effects
+    });
     if (!result.ok) return { ok: false, state, resolved: [], pending: matches, reason: result.reason ?? 'Trigger resolution failed' };
     current = result.state;
     if (ability.frequency === 'ONCE_PER_TURN') current = {
