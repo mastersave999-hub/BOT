@@ -12,6 +12,7 @@ type GameEventPayload =
   | { type: 'TOKEN_CREATED' | 'TOKEN_DESTROYED'; instanceId: string; playerId: string }
   | { type: 'ATTACK_DECLARED'; attackerId: string; targetId: string; playerId: string }
   | { type: 'BATTLE_ENDED'; attackerId: string; targetId: string; playerId: string }
+  | { type: 'LIFE_REVEALED'; instanceId: string; playerId: string; actorId: string }
   | { type: 'CARD_DRAWN'; instanceId?: string; playerId: string; actorId: string }
   | { type: 'CARD_DISCARDED'; instanceId: string; playerId: string; actorId: string }
   | { type: 'DAMAGE_DEALT' | 'DAMAGE_TAKEN'; amount: number; sourceId?: string; targetPlayerId: string; actorId: string }
@@ -24,7 +25,7 @@ type GameEventPayload =
   | { type: 'DECK_SEARCHED'; deckOwnerId: string; actorId: string; destination: 'hand' | 'hell' | 'deck'; instanceId?: string; found?: boolean }
   | { type: 'DECK_SEARCH_VERIFIED'; deckOwnerId: string; searcherId: string; verifierId: string }
   | { type: 'PLAYER_DECKED_OUT'; playerId: string }
-  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' | 'change_avatar_control' | 'cancel_chain_entry' }
+  | { type: 'EFFECT_RESOLVED' | 'EFFECT_PREVENTED' | 'EFFECT_CANCELLED'; actorId: string; effectKind: 'draw' | 'modify_power' | 'set_power' | 'change_symbol' | 'flip_life' | 'search_to_hand' | 'reset_power' | 'destroy_avatar' | 'bounce_avatar' | 'destroy_opponent_avatars' | 'recover_from_hell' | 'summon_from_hell' | 'change_avatar_control' | 'cancel_chain_entry' | 'banish_avatar' | 'destroy_construct' | 'bounce_construct' | 'banish_construct' | 'return_to_deck' | 'sacrifice_avatar' | 'scout_cards' | 'mill' }
   | { type: 'ACTION_CANCELLED'; actorId: string; targetInstanceId: string; targetKind: 'MAGIC_PLAY' | 'ABILITY' | 'CHAIN_ENTRY'; eventId: string }
   | { type: 'PREVENTION_APPLIED'; shieldId: string; kind: 'DAMAGE' | 'DESTRUCTION' | 'TARGETING'; actorId: string; targetId: string; targetPlayerId: string; preventedAmount: number; eventId: string };
 

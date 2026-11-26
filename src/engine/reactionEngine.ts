@@ -17,6 +17,10 @@ const REACT_MAGIC_TIMING_TEXT = /โดยถือว่าเป็นกา�
 const OPPONENT_TURN_TEXT = /เทิร์นฝ่ายตรงข้าม|เทิร์นอีกฝ่าย/;
 const OWN_BATTLE_TEXT = /Battle Phase เรา|Battle Phase ของเรา/;
 
+function isRuleTextProtected(card: Card): boolean {
+  return !!card.ruleTextProtected || /#(?=\s|[ก-๙])/.test(card.mainEffect ?? '');
+}
+
 export interface ReactionEligibility {
   eligible: boolean;
   reason?: string;
@@ -94,20 +98,37 @@ export function isReactionEffectExecutable(card: Card): boolean {
   const effect = card.mainEffect ?? '';
   const parsed = parseCardAbility(card);
   if (getUnsupportedEffectReason(card)) return false;
-  const cancelsMagic = /ยกเลิกการใช้\s*Magic Card/.test(effect);
+  const cancelsMagic = /ยกเลิกการใช้\s*Magic Card/.test(effect) || !!magicCancellationType(effect);
   const cancelsAbility = /ยกเลิก.*(?:ความสามารถ|Ability)/i.test(effect);
   const hasSupportedEffect = cancelsMagic || cancelsAbility || parsed.drawCount > 0 || parsed.powerMod !== 0 ||
     parsed.resetsPower || parsed.destroysTarget || parsed.destroysAllOpponentAvatars ||
     parsed.bouncesTarget || parsed.summonsFromHell || parsed.recoversFromHell > 0;
   if (!hasSupportedEffect) return false;
-  if (/ยกเลิก(?!การใช้\s*Magic Card|.*(?:ความสามารถ|Ability))|ป้องกัน|สอดแนม|ค้นหา|สุ่ม|เปลี่ยนสภาพ|สับ Deck|เตะไข่/.test(effect)) return false;
+  if (/ยกเลิก(?!การใช้\s*(?:Magic Card|(?:Normal|Modification|React|Land)\s*Magic)|.*(?:ความสามารถ|Ability))|ป้องกัน|สอดแนม|ค้นหา|สุ่ม|เปลี่ยนสภาพ|สับ Deck|เตะไข่/.test(effect)) return false;
   if (/ทิ้ง\s*Avatar|ส่ง Avatar.*ลงนรก|เซ่นไหว้|นอน Avatar/.test(effect)) return false;
   if (/(?:หาก|ถ้า)/.test(effect) && !/(?:หาก|ถ้า)บน Avatar Zone ฝ่ายเรามี\s*["“][^"”]+["”]/.test(effect)) return false;
   return true;
 }
 
+export function effectiveMagicSubtype(card: Card): NonNullable<Card['subtype']> {
+  const override = (card.mainEffect ?? '').match(/โดยถือว่าเป็นการใช้\s*(Normal|Modification|React|Land)\s*Magic/i)?.[1];
+  const implicitReact = REACT_MAGIC_TIMING_TEXT.test(card.mainEffect ?? '') ? 'React' : undefined;
+  return (override ?? implicitReact ?? card.subtype ?? 'Normal') as NonNullable<Card['subtype']>;
+}
+
+export function magicCancellationType(text: string): NonNullable<Card['subtype']> | undefined {
+  const type = text.match(/ยกเลิกการใช้\s*(Normal|Modification|React|Land)\s*Magic/i)?.[1];
+  return type as NonNullable<Card['subtype']> | undefined;
+}
+
+export function canCancelMagicCard(cancellationText: string, targetCard: Card): boolean {
+  const type = magicCancellationType(cancellationText);
+  if (targetCard.type !== 'Magic') return false;
+  return type ? effectiveMagicSubtype(targetCard) === type : /ยกเลิกการใช้\s*Magic Card/i.test(cancellationText);
+}
+
 export function isNormalMagicTreatedAsReact(card: Card): boolean {
-  return card.type === 'Magic' && card.subtype === 'Normal' && REACT_MAGIC_TIMING_TEXT.test(card.mainEffect ?? '');
+  return card.type === 'Magic' && card.subtype !== 'React' && effectiveMagicSubtype(card) === 'React';
 }
 
 export function canUseNormalMagicAsReactOnOwnBattle(state: GameState, playerId: string, card: Card): boolean {
@@ -390,12 +411,12 @@ function applyCancellation(
     if (entry.entryType === 'TRIGGER_ABILITY' || entry.entryType === 'ACTIVATED_ABILITY') {
       chain[index] = { ...entry, cancelled: true };
     } else {
-      if (entry.sourceCard.card.ruleTextProtected) return { state, applied: false };
+      if (isRuleTextProtected(entry.sourceCard.card)) return { state, applied: false };
       chain.splice(index, 1);
       nextState = sendResolvedMagicToHell(nextState, entry.playerId, entry.sourceCard);
     }
     applied = true;
-  } else if (pendingAction && 'sourceCard' in pendingAction && pendingAction.sourceCard.instanceId === targetInstanceId && !pendingAction.sourceCard.card.ruleTextProtected) {
+  } else if (pendingAction && 'sourceCard' in pendingAction && pendingAction.sourceCard.instanceId === targetInstanceId && !isRuleTextProtected(pendingAction.sourceCard.card)) {
     if (targetKind === 'MAGIC_PLAY' && pendingAction.type === 'RESOLVE_MAGIC') {
       nextState = sendResolvedMagicToHell(nextState, pendingAction.actorId, pendingAction.sourceCard);
       pendingAction = undefined;
@@ -458,7 +479,7 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
     };
   }
 
-  const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card/.test(entry.sourceCard.card.mainEffect ?? '');
+  const cancelsPlayedMagic = /ยกเลิกการใช้\s*Magic Card/.test(entry.sourceCard.card.mainEffect ?? '') || !!magicCancellationType(entry.sourceCard.card.mainEffect ?? '');
   const cancelsAbility = /ยกเลิก.*(?:ความสามารถ|Ability)/i.test(entry.sourceCard.card.mainEffect ?? '');
   let nextState = state;
   let chain = [...(window.chain ?? [])];
@@ -481,13 +502,15 @@ function resolveQueuedReaction(state: GameState, window: ReactionWindow, entry: 
   }
   if (cancelsPlayedMagic && entry.respondedTo.type === 'MAGIC_PLAYED' && entry.respondedTo.sourceInstanceId) {
     const targetId = entry.respondedTo.sourceInstanceId;
-    const chainIndex = chain.findIndex(item => item.entryType === 'REACT_MAGIC' && item.sourceCard.instanceId === targetId);
+    const chainIndex = chain.findIndex(item => item.entryType === 'REACT_MAGIC' && item.sourceCard.instanceId === targetId &&
+      canCancelMagicCard(entry.sourceCard.card.mainEffect ?? '', item.sourceCard.card));
     const canceledEntry = chain[chainIndex];
-    if (canceledEntry?.entryType === 'REACT_MAGIC' && !canceledEntry.sourceCard.card.ruleTextProtected) {
+    if (canceledEntry?.entryType === 'REACT_MAGIC' && !isRuleTextProtected(canceledEntry.sourceCard.card)) {
       chain = chain.filter((_, index) => index !== chainIndex);
       nextState = sendResolvedMagicToHell(nextState, canceledEntry.playerId, canceledEntry.sourceCard);
       canceledTarget = { instanceId: targetId, kind: 'CHAIN_ENTRY' };
-    } else if (pendingAction?.type === 'RESOLVE_MAGIC' && pendingAction.sourceCard.instanceId === targetId && !pendingAction.sourceCard.card.ruleTextProtected) {
+    } else if (pendingAction?.type === 'RESOLVE_MAGIC' && pendingAction.sourceCard.instanceId === targetId &&
+      canCancelMagicCard(entry.sourceCard.card.mainEffect ?? '', pendingAction.sourceCard.card) && !isRuleTextProtected(pendingAction.sourceCard.card)) {
       nextState = sendResolvedMagicToHell(nextState, pendingAction.actorId, pendingAction.sourceCard);
       pendingAction = undefined;
       canceledTarget = { instanceId: targetId, kind: 'MAGIC_PLAY' };
@@ -594,8 +617,8 @@ export function resolveReactionCard(
   }
 
   const cancelledOriginalMagic = window.pendingAction?.type === 'RESOLVE_MAGIC' &&
-    !window.pendingAction.sourceCard.card.ruleTextProtected &&
-    /ยกเลิกการใช้\s*Magic Card/.test(pendingReaction.sourceCard.card.mainEffect ?? '');
+    !isRuleTextProtected(window.pendingAction.sourceCard.card) &&
+    canCancelMagicCard(pendingReaction.sourceCard.card.mainEffect ?? '', window.pendingAction.sourceCard.card);
   const result = cancelledOriginalMagic
     ? { state, logs: [`${pendingReaction.sourceCard.card.name}: ยกเลิกผลของ Magic ที่ระบุ`] }
     : executeCardAbility(state, pendingReaction.playerId, pendingReaction.sourceCard, 'MAGIC_CAST', targetId);

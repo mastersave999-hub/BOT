@@ -1,6 +1,7 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 import { recomputeContinuousEffects, expirePreventionShieldsAt } from './continuousEffects';
+import { calculateEffectiveSymbol } from './layers';
 import { dispatchTriggersForEvent } from './triggerEngine';
 
 type LayerMod = CardInstance['layerModifiers'][number];
@@ -11,7 +12,7 @@ const UNSUPPORTED_EFFECT_PATTERNS: Array<[string, RegExp]> = [
   ['search or selection from a private zone', /(?:นำ|เลือก|ค้นหา|หยิบ).{0,80}(?:Deck|เด็ค|นรก)|(?:Deck|เด็ค).{0,80}(?:นำ|เลือก|ค้นหา|หยิบ)/i],
   ['discard, sacrifice, or activation costs', /ทิ้ง|เซ่นไหว้|สังเวย|เทิร์นละครั้ง|สั่งใช้/],
   ['mill or scouting', /ธรณีสูบ|สอดแนม/],
-  ['prevention, cancellation, or control changes', /ยกเลิก(?!การใช้\s*Magic Card|.*(?:ความสามารถ|Ability))|ป้องกัน|เปลี่ยนการควบคุม|เนรเทศ|มิติมืด/],
+  ['prevention, cancellation, or control changes', /ยกเลิก(?!การใช้\s*(?:Magic Card|(?:Normal|Modification|React|Land)\s*Magic)|.*(?:ความสามารถ|Ability))|ป้องกัน|เปลี่ยนการควบคุม|เนรเทศ|มิติมืด/],
   ['state changes not represented by the game model', /เปลี่ยนชื่อ|เปลี่ยน Symbol|เปลี่ยนสี|เปลี่ยนค่า Cost|ได้รับความสามารถ/],
   ['Hell selection or recovery destination', /นรก.{0,80}(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ)|(?:อัญเชิญ|กลับเข้า Deck|นำขึ้นมือ).{0,80}นรก/]
 ];
@@ -212,7 +213,7 @@ export function recomputeContinuousAuras(state: GameState): GameState {
           // Check if it affects all allies or matching symbol/name
           const eff = contAvatar.card.mainEffect || '';
           const appliesToAll = !eff.includes('ชื่อ') && !eff.includes('{symbol');
-          const matchesSymbol = eff.includes('{symbol เทพ}') && (avatar.card.symbol?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
+          const matchesSymbol = eff.includes('{symbol เทพ}') && (calculateEffectiveSymbol(avatar)?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
           if (appliesToAll || matchesSymbol || contAvatar.instanceId === avatar.instanceId) {
             auraMods.push({
               layer: 2,
@@ -239,7 +240,7 @@ export function recomputeContinuousAuras(state: GameState): GameState {
       if (landCard && landParsed && landParsed.powerMod !== 0) {
         const landEff = landCard.mainEffect || '';
         const appliesToAll = !landEff.includes('ชื่อ') && !landEff.includes('{symbol');
-        const matchesTribe = landEff.includes('{symbol เทพ}') && (avatar.card.symbol?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
+        const matchesTribe = landEff.includes('{symbol เทพ}') && (calculateEffectiveSymbol(avatar)?.includes('เทพ') || avatar.card.name.includes('พระ') || avatar.card.name.includes('เทวดา') || avatar.card.name.includes('นนทก'));
         const matchesNames = landEff.includes('กุ่ย') && (avatar.card.name.includes('กุ่ย') || avatar.card.name.includes('ฮอล') || avatar.card.name.includes('นาย'));
 
         if (appliesToAll || matchesTribe || matchesNames) {

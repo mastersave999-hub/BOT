@@ -174,8 +174,8 @@ function battlePower(snapshotPower: number, attacker: CardInstance): number {
   const layerFour = attacker.layerModifiers
     .filter(modifier => modifier.layer === 4)
     .sort((left, right) => left.sourceCardId.localeCompare(right.sourceCardId))
-    .reduce((total, modifier) => total + modifier.powerMod, 0);
-  return Math.max(0, snapshotPower + layerFour);
+    .reduce((power, modifier) => modifier.powerSet ?? power + modifier.powerMod, snapshotPower);
+  return Math.max(0, layerFour);
 }
 
 /** Completes a previously declared Battle after its Reaction Window has resolved. */

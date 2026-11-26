@@ -2,9 +2,26 @@
 
 ## Scope and method
 
+### Phase 3 Card Text Adapter dry-run (Rule Book 3.2)
+
+This dry-run classifies every effect-bearing catalog row with `src/engine/cardTextAdapter.ts`; it is an adapter/parser audit, not full per-card runtime verification. Run `npx tsx scripts/audit-card-text-adapter.ts` to reproduce the counts. The database contains 2,014 rows, of which 1,833 have printed effect text (1,462 distinct `printId` values among those effect-bearing rows). Final Phase 3 results: **PARSED_READY 231, UNSUPPORTED 1,598, AMBIGUOUS 4**. The adapter now registers supported activated and continuous abilities on active Avatar/Construct/Land Magic instances, applies supported continuous Layer 1/2 POWER/Symbol changes, executes parsed `#` secondary/second-primary name rules in search matching and deck validation, and enforces the distinct Magic ability-quota versus effective-type conversion semantics. Game State tests cover summon/field-exit registration lifecycle, alias deck/name behavior, quota use, and subtype-specific Magic cancellation. Remaining unsupported text remains fail-closed. `PARSED_READY` is not per-card verification. **Phase 4 per-card Game State verified: 0.**
+
+| Structural text pattern (overlapping row counts) | Rows |
+|---|---:|
+| Inherent `#` Rule Text marker | 184 |
+| `:` separator | 1,401 |
+| Quoted name token | 794 |
+| At least one listed keyword marker | 1,335 |
+| Condition/timing marker (`ถ้า`, `หาก`, `เมื่อ`, `ตราบเท่าที่`) | 1,211 |
+| Duration marker (`จนจบ`, `ตราบเท่าที่`) | 378 |
+| “ความสามารถนี้ถือเป็นการใช้ … Magic” | 2 |
+| “โดยถือว่าเป็นการใช้ … Magic” | 5 |
+
+Top fail-closed reason categories from the final audit (overlapping reason counts, not unique-card totals): no complete mapped effect clause 1,523; targeted/zone-changing operation without a complete bound plan 1,117; condition expression gap 409; unrecognized cost syntax 195; inherent `#` Rule Text without an executable spec 103; cost primitive outside the atomic resolver 47; explicit ambiguity marker 4. These categories overlap and can coexist. Executable name aliases are limited to the two specified Rule Book v3.2 forms; all other unsupported Rule Text and effect clauses remain fail-closed.
+
 Audited all 2014 catalog records from `cards_clean.json`: 1633 unique printId values; 1833 records have printed effect text. Rule Book 3.2 (`rulebook_raw.txt`) is the authority. This conservative text-pattern triage compares mechanics with `src/engine/abilityEngine.ts`, `effectResolver.ts`, `reactionEngine.ts`, `combatEngine.ts`, `layers.ts`, `turnEngine.ts`, and `multiplayer.ts`. Record count, unique printId count, repeated IDs and distinct card behaviors are different measures. `Implemented but unverified` and `Partial` are not card verification: no record is established as fully Verified in this report. One test exercises a narrow POWER change on catalog print SD01-001 but does not verify its full text. A named before/after Game State test for the exact print is required to establish card verification. No effect text is inferred from card name or image.
 
-### Status totals
+### Historical heuristic status totals (not Phase 3 adapter results)
 
 | Status | Records |
 |---|---:|

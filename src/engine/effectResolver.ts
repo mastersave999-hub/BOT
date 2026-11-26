@@ -2,6 +2,9 @@ import type { CardInstance, GameState } from './types';
 import { changeAvatarControl, getOriginalOwnerId, moveCardBetweenZones, validateGameState } from './gameRules';
 import { runGameTransaction } from './gameTransaction';
 import { preventTargeting } from './prevention';
+import { appendGameEvents } from './gameEvents';
+import { recomputeContinuousEffects } from './continuousEffects';
+import { resolveDeckChoice, scoutCards } from './deckOperations';
 
 export type EffectCondition =
   | { kind: 'player_has_avatar'; playerId: string; nameIncludes: string }
@@ -13,21 +16,35 @@ export type EffectCost =
 
 export type EffectDefinition =
   | { kind: 'draw'; playerId: string; count: number }
-  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
+  | { kind: 'modify_power'; targetId: string; amount: number; layer?: 1 | 2 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
+  | { kind: 'set_power'; targetId: string; value: number; layer: 1 | 2 | 4; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
+  | { kind: 'change_symbol'; targetId: string; symbol: string; layer: 1 | 2; expiresAt?: 'END_OF_TURN' | 'END_OF_BATTLE' | 'DRAW_PHASE' }
+  | { kind: 'flip_life'; playerId: string; face: 'up' | 'down'; count: number; allowWhileCritical?: boolean }
+  | { kind: 'search_to_hand'; playerId: string; instanceIds: string[]; name: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME'; cardType: string; shuffle: boolean }
   | { kind: 'reset_power'; targetId: string }
   | { kind: 'destroy_avatar'; targetId: string }
   | { kind: 'bounce_avatar'; targetId: string }
+  | { kind: 'banish_avatar'; targetId: string }
+  | { kind: 'destroy_construct' | 'bounce_construct' | 'banish_construct'; targetId: string }
+  | { kind: 'return_to_deck'; instanceIds: string[]; position: 'shuffle' | 'top' | 'bottom' }
+  | { kind: 'sacrifice_avatar'; targetId: string }
+  | { kind: 'scout_cards'; playerId: string; count: number; destination?: 'hand' | 'hell' | 'deck'; deckPosition?: 'top' | 'bottom' }
+  | { kind: 'mill'; playerId: string; count: number }
   | { kind: 'destroy_opponent_avatars'; actorId: string }
   | { kind: 'recover_from_hell'; playerId: string; count: number; destination: 'deck' | 'hand' }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
   | { kind: 'cancel_chain_entry'; targetId: string };
 
+export type EffectPlanStep = { kind: 'cost'; cost: EffectCost } | { kind: 'effect'; effect: EffectDefinition };
+
 export interface EffectPlan {
   actorId: string;
   conditions?: EffectCondition[];
   costs?: EffectCost[];
   effects: EffectDefinition[];
+  /** When present, resolves clause costs and effects in source order within one atomic transaction. */
+  sequence?: EffectPlanStep[];
 }
 
 export interface EffectResolution {
@@ -76,10 +93,28 @@ function applyCost(state: GameState, cost: EffectCost): GameState | null {
   const avatar = player.avatarZone.find(item => item.instanceId === cost.instanceId);
   if (!avatar) return null;
   const moved = moveCardBetweenZones(state, {
-    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true
+    instanceId: avatar.instanceId, actorId: cost.playerId, destination: 'hell', destinationPlayerId: getOriginalOwnerId(avatar), effectMove: true, playerMandated: true
   });
   if (!moved.ok) return null;
   return moved.state;
+}
+
+function matchesExpectedName(cardName: string, name: string, matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME'): boolean {
+  if (matching === 'EXACT_CARD_NAME') return cardName.trim() === name;
+  const escaped = name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s\\p{P}])${escaped}(?=$|[\\s\\p{P}])`, 'u').test(cardName);
+}
+
+function deterministicRandom(seedText: string): () => number {
+  let seed = 2166136261;
+  for (const char of seedText) seed = Math.imul(seed ^ char.charCodeAt(0), 16777619);
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let value = seed;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
 }
 
 const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
@@ -119,6 +154,86 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
       }]
     });
     return { ...state, players: { ...state.players, [found.playerId]: { ...player, avatarZone } } };
+  },
+  set_power: ({ state, plan, effect }) => {
+    if (effect.kind !== 'set_power' || !Number.isFinite(effect.value)) return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const player = state.players[found.playerId];
+    const avatarZone = player.avatarZone.map(avatar => avatar.instanceId !== effect.targetId ? avatar : {
+      ...avatar,
+      layerModifiers: [...avatar.layerModifiers, {
+        layer: effect.layer, powerMod: 0, powerSet: effect.value,
+        sourceCardId: `effect-${effect.targetId}-${state.eventLog.length}`,
+        expiresAt: effect.expiresAt ?? 'END_OF_TURN'
+      }]
+    });
+    return { ...state, players: { ...state.players, [found.playerId]: { ...player, avatarZone } } };
+  },
+  change_symbol: ({ state, plan, effect }) => {
+    if (effect.kind !== 'change_symbol' || !effect.symbol.trim()) return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const player = state.players[found.playerId];
+    const avatarZone = player.avatarZone.map(avatar => avatar.instanceId !== effect.targetId ? avatar : {
+      ...avatar,
+      layerModifiers: [...avatar.layerModifiers, {
+        layer: effect.layer, powerMod: 0, symbolMod: effect.symbol,
+        sourceCardId: `effect-symbol-${effect.targetId}-${state.eventLog.length}`,
+        expiresAt: effect.expiresAt ?? 'END_OF_TURN'
+      }]
+    });
+    return recomputeContinuousEffects({ ...state, players: { ...state.players, [found.playerId]: { ...player, avatarZone } } });
+  },
+  flip_life: ({ state, plan, effect }) => {
+    if (effect.kind !== 'flip_life' || !Number.isSafeInteger(effect.count) || effect.count < 1) return null;
+    const player = state.players[effect.playerId];
+    if (!player || (effect.face === 'down' && player.isCritical && !effect.allowWhileCritical)) return null;
+    const eligible = player.lifeDeck.filter(card => card.isFaceUp !== (effect.face === 'up'));
+    if (eligible.length < effect.count) return null;
+    const selected = eligible.slice(0, effect.count);
+    const selectedIds = new Set(selected.map(card => card.instanceId));
+    const next = { ...state, players: { ...state.players, [effect.playerId]: {
+      ...player, lifeDeck: player.lifeDeck.map(card => selectedIds.has(card.instanceId)
+        ? { ...card, isFaceUp: effect.face === 'up' } : card)
+    } } };
+    return effect.face === 'up' ? appendGameEvents(next, selected.map((card, index) => ({
+      type: 'LIFE_REVEALED' as const, instanceId: card.instanceId, playerId: effect.playerId,
+      actorId: plan.actorId, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:life-revealed:${card.instanceId}:${index}`
+    }))) : next;
+  },
+  search_to_hand: ({ state, plan, effect }) => {
+    if (effect.kind !== 'search_to_hand' || !state.players[effect.playerId] || !effect.instanceIds.length ||
+      new Set(effect.instanceIds).size !== effect.instanceIds.length) return null;
+    const owner = state.players[effect.playerId];
+    const selected = effect.instanceIds.map(id => owner.deck.find(card => card.instanceId === id));
+    if (selected.some(card => !card || card.card.type !== effect.cardType || !matchesExpectedName(card.card.name, effect.name, effect.matching))) return null;
+    let next = state;
+    for (const card of selected as CardInstance[]) {
+      const moved = moveCardBetweenZones(next, {
+        instanceId: card.instanceId, actorId: plan.actorId, destination: 'hand',
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true
+      });
+      if (!moved.ok) return null;
+      next = moved.state;
+    }
+    if (effect.shuffle) {
+      const player = next.players[effect.playerId];
+      const deck = [...player.deck];
+      const random = deterministicRandom(`${state.id}:${state.turnNumber}:${state.eventLog.length}:${effect.instanceIds.join(',')}`);
+      for (let index = deck.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(random() * (index + 1));
+        [deck[index], deck[swapIndex]] = [deck[swapIndex], deck[index]];
+      }
+      next = { ...next, players: { ...next.players, [effect.playerId]: { ...player, deck } } };
+      next = appendGameEvents(next, [{ type: 'DECK_SHUFFLED', playerId: effect.playerId, cardCount: deck.length,
+        eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-search-shuffle:${effect.instanceIds.join(',')}` }]);
+    }
+    return next;
   },
   reset_power: ({ state, plan, effect }) => {
     if (effect.kind !== 'reset_power') return null;
@@ -165,6 +280,110 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
         ? { ...item, isRested: false, layerModifiers: [], attachedInstances: [] }
         : item)
     } } };
+  },
+  banish_avatar: ({ state, plan, effect }) => {
+    if (effect.kind !== 'banish_avatar') return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const movement = moveCardBetweenZones(state, {
+      instanceId: effect.targetId, actorId: plan.actorId, destination: 'darkDimension',
+      destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true, cause: 'EFFECT'
+    });
+    return movement.ok ? movement.state : null;
+  },
+  destroy_construct: ({ state, plan, effect }) => {
+    if (effect.kind !== 'destroy_construct' && effect.kind !== 'bounce_construct' && effect.kind !== 'banish_construct') return null;
+    const found = state.playerOrder.flatMap(playerId => state.players[playerId].constructZone)
+      .find(card => card.instanceId === effect.targetId && card.card.type === 'Construct');
+    if (!found) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const destination = effect.kind === 'bounce_construct' ? 'hand' : effect.kind === 'banish_construct' ? 'darkDimension' : 'hell';
+    const moved = moveCardBetweenZones(state, { instanceId: found.instanceId, actorId: plan.actorId,
+      destination, destinationPlayerId: getOriginalOwnerId(found), effectMove: true, cause: 'EFFECT' });
+    return moved.ok ? moved.state : null;
+  },
+  bounce_construct: ({ state, plan, effect }) => defaultHandlers.destroy_construct({ state, plan, effect }),
+  banish_construct: ({ state, plan, effect }) => defaultHandlers.destroy_construct({ state, plan, effect }),
+  return_to_deck: ({ state, plan, effect }) => {
+    if (effect.kind !== 'return_to_deck' || effect.instanceIds.length === 0 || new Set(effect.instanceIds).size !== effect.instanceIds.length) return null;
+    const fieldAndPrivateCards = state.playerOrder.flatMap(playerId => state.players[playerId].avatarZone.concat(state.players[playerId].constructZone, state.players[playerId].magicZone, state.players[playerId].hell, state.players[playerId].hand));
+    const selected = effect.instanceIds.map(id => fieldAndPrivateCards.find(card => card.instanceId === id));
+    if (selected.some(card => !card || card.card.type === 'Life')) return null;
+    const owners = new Set((selected as CardInstance[]).map(getOriginalOwnerId));
+    if (owners.size !== 1) return null;
+    const ownerId = [...owners][0];
+    const moveOrder = effect.position === 'top' ? [...effect.instanceIds].reverse() : effect.instanceIds;
+    let next = state;
+    for (const instanceId of moveOrder) {
+      const moved = moveCardBetweenZones(next, { instanceId, actorId: plan.actorId,
+        destination: 'deck', destinationPlayerId: ownerId, effectMove: true,
+        deckPosition: effect.position === 'top' ? 'top' : 'bottom' });
+      if (!moved.ok) return null;
+      next = moved.state;
+    }
+    if (effect.position !== 'shuffle') return next;
+    const player = next.players[ownerId];
+    const deck = [...player.deck];
+    const random = deterministicRandom(`${state.id}:${state.turnNumber}:${state.eventLog.length}:return:${effect.instanceIds.join(',')}`);
+    for (let index = deck.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(random() * (index + 1));
+      [deck[index], deck[swapIndex]] = [deck[swapIndex], deck[index]];
+    }
+    const shuffled = { ...next, players: { ...next.players, [player.id]: { ...player, deck } } };
+    return appendGameEvents(shuffled, [{ type: 'DECK_SHUFFLED', playerId: player.id, cardCount: deck.length,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-return-shuffle:${effect.instanceIds.join(',')}` }]);
+  },
+  sacrifice_avatar: ({ state, plan, effect }) => {
+    if (effect.kind !== 'sacrifice_avatar') return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found || found.avatar.controllerId !== plan.actorId) return null;
+    const moved = moveCardBetweenZones(state, { instanceId: effect.targetId, actorId: plan.actorId,
+      destination: 'hell', destinationPlayerId: getOriginalOwnerId(found.avatar), effectMove: true, playerMandated: true });
+    return moved.ok ? moved.state : null;
+  },
+  scout_cards: ({ state, effect }) => {
+    if (effect.kind !== 'scout_cards') return null;
+    const result = scoutCards(state, effect.playerId, effect.count, {
+      ...(effect.destination ? { destination: effect.destination } : {}),
+      ...(effect.deckPosition ? { selectedDeckPosition: effect.deckPosition } : {}),
+      ...(effect.destination === 'deck' && effect.deckPosition ? { topOrderAllowed: effect.deckPosition === 'top' } : {})
+    });
+    if (!result.ok) return null;
+    if (effect.destination) return result.state;
+    const pending = result.state.pendingDeckChoice;
+    if (!pending) return null;
+    const completed = resolveDeckChoice(result.state, effect.playerId, [], pending.expectedRevision);
+    return completed.ok ? completed.state : null;
+  },
+  mill: ({ state, plan, effect }) => {
+    if (effect.kind !== 'mill' || !Number.isSafeInteger(effect.count) || effect.count < 0) return null;
+    const player = state.players[effect.playerId];
+    if (!player) return null;
+    let next = state;
+    const milled: string[] = [];
+    for (const card of player.deck.slice(0, effect.count)) {
+      const moved = moveCardBetweenZones(next, {
+        instanceId: card.instanceId, actorId: plan.actorId, destination: 'hell',
+        destinationPlayerId: getOriginalOwnerId(card), effectMove: true, cause: 'EFFECT'
+      });
+      if (!moved.ok) return null;
+      next = moved.state;
+      milled.push(card.instanceId);
+    }
+    const emitted = [];
+    if (milled.length) emitted.push({
+      type: 'DECK_MILLED' as const, playerId: effect.playerId, cardInstanceIds: milled,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-mill:${milled.join(',')}`
+    });
+    if (effect.count > 0 && next.players[effect.playerId].deck.length === 0) emitted.push({
+      type: 'PLAYER_DECKED_OUT' as const, playerId: effect.playerId,
+      eventId: `${state.id}:${state.gameEvents?.length ?? 0}:card-text-deck-out:${effect.playerId}`
+    });
+    if (emitted.length) next = appendGameEvents(next, emitted);
+    return next;
   },
   destroy_opponent_avatars: ({ state, plan, effect }) => {
     if (effect.kind !== 'destroy_opponent_avatars' || effect.actorId !== plan.actorId) return null;
@@ -248,7 +467,9 @@ function resolveEffectPlanInTransaction(
   plan: EffectPlan,
   handlers: Partial<Record<EffectDefinition['kind'], EffectHandler>> = {}
 ): EffectResolution {
-  if (!state.players[plan.actorId] || plan.effects.length === 0) return fail(state, 'invalid actor or empty effect plan');
+  const plannedEffects = plan.sequence ? plan.sequence.flatMap(step => step.kind === 'effect' ? [step.effect] : []) : plan.effects;
+  const plannedCosts = plan.sequence ? plan.sequence.flatMap(step => step.kind === 'cost' ? [step.cost] : []) : plan.costs ?? [];
+  if (!state.players[plan.actorId] || (plannedEffects.length === 0 && plannedCosts.length === 0)) return fail(state, 'invalid actor or empty effect plan');
   const invariantError = validateGameState(state);
   if (invariantError) return fail(state, invariantError);
   for (const condition of plan.conditions ?? []) {
@@ -257,32 +478,49 @@ function resolveEffectPlanInTransaction(
       : condition.kind === 'target_exists' && !!findAvatar(state, condition.targetId);
     if (!passed) return fail(state, 'effect condition failed');
   }
-  for (const effect of plan.effects) {
+  for (const effect of plannedEffects) {
     if (!effect || !Object.hasOwn(defaultHandlers, effect.kind)) return fail(state, 'unsupported effect');
     if ('count' in effect && (!Number.isInteger(effect.count) || effect.count < 0)) return fail(state, 'invalid effect count');
     if ('amount' in effect && !Number.isFinite(effect.amount)) return fail(state, 'invalid effect value');
-    if (('targetId' in effect) && effect.kind !== 'cancel_chain_entry' && !findAvatar(state, effect.targetId)) return fail(state, 'invalid effect target');
+    if (('targetId' in effect) && effect.kind !== 'cancel_chain_entry' &&
+      !state.playerOrder.some(playerId => Object.values(state.players[playerId]).some(zone => Array.isArray(zone) && zone.some(card => card && typeof card === 'object' && 'instanceId' in card && card.instanceId === effect.targetId)))) return fail(state, 'invalid effect target');
   }
-  for (const cost of plan.costs ?? []) {
+  for (const cost of plannedCosts) {
     if (cost.playerId !== plan.actorId) return fail(state, 'cost payer must be the acting player');
   }
 
   // Handlers are extensible and may mutate nested data. Isolate the entire transaction
   // so a later rejection or exception cannot leak partial changes into the caller's state.
   let staged = structuredClone(state);
-  for (const cost of plan.costs ?? []) {
-    const paid = applyCost(staged, cost);
-    if (!paid) return fail(state, 'cost cannot be paid');
-    staged = paid;
-  }
-  for (const effect of plan.effects) {
+  const applyEffect = (effect: EffectDefinition): boolean => {
     try {
       const handler = handlers[effect.kind] ?? defaultHandlers[effect.kind];
       const next = handler({ state: staged, plan, effect });
-      if (!next || typeof next !== 'object' || !next.players) return fail(state, `effect handler rejected ${effect.kind}`);
+      if (!next || typeof next !== 'object' || !next.players) return false;
       staged = next;
+      return true;
     } catch {
-      return fail(state, `effect handler failed ${effect.kind}`);
+      return false;
+    }
+  };
+  if (plan.sequence) {
+    for (const step of plan.sequence) {
+      if (step.kind === 'cost') {
+        const paid = applyCost(staged, step.cost);
+        if (!paid) return fail(state, 'cost cannot be paid');
+        staged = paid;
+      } else if (!applyEffect(step.effect)) {
+        return fail(state, `effect handler rejected ${step.effect.kind}`);
+      }
+    }
+  } else {
+    for (const cost of plan.costs ?? []) {
+      const paid = applyCost(staged, cost);
+      if (!paid) return fail(state, 'cost cannot be paid');
+      staged = paid;
+    }
+    for (const effect of plan.effects) {
+      if (!applyEffect(effect)) return fail(state, `effect handler rejected ${effect.kind}`);
     }
   }
   return { ok: true, state: staged, logs: [] };
@@ -294,6 +532,7 @@ export function resolveEffectPlan(
   handlers: Partial<Record<EffectDefinition['kind'], EffectHandler>> = {}
 ): EffectResolution {
   let failure: EffectResolution | null = null;
+  const plannedEffects = plan.sequence ? plan.sequence.flatMap(step => step.kind === 'effect' ? [step.effect] : []) : plan.effects;
   const transaction = runGameTransaction(state, draft => {
     const result = resolveEffectPlanInTransaction(draft, plan, handlers);
     if (!result.ok) {
@@ -301,7 +540,7 @@ export function resolveEffectPlan(
       return null;
     }
     return result.state;
-  }, plan.effects.map((effect, index) => ({ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId, effectKind: effect.kind, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:${plan.actorId}:${index}:${effect.kind}` })));
+  }, plannedEffects.map((effect, index) => ({ type: 'EFFECT_RESOLVED' as const, actorId: plan.actorId, effectKind: effect.kind, eventId: `${state.id}:${state.gameEvents?.length ?? 0}:${plan.actorId}:${index}:${effect.kind}` })));
   if (transaction.ok === false) return fail(state, failure?.reason ?? transaction.reason);
   return { ok: true, state: transaction.state, logs: [] };
 }

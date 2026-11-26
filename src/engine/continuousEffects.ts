@@ -1,4 +1,6 @@
 import type { CardInstance, ContinuousPowerEffect, GameState, PlayerState, PreventionShield } from './types';
+import { calculateEffectiveSymbol } from './layers';
+import { parseCardText } from './cardTextAdapter';
 
 function flattenFieldCard(card: CardInstance): CardInstance[] {
   return [card, ...card.attachedInstances.flatMap(flattenFieldCard)];
@@ -20,10 +22,11 @@ function activeFieldCards(state: GameState): CardInstance[] {
 
 function isEffectTarget(source: CardInstance, effect: ContinuousPowerEffect, target: CardInstance): boolean {
   if (effect.targetCardType && target.card.type !== effect.targetCardType) return false;
+  if (effect.targetSelf && target.instanceId !== source.instanceId) return false;
   const relation = effect.targetController ?? 'SOURCE_CONTROLLER';
   if (relation === 'SOURCE_CONTROLLER' && target.controllerId !== source.controllerId) return false;
   if (relation === 'OPPONENT' && target.controllerId === source.controllerId) return false;
-  if (effect.targetSymbol && !target.card.symbol?.includes(effect.targetSymbol)) return false;
+  if (effect.targetSymbol && !calculateEffectiveSymbol(target)?.includes(effect.targetSymbol)) return false;
   if (effect.targetNameIncludes && !target.card.name.includes(effect.targetNameIncludes)) return false;
   return true;
 }
@@ -44,6 +47,7 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
   }
   for (const source of sources) {
     const text = source.card.mainEffect ?? '';
+    if (source.cardTextContinuousEffects?.length || (text.includes('ต่อเนื่อง') && !source.registeredContinuousAbilities?.length)) continue;
     const powerMod = cardPowerMod(source);
     if (powerMod === 0 || source.instanceId === state.landMagicZone?.instanceId) continue;
     if (source.card.type === 'Avatar' && !text.includes('ต่อเนื่อง')) continue;
@@ -51,18 +55,19 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
     const isSelf = source.instanceId === target.instanceId;
     const appliesToAll = !text.includes('ชื่อ') && !text.includes('{symbol');
     const matchesSymbol = /\{symbol\s+([^}]+)\}/.exec(text)?.[1];
-    const matchesTribe = !!matchesSymbol && (target.card.symbol?.includes(matchesSymbol) ?? false);
+    const matchesTribe = !!matchesSymbol && (calculateEffectiveSymbol(target)?.includes(matchesSymbol) ?? false);
     if (isSelf || appliesToAll || matchesTribe) {
       result.push({ layer: 2, powerMod, sourceCardId: `aura-cont-${source.instanceId}` });
     }
   }
   const land = state.landMagicZone;
   if (land) {
-    const powerMod = cardPowerMod(land);
     const text = land.card.mainEffect ?? '';
+    if (land.cardTextContinuousEffects?.length || (text.includes('ต่อเนื่อง') && !land.registeredContinuousAbilities?.length)) return result;
+    const powerMod = cardPowerMod(land);
     const appliesToAll = !text.includes('ชื่อ') && !text.includes('{symbol');
     const matchesSymbol = /\{symbol\s+([^}]+)\}/.exec(text)?.[1];
-    const matchesTribe = !!matchesSymbol && (target.card.symbol?.includes(matchesSymbol) ?? false);
+    const matchesTribe = !!matchesSymbol && (calculateEffectiveSymbol(target)?.includes(matchesSymbol) ?? false);
     const matchesNames = ['กุ่ย', 'ฮอล', 'นาย'].some(name => text.includes(name) && target.card.name.includes(name));
     if (powerMod !== 0 && (appliesToAll || matchesTribe || matchesNames)) {
       result.push({ layer: 2, powerMod, sourceCardId: `aura-land-${land.instanceId}` });
@@ -74,15 +79,18 @@ function legacyAuras(state: GameState, sources: CardInstance[], target: CardInst
 function recalculatePlayer(state: GameState, player: PlayerState, sources: CardInstance[]): PlayerState {
   const recalculate = (target: CardInstance): CardInstance => {
     const retained = target.layerModifiers.filter(modifier =>
-      !modifier.sourceCardId.startsWith('continuous:') && !modifier.sourceCardId.startsWith('aura-')
+      !modifier.sourceCardId.startsWith('continuous:') && !modifier.sourceCardId.startsWith('card-text-continuous:') && !modifier.sourceCardId.startsWith('aura-')
     );
-    const typed = sources.flatMap(source => (source.continuousEffects ?? []).flatMap((effect, index) =>
-      isEffectTarget(source, effect, target) ? [{
-        layer: effect.layer,
-        powerMod: effect.powerMod,
+    const typed = sources.flatMap(source => [
+      ...(source.continuousEffects ?? []).flatMap((effect, index) => isEffectTarget(source, effect, target) ? [{
+        layer: effect.layer, powerMod: effect.powerMod, ...(effect.symbolMod ? { symbolMod: effect.symbolMod } : {}),
         sourceCardId: `continuous:${source.instanceId}:${index}`
-      }] : []
-    ));
+      }] : []),
+      ...(source.cardTextContinuousEffects ?? []).flatMap((effect, index) => isEffectTarget(source, effect, target) ? [{
+        layer: effect.layer, powerMod: effect.powerMod, ...(effect.symbolMod ? { symbolMod: effect.symbolMod } : {}),
+        sourceCardId: `card-text-continuous:${source.instanceId}:${index}`
+      }] : [])
+    ]);
     const derived = [...legacyAuras(state, sources, target), ...typed]
       .sort((left, right) => left.layer - right.layer || left.sourceCardId.localeCompare(right.sourceCardId));
     return {
@@ -104,11 +112,23 @@ export function recomputeContinuousEffects(state: GameState): GameState {
   const activeCards = activeFieldCards(state);
   const sources = activeCards.filter(card => card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
   const activeSourceIds = new Set(activeCards.map(card => card.instanceId));
-  const cleanShields = (card: CardInstance): CardInstance => ({
-    ...card,
-    preventionShields: card.preventionShields?.filter(shield => !shield.sourceInstanceId || activeSourceIds.has(shield.sourceInstanceId)),
-    attachedInstances: card.attachedInstances.map(cleanShields)
-  });
+  const cleanShields = (card: CardInstance): CardInstance => {
+    const { registeredActivatedAbilities: _oldActivated, registeredContinuousAbilities: _oldContinuous,
+      cardTextContinuousEffects: _oldTextEffects, ...base } = card;
+    const active = activeSourceIds.has(card.instanceId) &&
+      (card.card.type === 'Avatar' || card.card.type === 'Construct' || card.card.subtype === 'Land');
+    const parsed = active ? parseCardText(card.card) : undefined;
+    return {
+      ...base,
+      preventionShields: card.preventionShields?.filter(shield => !shield.sourceInstanceId || activeSourceIds.has(shield.sourceInstanceId)),
+      ...(parsed?.status === 'PARSED_READY' ? {
+        registeredActivatedAbilities: parsed.clauses.filter(clause => clause.timing.mode === 'ACTIVATED'),
+        registeredContinuousAbilities: parsed.clauses.filter(clause => clause.timing.mode === 'CONTINUOUS'),
+        cardTextContinuousEffects: parsed.continuousEffects
+      } : {}),
+      attachedInstances: card.attachedInstances.map(cleanShields)
+    };
+  };
   const cleanPlayer = (player: PlayerState): PlayerState => ({
     ...player,
     preventionShields: player.preventionShields?.filter(shield => !shield.sourceInstanceId || activeSourceIds.has(shield.sourceInstanceId)),

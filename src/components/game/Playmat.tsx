@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { GameState, CardInstance, MagicSubtype, DeferredReactionAction } from '../../engine/types';
+import { GameState, CardInstance, DeferredReactionAction } from '../../engine/types';
 import {
   isReactionCommandCurrent,
   isEndPhaseDiscardCommandCurrent,
@@ -14,6 +14,7 @@ import {
 } from '../../engine/multiplayer';
 import {
   canUseNormalMagicAsReactOnOwnBattle,
+  effectiveMagicSubtype,
   queueReactionCard,
   getEligibleReactionCards,
   getReactionEligibility,
@@ -912,7 +913,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
 
     if (handCard.card.type === 'Magic') {
-      const subtype = normalTreatedAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
+      const subtype = normalTreatedAsReact ? 'React' : effectiveMagicSubtype(handCard.card);
       const restriction = validateMagicPlay(gameState, meId, subtype, normalTreatedAsReact);
       if (restriction) {
         showNotification(restriction);
@@ -938,7 +939,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   // Finalize playing a card only after its Cost Step has been successfully completed.
   const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean, playAsReact = false) => {
     if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || winnerName) return;
-    const isReactPlay = handCard.card.type === 'Magic' && (playAsReact || handCard.card.subtype === 'React');
+    const isReactPlay = handCard.card.type === 'Magic' && (playAsReact || effectiveMagicSubtype(handCard.card) === 'React');
     if (gameState.currentPhase !== 'MAIN' && !isReactPlay) {
       showNotification('การ์ดนี้เล่นได้เฉพาะใน Main Phase');
       return;
@@ -1055,7 +1056,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
 
     if (handCard.card.type === 'Magic') {
-      const subtype = playAsReact ? 'React' : ((handCard.card.subtype || 'Normal') as MagicSubtype);
+      const subtype = playAsReact ? 'React' : effectiveMagicSubtype(handCard.card);
       const restriction = validateMagicPlay(gameState, meId, subtype, playAsReact);
       if (restriction) {
         showNotification(restriction);
