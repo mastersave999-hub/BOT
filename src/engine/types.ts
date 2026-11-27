@@ -257,6 +257,16 @@ export interface PendingDeckSearchVerification {
 /** Phase 5 room rule mode: Hybrid keeps every card playable, Auto-Strict allows only fully modeled cards. */
 export type RoomRuleMode = 'HYBRID' | 'AUTO_STRICT';
 
+/** Filter inputs for a manual Deck Search; mirrors DeckSearchCriteria without the code predicate. */
+export interface ManualDeckSearchCriteria {
+  types?: Card['type'][];
+  colors?: string[];
+  minCost?: number;
+  maxCost?: number;
+  nameIncludes?: string;
+  symbols?: string[];
+}
+
 /** Structured, rule-bounded manual resolution action for UNSUPPORTED/AMBIGUOUS cards. */
 export type ManualOverrideAction =
   | { kind: 'ADJUST_POWER'; instanceId: string; delta: number }
@@ -264,7 +274,18 @@ export type ManualOverrideAction =
   | { kind: 'MOVE_CARD'; instanceId: string; destination: 'deck' | 'hand' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension'; destinationPlayerId?: string; deckPosition?: 'top' | 'bottom' }
   | { kind: 'DRAW_CARD'; playerId: string }
   | { kind: 'DISCARD_CARD'; instanceId: string }
-  | { kind: 'ADJUST_LIFE'; playerId: string; face: 'up' | 'down' };
+  | { kind: 'ADJUST_LIFE'; playerId: string; face: 'up' | 'down' }
+  /** Phase 8: opens an authorized pendingDeckChoice; Rule Book 3.2 mandates the post-search shuffle. */
+  | { kind: 'MANUAL_SEARCH_DECK'; deckOwnerId: string; criteria: ManualDeckSearchCriteria; selectCount: number; destination: 'hand' | 'hell' | 'deck' }
+  | { kind: 'MANUAL_SCOUT_DECK'; deckOwnerId: string; count: number; destination: 'hand' | 'hell' | 'deck'; selectedDeckPosition?: 'top' | 'bottom'; unselectedDeckPosition?: 'top' | 'bottom' | 'shuffle' }
+  | { kind: 'MANUAL_MILL_DECK'; deckOwnerId: string; count: number }
+  | { kind: 'MANUAL_SHUFFLE_DECK'; deckOwnerId: string }
+  /** Phase 8: opens an authorized pendingHellChoice over Hell / Dark Dimension recovery. */
+  | { kind: 'MANUAL_HELL_CHOICE'; playerId: string; cardType: 'Avatar' | 'Construct' | 'Magic'; count: number; destination: 'hand' | 'deck_top' | 'deck_bottom' | 'avatarZone' | 'banish' }
+  /** Phase 8: spawns a Token; the Avatar Zone keeps its 4 normal Avatar / 6 total cap. */
+  | { kind: 'MANUAL_SPAWN_TOKEN'; playerId: string; name?: string; power?: number; color?: string }
+  /** Phase 8: control change on a field Avatar; honours controlChangeImmune and Duo pairs. */
+  | { kind: 'MANUAL_CHANGE_CONTROL'; instanceId: string; newControllerId: string };
 
 export interface ManualOverrideContext {
   cardInstanceId?: string;
@@ -276,6 +297,8 @@ export interface ManualOverrideContext {
 /** A submitted manual override awaits Confirm/Reject approval from every other player. */
 export interface PendingManualOverride {
   action: ManualOverrideAction;
+  /** Phase 8: optional multi-step queue for one card's effect; applied all-or-nothing after approval. */
+  actions?: ManualOverrideAction[];
   actorId: string;
   expectedRevision: number;
   commandId: string;

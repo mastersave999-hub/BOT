@@ -300,6 +300,8 @@ export interface ManualOverrideCommand {
   commandId: string;
   expectedRevision: number;
   action?: ManualOverrideAction;
+  /** Phase 8: multi-step queue for one card's effect; applied all-or-nothing after approval. */
+  actions?: ManualOverrideAction[];
   context?: ManualOverrideContext;
 }
 
@@ -405,12 +407,15 @@ export function isManualOverrideCommandCurrent(
     !Number.isSafeInteger(command.expectedRevision) ||
     (state.processedCommandIds ?? []).includes(command.commandId)) return false;
   if (command.kind === 'SUBMIT_MANUAL_OVERRIDE') {
+    const payloadValid = (!!command.action && typeof command.action === 'object') ||
+      (Array.isArray(command.actions) && command.actions.length >= 1 && command.actions.length <= 8 &&
+        command.actions.every(step => !!step && typeof step === 'object'));
     return !state.pendingManualOverride && !state.pendingDeckChoice && !state.pendingHellChoice &&
       !state.pendingDeckSearchVerification && !state.pendingEndPhaseDiscardPlayerId && !state.pendingExitPrevention &&
       !state.reactionWindow &&
       command.expectedRevision === state.stateRevision &&
       state.playerOrder[state.currentTurnPlayerIndex] === command.playerId &&
-      !!command.action && typeof command.action === 'object';
+      payloadValid;
   }
   const pending = state.pendingManualOverride;
   return (command.kind === 'APPROVE_MANUAL_OVERRIDE' || command.kind === 'REJECT_MANUAL_OVERRIDE') &&
@@ -418,7 +423,7 @@ export function isManualOverrideCommandCurrent(
     command.expectedRevision === state.stateRevision && command.expectedRevision === pending.expectedRevision &&
     command.playerId !== pending.actorId &&
     !pending.approvals.includes(command.playerId) && !pending.rejections.includes(command.playerId) &&
-    command.action === undefined;
+    command.action === undefined && command.actions === undefined;
 }
 
 export type NetMessage =
@@ -558,8 +563,10 @@ export function decodeNetMessage(raw: unknown): NetMessage | null {
         typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
         !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 ||
         (command.action !== undefined && (typeof command.action !== 'object' || command.action === null || Array.isArray(command.action))) ||
+        (command.actions !== undefined && (!Array.isArray(command.actions) || command.actions.some(step =>
+          typeof step !== 'object' || step === null || Array.isArray(step) || typeof (step as { kind?: unknown }).kind !== 'string'))) ||
         (command.context !== undefined && (typeof command.context !== 'object' || command.context === null || Array.isArray(command.context))) ||
-        (command.kind !== 'SUBMIT_MANUAL_OVERRIDE' && command.action !== undefined)) return null;
+        (command.kind !== 'SUBMIT_MANUAL_OVERRIDE' && (command.action !== undefined || command.actions !== undefined))) return null;
       return decoded as NetMessage;
     }
     const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];

@@ -105,18 +105,59 @@ export function validateGameState(state: GameState): string | null {
   if (state.pendingManualOverride) {
     const pending = state.pendingManualOverride;
     const action = pending.action;
-    const actionShapeValid = !!action && typeof action === 'object' && (
-      (action.kind === 'ADJUST_POWER' && Number.isSafeInteger(action.delta) && action.delta !== 0 && typeof action.instanceId === 'string') ||
-      (action.kind === 'SET_WAKE_STATE' && typeof action.isRested === 'boolean' && typeof action.instanceId === 'string') ||
-      (action.kind === 'MOVE_CARD' && typeof action.instanceId === 'string' &&
-        ['deck', 'hand', 'avatarZone', 'constructZone', 'magicZone', 'hell', 'darkDimension'].includes(action.destination) &&
-        (action.deckPosition === undefined || ['top', 'bottom'].includes(action.deckPosition)) &&
-        (action.destinationPlayerId === undefined || !!state.players[action.destinationPlayerId])) ||
-      (action.kind === 'DRAW_CARD' && typeof action.playerId === 'string' && !!state.players[action.playerId]) ||
-      (action.kind === 'DISCARD_CARD' && typeof action.instanceId === 'string') ||
-      (action.kind === 'ADJUST_LIFE' && typeof action.playerId === 'string' && !!state.players[action.playerId] && ['up', 'down'].includes(action.face))
+    const manualDeckCriteriaValid = (criteria: unknown): boolean => {
+      if (criteria === undefined || criteria === null || typeof criteria !== 'object' || Array.isArray(criteria)) return false;
+      const value = criteria as Record<string, unknown>;
+      const numericOk = (input: unknown) => input === undefined || (typeof input === 'number' && Number.isFinite(input) && input >= 0);
+      return (value.types === undefined || (Array.isArray(value.types) && value.types.every(type => typeof type === 'string'))) &&
+        (value.colors === undefined || (Array.isArray(value.colors) && value.colors.every(color => typeof color === 'string'))) &&
+        (value.symbols === undefined || (Array.isArray(value.symbols) && value.symbols.every(symbol => typeof symbol === 'string'))) &&
+        (value.nameIncludes === undefined || typeof value.nameIncludes === 'string') &&
+        numericOk(value.minCost) && numericOk(value.maxCost);
+    };
+    const actionShapeValid = (raw: unknown): boolean => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+      // Validator only inspects shapes; the loose index signature keeps the checks readable.
+      const candidate = raw as { [key: string]: any };
+      return (
+      (candidate.kind === 'ADJUST_POWER' && Number.isSafeInteger(candidate.delta) && candidate.delta !== 0 && typeof candidate.instanceId === 'string') ||
+      (candidate.kind === 'SET_WAKE_STATE' && typeof candidate.isRested === 'boolean' && typeof candidate.instanceId === 'string') ||
+      (candidate.kind === 'MOVE_CARD' && typeof candidate.instanceId === 'string' &&
+        ['deck', 'hand', 'avatarZone', 'constructZone', 'magicZone', 'hell', 'darkDimension'].includes(candidate.destination) &&
+        (candidate.deckPosition === undefined || ['top', 'bottom'].includes(candidate.deckPosition)) &&
+        (candidate.destinationPlayerId === undefined || !!state.players[candidate.destinationPlayerId])) ||
+      (candidate.kind === 'DRAW_CARD' && typeof candidate.playerId === 'string' && !!state.players[candidate.playerId]) ||
+      (candidate.kind === 'DISCARD_CARD' && typeof candidate.instanceId === 'string') ||
+      (candidate.kind === 'ADJUST_LIFE' && typeof candidate.playerId === 'string' && !!state.players[candidate.playerId] && ['up', 'down'].includes(candidate.face)) ||
+      (candidate.kind === 'MANUAL_SEARCH_DECK' && typeof candidate.deckOwnerId === 'string' && !!state.players[candidate.deckOwnerId] &&
+        Number.isSafeInteger(candidate.selectCount) && candidate.selectCount >= 1 && candidate.selectCount <= 10 &&
+        ['hand', 'hell', 'deck'].includes(candidate.destination) && manualDeckCriteriaValid(candidate.criteria)) ||
+      (candidate.kind === 'MANUAL_SCOUT_DECK' && typeof candidate.deckOwnerId === 'string' && !!state.players[candidate.deckOwnerId] &&
+        Number.isSafeInteger(candidate.count) && candidate.count >= 1 && candidate.count <= 10 &&
+        ['hand', 'hell', 'deck'].includes(candidate.destination) &&
+        (candidate.selectedDeckPosition === undefined || (['top', 'bottom'].includes(candidate.selectedDeckPosition) && candidate.destination === 'deck')) &&
+        (candidate.unselectedDeckPosition === undefined || ['top', 'bottom', 'shuffle'].includes(candidate.unselectedDeckPosition))) ||
+      (candidate.kind === 'MANUAL_MILL_DECK' && typeof candidate.deckOwnerId === 'string' && !!state.players[candidate.deckOwnerId] &&
+        Number.isSafeInteger(candidate.count) && candidate.count >= 1 && candidate.count <= 10) ||
+      (candidate.kind === 'MANUAL_SHUFFLE_DECK' && typeof candidate.deckOwnerId === 'string' && !!state.players[candidate.deckOwnerId]) ||
+      (candidate.kind === 'MANUAL_HELL_CHOICE' && typeof candidate.playerId === 'string' && !!state.players[candidate.playerId] &&
+        ['Avatar', 'Construct', 'Magic'].includes(candidate.cardType) &&
+        Number.isSafeInteger(candidate.count) && candidate.count >= 1 && candidate.count <= 10 &&
+        ['hand', 'deck_top', 'deck_bottom', 'avatarZone', 'banish'].includes(candidate.destination)) ||
+      (candidate.kind === 'MANUAL_SPAWN_TOKEN' && typeof candidate.playerId === 'string' && !!state.players[candidate.playerId] &&
+        (candidate.name === undefined || (typeof candidate.name === 'string' && candidate.name.length > 0)) &&
+        (candidate.power === undefined || Number.isSafeInteger(candidate.power)) &&
+        (candidate.color === undefined || typeof candidate.color === 'string')) ||
+      (candidate.kind === 'MANUAL_CHANGE_CONTROL' && typeof candidate.instanceId === 'string' &&
+        typeof candidate.newControllerId === 'string' && !!state.players[candidate.newControllerId])
     );
-    if (!actionShapeValid || !state.players[pending.actorId] ||
+    };
+    // Phase 8: an optional multi-step queue; a Deck/Hell choice step must be the final step.
+    const CHOICE_OPENING_KINDS = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE'];
+    const queueValid = pending.actions === undefined || (Array.isArray(pending.actions) && pending.actions.length >= 1 &&
+      pending.actions.length <= 8 && pending.actions.every(step => actionShapeValid(step)) &&
+      !pending.actions.slice(0, -1).some(step => CHOICE_OPENING_KINDS.includes(step.kind)));
+    if (!actionShapeValid(action) || !queueValid || !state.players[pending.actorId] ||
       state.playerOrder[state.currentTurnPlayerIndex] !== pending.actorId ||
       !Number.isSafeInteger(pending.expectedRevision) || pending.expectedRevision !== state.stateRevision ||
       typeof pending.commandId !== 'string' || !pending.commandId || pending.commandId.length > 128 ||

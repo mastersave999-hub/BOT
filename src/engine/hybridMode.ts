@@ -9,10 +9,14 @@ import type {
 import { parseCardText } from './cardTextAdapter';
 import {
   moveCardBetweenZones,
+  changeAvatarControl,
+  validateAvatarZone,
   validateGameState,
   type PlayerZone,
 } from './gameRules';
 import { appendGameEvents, type GameEvent } from './gameEvents';
+import { millCards, scoutCards, searchDeck, shuffleDeck } from './deckOperations';
+import { beginHellChoice } from './hellChoice';
 
 export type CardVerificationStatus = 'VERIFIED_WORKING' | 'UNSUPPORTED' | 'AMBIGUOUS';
 
@@ -95,6 +99,12 @@ export interface ManualOverrideResult {
 
 const FIELD_ZONES: readonly PlayerZone[] = ['avatarZone', 'constructZone', 'magicZone'];
 
+/** Upper bound for manual Deck/Hell numeric parameters, keeping single effects bounded. */
+const MAX_MANUAL_DECK_COUNT = 10;
+
+/** Queue steps that hand control to an authorized pending-choice UI before completing. */
+const CHOICE_OPENING_KINDS: readonly string[] = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE'];
+
 function findInstance(
   state: GameState,
   instanceId: string
@@ -139,6 +149,35 @@ export function describeManualOverrideAction(state: GameState, action: ManualOve
       return `ทิ้ง "${cardName(action.instanceId)}" ลงนรก`;
     case 'ADJUST_LIFE':
       return `${action.face === 'up' ? 'เซ็น LIFE (หงาย 1 ใบ)' : 'ฮีล LIFE (คว่ำ 1 ใบ)'} ของ ${nameOf(action.playerId)}`;
+    case 'MANUAL_SEARCH_DECK': {
+      const filters: string[] = [];
+      if (action.criteria.types?.length) filters.push(`ประเภท ${action.criteria.types.join('/')}`);
+      if (action.criteria.colors?.length) filters.push(`สี ${action.criteria.colors.join('/')}`);
+      if (action.criteria.minCost !== undefined || action.criteria.maxCost !== undefined) {
+        filters.push(`Cost ${action.criteria.minCost ?? 0}-${action.criteria.maxCost ?? '∞'}`);
+      }
+      if (action.criteria.nameIncludes) filters.push(`ชื่อมีคำว่า "${action.criteria.nameIncludes}"`);
+      if (action.criteria.symbols?.length) filters.push(`Symbol ${action.criteria.symbols.join('/')}`);
+      const destinationLabel = action.destination === 'hand' ? 'ขึ้นมือ' : action.destination === 'hell' ? 'ลงนรก' : 'กลับสู่ Deck';
+      return `ค้นหาใน Deck ของ ${nameOf(action.deckOwnerId)} ${filters.length ? `(${filters.join(', ')}) ` : ''}เลือก ${action.selectCount} ใบ${destinationLabel} — สับ Deck หลังค้นหาตามกติกา`;
+    }
+    case 'MANUAL_SCOUT_DECK':
+      return `สอดแนมการ์ด ${action.count} ใบด้านบนสุดของ Deck ของ ${nameOf(action.deckOwnerId)}`;
+    case 'MANUAL_MILL_DECK':
+      return `ส่งการ์ด ${action.count} ใบด้านบนสุดของ Deck ของ ${nameOf(action.deckOwnerId)} ลงนรก`;
+    case 'MANUAL_SHUFFLE_DECK':
+      return `สับ Deck ของ ${nameOf(action.deckOwnerId)} ใหม่`;
+    case 'MANUAL_HELL_CHOICE': {
+      const destinationLabel = action.destination === 'hand' ? 'ขึ้นมือ'
+        : action.destination === 'avatarZone' ? 'ลง Avatar Zone'
+          : action.destination === 'banish' ? 'เนรเทศสู่มิติมืด'
+            : action.destination === 'deck_top' ? 'วางด้านบนสุดของ Deck' : 'วางด้านล่างสุดของ Deck';
+      return `เลือกการ์ด ${action.cardType} ${action.count} ใบจากนรกของ ${nameOf(action.playerId)} ${destinationLabel}`;
+    }
+    case 'MANUAL_SPAWN_TOKEN':
+      return `สร้าง Token${action.name ? ` "${action.name}"` : ''}${action.power !== undefined ? ` POWER ${action.power}` : ''} ใน Avatar Zone ของ ${nameOf(action.playerId)}`;
+    case 'MANUAL_CHANGE_CONTROL':
+      return `เปลี่ยนผู้ควบคุม "${cardName(action.instanceId)}" ให้ ${nameOf(action.newControllerId)}`;
   }
 }
 
@@ -186,6 +225,79 @@ function validateManualOverrideAction(state: GameState, actorId: string, action:
       if (action.face === 'down' && !player.lifeDeck.some(card => card.isFaceUp)) return 'No face-up LIFE card to heal';
       return null;
     }
+    case 'MANUAL_SEARCH_DECK': {
+      if (!state.players[action.deckOwnerId]) return 'Deck owner does not exist';
+      if (!Number.isSafeInteger(action.selectCount) || action.selectCount < 1 || action.selectCount > MAX_MANUAL_DECK_COUNT) {
+        return `Search count must be an integer between 1 and ${MAX_MANUAL_DECK_COUNT}`;
+      }
+      if (!['hand', 'hell', 'deck'].includes(action.destination)) return 'Invalid Deck Search destination';
+      const criteria = action.criteria ?? {};
+      if (criteria.types !== undefined && (!Array.isArray(criteria.types) || criteria.types.some(type => !['Avatar', 'Magic', 'Construct', 'Life', 'Token'].includes(type)))) return 'Invalid Deck Search type filter';
+      if (criteria.colors !== undefined && (!Array.isArray(criteria.colors) || criteria.colors.some(color => typeof color !== 'string'))) return 'Invalid Deck Search color filter';
+      if (criteria.symbols !== undefined && (!Array.isArray(criteria.symbols) || criteria.symbols.some(symbol => typeof symbol !== 'string'))) return 'Invalid Deck Search symbol filter';
+      if (criteria.nameIncludes !== undefined && (typeof criteria.nameIncludes !== 'string' || criteria.nameIncludes.length > 64)) return 'Invalid Deck Search name filter';
+      if ((criteria.minCost !== undefined && (!Number.isFinite(criteria.minCost) || criteria.minCost < 0)) ||
+        (criteria.maxCost !== undefined && (!Number.isFinite(criteria.maxCost) || criteria.maxCost < 0)) ||
+        (criteria.minCost !== undefined && criteria.maxCost !== undefined && criteria.minCost > criteria.maxCost)) {
+        return 'Invalid Deck Search cost filter';
+      }
+      return null;
+    }
+    case 'MANUAL_SCOUT_DECK': {
+      if (!state.players[action.deckOwnerId]) return 'Deck owner does not exist';
+      if (!Number.isSafeInteger(action.count) || action.count < 1 || action.count > MAX_MANUAL_DECK_COUNT) {
+        return `Scout count must be an integer between 1 and ${MAX_MANUAL_DECK_COUNT}`;
+      }
+      if (!['hand', 'hell', 'deck'].includes(action.destination)) return 'Invalid Scout destination';
+      if (action.selectedDeckPosition !== undefined && !['top', 'bottom'].includes(action.selectedDeckPosition)) return 'Invalid Scout Deck position';
+      if (action.selectedDeckPosition !== undefined && action.destination !== 'deck') return 'Scout Deck position requires a Deck destination';
+      if (action.unselectedDeckPosition !== undefined && !['top', 'bottom', 'shuffle'].includes(action.unselectedDeckPosition)) return 'Invalid Scout unselected position';
+      return null;
+    }
+    case 'MANUAL_MILL_DECK': {
+      if (!state.players[action.deckOwnerId]) return 'Deck owner does not exist';
+      if (!Number.isSafeInteger(action.count) || action.count < 1 || action.count > MAX_MANUAL_DECK_COUNT) {
+        return `Mill count must be an integer between 1 and ${MAX_MANUAL_DECK_COUNT}`;
+      }
+      return null;
+    }
+    case 'MANUAL_SHUFFLE_DECK': {
+      if (!state.players[action.deckOwnerId]) return 'Deck owner does not exist';
+      return null;
+    }
+    case 'MANUAL_HELL_CHOICE': {
+      if (!state.players[action.playerId]) return 'Hell choice player does not exist';
+      if (!['Avatar', 'Construct', 'Magic'].includes(action.cardType)) return 'Invalid Hell choice card type';
+      if (!Number.isSafeInteger(action.count) || action.count < 1 || action.count > MAX_MANUAL_DECK_COUNT) {
+        return `Hell choice count must be an integer between 1 and ${MAX_MANUAL_DECK_COUNT}`;
+      }
+      if (!['hand', 'deck_top', 'deck_bottom', 'avatarZone', 'banish'].includes(action.destination)) return 'Invalid Hell choice destination';
+      return null;
+    }
+    case 'MANUAL_SPAWN_TOKEN': {
+      const player = state.players[action.playerId];
+      if (!player) return 'Token player does not exist';
+      // Rule Book 3.2: max 4 normal Avatars, max 6 total including Tokens.
+      if (player.avatarZone.length >= 6) return 'Avatar Zone is at the 6-card total limit; no Token may enter';
+      if (action.name !== undefined && (typeof action.name !== 'string' || action.name.length === 0 || action.name.length > 64)) return 'Invalid Token name';
+      if (action.power !== undefined && !Number.isSafeInteger(action.power)) return 'Token POWER must be an integer';
+      if (action.color !== undefined && typeof action.color !== 'string') return 'Invalid Token color';
+      return null;
+    }
+    case 'MANUAL_CHANGE_CONTROL': {
+      if (!state.players[action.newControllerId]) return 'New controller does not exist';
+      const found = findInstance(state, action.instanceId);
+      if (!found || found.zone !== 'avatarZone') return 'Control change target must be an Avatar on an Avatar Zone';
+      if (found.card.controlChangeImmune) return 'Target Avatar cannot change control';
+      if (found.card.duoWithInstanceId || state.players[found.playerId].avatarZone.some(item => item.duoWithInstanceId === action.instanceId)) {
+        return 'Duo Avatars cannot change control';
+      }
+      if (found.card.controllerId === action.newControllerId) return 'Avatar is already controlled by that player';
+      const destinationZone = [...state.players[action.newControllerId].avatarZone, found.card];
+      const capacityError = validateAvatarZone({ avatarZone: destinationZone });
+      if (capacityError) return capacityError;
+      return null;
+    }
     default:
       return 'Unknown manual override action';
   }
@@ -208,13 +320,14 @@ function appendEventLog(state: GameState, descriptions: string[], actorId: strin
 }
 
 /**
- * Stages a manual override for the active player. The action is validated against Rule Book limits
- * (zone capacity is enforced again at application time) and waits for opponent approval.
+ * Stages a manual override queue for the active player. Every step is validated against Rule Book
+ * limits (zone capacity is enforced again at application time) and the whole queue waits for
+ * opponent approval, then applies all-or-nothing.
  */
-export function beginManualOverride(
+export function beginManualOverrideQueue(
   state: GameState,
   actorId: string,
-  action: ManualOverrideAction,
+  actions: ManualOverrideAction[],
   context: ManualOverrideContext | undefined,
   commandId: string
 ): ManualOverrideResult {
@@ -225,11 +338,22 @@ export function beginManualOverride(
   if (state.reactionWindow) return { ok: false, state, reason: 'A reaction window is open' };
   if (!validCommandId(commandId)) return { ok: false, state, reason: 'Invalid manual override command identifier' };
   if ((state.processedCommandIds ?? []).includes(commandId)) return { ok: false, state, reason: 'Duplicate manual override command' };
-  const actionError = validateManualOverrideAction(state, actorId, action);
-  if (actionError) return { ok: false, state, reason: actionError };
+  if (!Array.isArray(actions) || actions.length === 0 || actions.length > 8) {
+    return { ok: false, state, reason: 'Manual override queue must contain between 1 and 8 steps' };
+  }
+  for (const action of actions) {
+    const actionError = validateManualOverrideAction(state, actorId, action);
+    if (actionError) return { ok: false, state, reason: actionError };
+  }
+  // A choice-opening step hands control to an authorized pending-choice UI, so it must be last.
+  const firstChoiceIndex = actions.findIndex(action => CHOICE_OPENING_KINDS.includes(action.kind));
+  if (firstChoiceIndex !== -1 && firstChoiceIndex !== actions.length - 1) {
+    return { ok: false, state, reason: 'A Deck/Hell choice step must be the final step of the queue' };
+  }
   const revision = (state.stateRevision ?? 0) + 1;
   const pending: PendingManualOverride = {
-    action,
+    action: actions[0],
+    actions,
     actorId,
     expectedRevision: revision,
     commandId,
@@ -245,20 +369,36 @@ export function beginManualOverride(
   };
   const error = validateGameState(candidate);
   if (error) return { ok: false, state, reason: error };
-  const described = describeManualOverrideAction(state, action);
+  const described = actions.map(action => describeManualOverrideAction(state, action)).join(' → ');
   const cardLabel = context?.cardName ? ` (การ์ด: ${context.cardName} — ${context.cardStatus ?? 'Manual Effect Resolution'})` : '';
   return {
     ok: true,
-    state: appendEventLog(candidate, [`🔧 ${state.players[actorId].name} เสนอ Manual Override: ${described}${cardLabel} — รอคู่แข่งยืนยัน`], actorId)
+    state: appendEventLog(candidate, [`🔧 ${state.players[actorId].name} เสนอ Manual Override${actions.length > 1 ? ` (${actions.length} ขั้นตอน)` : ''}: ${described}${cardLabel} — รอคู่แข่งยืนยัน`], actorId)
   };
 }
 
-function applyStagedOverride(state: GameState, pending: PendingManualOverride): ManualOverrideResult {
-  // The staged pending is cleared first so zone moves see a clean rules state.
-  const cleared: GameState = { ...state, pendingManualOverride: undefined };
-  const events: GameEvent[] = [];
-  let next: GameState = cleared;
-  const action = pending.action;
+/**
+ * Stages a single-step manual override for the active player.
+ * The action is validated against Rule Book limits and waits for opponent approval.
+ */
+export function beginManualOverride(
+  state: GameState,
+  actorId: string,
+  action: ManualOverrideAction,
+  context: ManualOverrideContext | undefined,
+  commandId: string
+): ManualOverrideResult {
+  return beginManualOverrideQueue(state, actorId, [action], context, commandId);
+}
+
+/** Applies one queued manual override step; deck/hell operations may open an authorized pending choice. */
+function applyOverrideStep(
+  state: GameState,
+  pending: PendingManualOverride,
+  action: ManualOverrideAction,
+  events: GameEvent[]
+): { ok: boolean; state: GameState; reason?: string } {
+  let next: GameState = state;
   if (action.kind === 'ADJUST_POWER') {
     const found = findInstance(next, action.instanceId);
     if (!found) return { ok: false, state, reason: 'POWER target disappeared' };
@@ -364,14 +504,120 @@ function applyStagedOverride(state: GameState, pending: PendingManualOverride): 
       type: 'LIFE_REVEALED', instanceId: flipped.instanceId, playerId: action.playerId, actorId: pending.actorId,
       eventId: `${state.id}:${state.gameEvents?.length ?? 0}:manual-life:${pending.commandId}`
     });
+  } else if (action.kind === 'MANUAL_SEARCH_DECK') {
+    // Rule Book 3.2: a Deck Search always ends with a mandatory shuffle, which the
+    // SEARCH pending choice applies to the unselected cards when it resolves.
+    const searched = searchDeck(next, action.deckOwnerId, action.criteria, {
+      actorId: pending.actorId,
+      authorizedViewerId: pending.actorId,
+      selectCount: action.selectCount,
+      destination: action.destination
+    });
+    if (!searched.ok) return { ok: false, state, reason: searched.reason ?? 'Manual Deck Search failed' };
+    next = searched.state;
+  } else if (action.kind === 'MANUAL_SCOUT_DECK') {
+    const scouted = scoutCards(next, action.deckOwnerId, action.count, {
+      viewerId: pending.actorId,
+      destination: action.destination,
+      ...(action.destination === 'deck' && action.selectedDeckPosition ? { selectedDeckPosition: action.selectedDeckPosition } : {}),
+      ...(action.unselectedDeckPosition ? { unselectedDeckPosition: action.unselectedDeckPosition } : {})
+    });
+    if (!scouted.ok) return { ok: false, state, reason: scouted.reason ?? 'Manual Scout failed' };
+    next = scouted.state;
+  } else if (action.kind === 'MANUAL_MILL_DECK') {
+    const milled = millCards(next, action.deckOwnerId, action.count);
+    if (!milled.ok) return { ok: false, state, reason: milled.reason ?? 'Manual Mill failed' };
+    next = milled.state;
+  } else if (action.kind === 'MANUAL_SHUFFLE_DECK') {
+    const shuffled = shuffleDeck(next, action.deckOwnerId);
+    if (!shuffled.ok) return { ok: false, state, reason: shuffled.reason ?? 'Manual Shuffle failed' };
+    next = shuffled.state;
+  } else if (action.kind === 'MANUAL_HELL_CHOICE') {
+    const hellChoice = beginHellChoice(next, {
+      effectKind: action.destination === 'avatarZone' ? 'summon_from_hell' : 'recover_from_hell',
+      playerId: action.playerId,
+      actorId: pending.actorId,
+      authorizedViewerId: pending.actorId,
+      cardType: action.cardType,
+      count: action.count,
+      destination: action.destination
+    });
+    if (!hellChoice.ok) {
+      return { ok: false, state, reason: 'reason' in hellChoice ? hellChoice.reason : 'Manual Hell choice failed' };
+    }
+    next = hellChoice.state;
+  } else if (action.kind === 'MANUAL_SPAWN_TOKEN') {
+    const player = next.players[action.playerId];
+    // Rule Book 3.2: max 4 normal Avatars, max 6 total including Tokens.
+    if (player.avatarZone.length >= 6) return { ok: false, state, reason: 'Avatar Zone is at the 6-card total limit' };
+    const tokenCard: Card = {
+      printId: `token:${pending.commandId}`,
+      name: action.name ?? 'Token',
+      type: 'Token',
+      soi: 1,
+      cost: 0,
+      gem: 0,
+      power: action.power ?? 0,
+      color: action.color ?? 'ไร้สี',
+      rarity: 'C',
+      mainEffect: '',
+      isOnlyOne: false,
+      isBias: false,
+      isCollab: false,
+      imageUrl: 'https://cdn.bottcg.com/cards/card-back.png'
+    };
+    const tokenInstance: CardInstance = {
+      instanceId: `token-${pending.commandId}`,
+      card: tokenCard,
+      ownerId: action.playerId,
+      controllerId: action.playerId,
+      isRested: false,
+      isFaceUp: true,
+      attachedInstances: [],
+      layerModifiers: []
+    };
+    next = {
+      ...next,
+      players: {
+        ...next.players,
+        [action.playerId]: { ...player, avatarZone: [...player.avatarZone, tokenInstance] }
+      }
+    };
+  } else if (action.kind === 'MANUAL_CHANGE_CONTROL') {
+    const changed = changeAvatarControl(next, pending.actorId, action.instanceId, action.newControllerId);
+    if (!changed.ok) return { ok: false, state, reason: changed.reason ?? 'Manual control change failed' };
+    next = changed.state;
+  }
+  return { ok: true, state: next };
+}
+
+function applyStagedOverride(state: GameState, pending: PendingManualOverride): ManualOverrideResult {
+  const queue = pending.actions && pending.actions.length > 0 ? pending.actions : [pending.action];
+  // The staged pending is cleared first so zone moves see a clean rules state.
+  const cleared: GameState = { ...state, pendingManualOverride: undefined };
+  const events: GameEvent[] = [];
+  let next: GameState = cleared;
+  // All-or-nothing (Rule Book 3.2 p.12): one failed step cancels the whole queue.
+  for (const action of queue) {
+    const step = applyOverrideStep(next, pending, action, events);
+    if (!step.ok) return { ok: false, state, reason: step.reason };
+    next = step.state;
   }
   next = {
     ...next,
     stateRevision: (state.stateRevision ?? 0) + 1
   };
+  // A Deck/Hell choice opened by this queue must stay resolvable: re-sync its
+  // authorized expected revision with the final post-queue state revision.
+  if (next.pendingDeckChoice) {
+    next = { ...next, pendingDeckChoice: { ...next.pendingDeckChoice, expectedRevision: next.stateRevision } };
+  }
+  if (next.pendingHellChoice) {
+    next = { ...next, pendingHellChoice: { ...next.pendingHellChoice, expectedRevision: next.stateRevision } };
+  }
   const error = validateGameState(next);
   if (error) return { ok: false, state, reason: error };
-  const described = describeManualOverrideAction(state, action);
+  const described = queue.map(action => describeManualOverrideAction(state, action)).join(' → ');
   return {
     ok: true,
     applied: true,
