@@ -129,13 +129,17 @@ export function restoreHiddenZonesFromCanonical(
     collect(knownPlayer.magicZone);
     collect(knownPlayer.hell);
     collect(knownPlayer.darkDimension);
-    const restoreZone = (cards: typeof incomingPlayer.hand) => cards.map(card => {
+    const restoreZone = (cards: typeof incomingPlayer.hand, forceFaceUp = false) => cards.map(card => {
       const known = knownInstances.get(card.instanceId);
-      return known ? { ...known, isFaceUp: card.isFaceUp } : { ...card, card: HIDDEN_PRIVATE_CARD };
+      return known
+        ? { ...known, isFaceUp: forceFaceUp ? true : card.isFaceUp }
+        : { ...card, card: HIDDEN_PRIVATE_CARD };
     });
     players[playerId] = {
       ...incomingPlayer,
-      hand: restoreZone(incomingPlayer.hand),
+      // A hand is always face-up for its owner. The incoming flag comes from the
+      // sender's redacted view (face-down), so it must never clobber our own hand.
+      hand: restoreZone(incomingPlayer.hand, true),
       deck: restoreZone(incomingPlayer.deck),
       lifeDeck: incomingPlayer.lifeDeck.map(card => {
         const known = knownPlayer.lifeDeck.find(item => item.instanceId === card.instanceId);

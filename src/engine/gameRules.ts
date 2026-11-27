@@ -425,6 +425,9 @@ export function moveCardBetweenZones(state: GameState, request: ZoneMoveRequest)
       controllerId: destinationPlayerId,
       ...(sourceZone === 'magicZone' ? { isFaceUp: true, isRested: false, layerModifiers: [] } : {})
     } : {}),
+    // The hand is always a face-up zone for its owner: cards arriving from the
+    // Deck (face-down) must not stay face-down once they enter a hand.
+    ...(request.destination === 'hand' ? { isFaceUp: true as const } : {}),
     ...(sourceZone === 'avatarZone' && request.destination !== 'avatarZone' && card.duoWithInstanceId ? { duoWithInstanceId: undefined, controlChangeImmune: false } : {}),
     ...(attachmentsLeaveWithAvatar && card.attachedInstances.length > 0 ? { attachedInstances: [] } : {})
   };
