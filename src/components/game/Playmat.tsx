@@ -2013,7 +2013,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   return (
-    <div className="flex flex-col h-[100dvh] w-screen bg-slate-950 select-none overflow-hidden text-slate-200 font-kanit">
+    <div className="flex flex-col h-[100dvh] w-full bg-slate-950 select-none overflow-hidden text-slate-200 font-kanit">
       {/* Top Header Bar */}
       <header className="shrink-0 min-h-11 bg-slate-900 border-b border-slate-800 px-2 sm:px-3 py-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 z-30 sm:flex-nowrap">
         <div className="flex items-center space-x-2">
@@ -2523,7 +2523,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine.
                 Rendered above the fan (order-1) so it pops up over the playmat, not off-screen. */}
             {selectedHandCard && !gameState.pendingEndPhaseDiscardPlayerId && !gameState.reactionWindow && (
-              <div className="order-1 mb-1.5 flex items-center gap-2 overflow-x-auto no-scrollbar rounded-lg border border-amber-500/30 bg-slate-950/95 px-2 py-1.5">
+              <div className="order-1 mb-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-slate-950/95 px-2 py-1.5">
                 <span className="max-w-[7rem] shrink-0 truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
                 <ClassificationBadge card={selectedHandCard.card} size="md" />
                 <span className="shrink-0 font-mono text-[10px] text-slate-400">
