@@ -56,8 +56,18 @@ import {
   autoApproveManualOverride,
   beginManualOverride,
   classifyCard,
-  rejectManualOverride
+  rejectManualOverride,
+  shouldOfferManualResolution
 } from '../../engine/hybridMode';
+import { deriveLegalAvatarActions, deriveLegalHandActions, type HandActionKind } from '../../engine/legalActions';
+import {
+  beginDispatch,
+  cancelHandSelection,
+  EMPTY_DISPATCH_GUARD,
+  isExplicitlyConfirmed,
+  tapHandCard,
+  type DispatchGuard
+} from '../../engine/tapFirstInteraction';
 import {
   DeckChoiceModal,
   HellChoiceModal,
@@ -334,6 +344,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   // Phase 6 tap-first hand: first tap selects/previews, the action dock executes.
   const [selectedHandCardId, setSelectedHandCardId] = useState<string | null>(null);
   const [showDarkDimensionModal, setShowDarkDimensionModal] = useState<boolean>(false);
+  // Phase 6: rapid-tap dispatch guard and two-step attack confirmation tracking.
+  const dispatchGuardRef = useRef<DispatchGuard>(EMPTY_DISPATCH_GUARD);
+  const [attackCommittedId, setAttackCommittedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAttackCommittedId(current => (current !== null && current !== selectedAttackerId ? null : current));
+  }, [selectedAttackerId]);
 
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
@@ -561,6 +578,20 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     };
   };
 
+  // Phase 6: manual resolution is granular. The manual fallback is offered only when
+  // the engine itself ran the card's resolution pipeline and reported that it could
+  // not resolve the printed effect — a MANUAL badge alone never triggers it.
+  const noteManualResolutionFromLogs = (source: CardInstance, logs: readonly string[]) => {
+    if (activeRuleMode !== 'HYBRID') return;
+    const classification = classifyCard(source.card);
+    if (!shouldOfferManualResolution(classification, logs)) return;
+    setManualResolution({
+      instanceId: source.instanceId,
+      card: source.card,
+      status: classification.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'UNSUPPORTED'
+    });
+  };
+
   const resolveCombatAction = (
     state: GameState,
     attackerPlayerId: string,
@@ -627,12 +658,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       }
       const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, 'SUMMON_JUTI');
       nextState = appendLogs(ability.state, ability.logs, 'ABILITY', action.actorId);
+      noteManualResolutionFromLogs(action.sourceCard, ability.logs);
     } else if (action?.type === 'RESOLVE_MAGIC') {
       const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, 'MAGIC_CAST', action.targetAvatarId);
       nextState = appendLogs(ability.state, ability.logs, 'MAGIC', action.actorId);
+      noteManualResolutionFromLogs(action.sourceCard, ability.logs);
     } else if (action?.type === 'RESOLVE_ABILITY') {
       const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, action.abilityTrigger);
       nextState = appendLogs(ability.state, ability.logs, 'ABILITY', action.actorId);
+      noteManualResolutionFromLogs(action.sourceCard, ability.logs);
     } else if (action?.type === 'RESOLVE_COMBAT') {
       const result = resolveCombatAction(
         nextState,
@@ -1174,6 +1208,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
   };
 
+  // Phase 6: the confirmation bar is the only path that dispatches a hand action.
+  // The dispatch requires an explicit confirmation of the currently selected card
+  // (0-Cost cards included) and is guarded against rapid duplicate taps.
+  const dispatchConfirmedHandAction = (handCard: CardInstance, kind: HandActionKind) => {
+    if (!isExplicitlyConfirmed({ selectedHandCardId }, handCard.instanceId)) return;
+    if (!deriveLegalHandActions(gameState, meId, handCard).some(action => action.kind === kind)) {
+      showNotification('เอนจินยังไม่อนุญาตการกระทำนี้');
+      return;
+    }
+    const decision = beginDispatch(dispatchGuardRef.current, `hand:${handCard.instanceId}:${kind}`, Date.now());
+    dispatchGuardRef.current = decision.guard;
+    if (!decision.allowed) return;
+    setSelectedHandCardId(null);
+    handleInitiatePlayCard(handCard);
+  };
+
   // Finalize playing a card only after its Cost Step has been successfully completed.
   const finalizePlayCard = (handCard: CardInstance, discardIds: string[], paidCost: boolean, playAsReact = false) => {
     if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || winnerName) return;
@@ -1210,15 +1260,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       c => c.instanceId !== handCard.instanceId && !discardIds.includes(c.instanceId)
     );
 
-    // Hybrid mode: unmodeled cards resolve through the manual fallback instead of the engine.
-    const playedClassification = classifyCard(handCard.card);
-    if (activeRuleMode === 'HYBRID' && playedClassification.status !== 'VERIFIED_WORKING') {
-      setManualResolution({
-        instanceId: handCard.instanceId,
-        card: handCard.card,
-        status: playedClassification.status
-      });
-    }
+    // Phase 6: the hybrid pipeline still resolves the card automatically here; the
+    // manual fallback is offered later, only if the engine reports it could not
+    // resolve the printed effect (see noteManualResolutionFromLogs).
 
     const parsed = parseCardAbility(handCard.card);
     let nextState: GameState = { ...gameState };
@@ -1269,6 +1313,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         } else {
           const res = executeCardAbility(nextState, meId, summoned, 'SUMMON_JUTI');
           nextState = appendLogs(res.state, res.logs, 'ABILITY');
+          noteManualResolutionFromLogs(summoned, res.logs);
         }
       }
 
@@ -1387,6 +1432,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       } else {
         const res = executeCardAbility(nextState, meId, handCard, 'MAGIC_CAST');
         nextState = appendLogs(res.state, [`✨ ร่าย Magic "${handCard.card.name}"`, ...res.logs], 'MAGIC');
+        noteManualResolutionFromLogs(handCard, res.logs);
         setGameState(nextState);
         showNotification(res.logs[0] || `ร่าย "${handCard.card.name}" สำเร็จ!`);
         return;
@@ -1395,7 +1441,48 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   // Handle clicking an Avatar on the field (for Ability Target OR Combat)
-  const handleAvatarClick = (avatar: CardInstance, isMyAvatar: boolean) => {
+  // Phase 6: explicit confirmation step for declaring an attack. The engine decides
+  // whether the attack is legal; the confirmation bar only offers the button when it is.
+  const confirmDeclareAttack = (avatar: CardInstance) => {
+    if (selectedAttackerId !== avatar.instanceId) return;
+    if (!deriveLegalAvatarActions(gameState, meId, avatar).some(action => action.kind === 'DECLARE_ATTACK')) {
+      showNotification('เอนจินยังไม่อนุญาตให้ Avatar นี้โจมตีในขณะนี้');
+      return;
+    }
+    const decision = beginDispatch(dispatchGuardRef.current, `attack:${avatar.instanceId}`, Date.now());
+    dispatchGuardRef.current = decision.guard;
+    if (!decision.allowed) return;
+    setAttackCommittedId(avatar.instanceId);
+
+    const attackWindow = openReactionWindow(
+      gameState,
+      {
+        type: 'ATTACK_DECLARED',
+        actorId: meId,
+        targetInstanceId: avatar.instanceId,
+        targetCardName: avatar.card.name,
+        sourceCardName: avatar.card.name
+      },
+      { type: 'START_ATTACK', actorId: meId, sourceCard: avatar }
+    );
+    if (attackWindow !== gameState) {
+      setGameState(attackWindow);
+      showNotification(`ประกาศโจมตีด้วย "${avatar.card.name}" — เปิด Reaction Window`);
+      return;
+    }
+
+    // Trigger "เมื่อโจมตี" (ON_ATTACK) after the confirmed declaration
+    let nextState: GameState = { ...gameState };
+    const parsed = parseCardAbility(avatar.card);
+    if (parsed.hasOnAttack) {
+      const res = executeCardAbility(nextState, meId, avatar, 'ON_ATTACK');
+      nextState = appendLogs(res.state, res.logs, 'ABILITY');
+      setGameState(nextState);
+    }
+    showNotification(`ประกาศโจมตีด้วย "${avatar.card.name}" แล้ว — คลิกเป้าหมายฝ่ายตรงข้ามหรือ LIFE`);
+  };
+
+  const handleAvatarClick = (avatar: CardInstance, isMyAvatar: boolean, targetPlayerId: string = opponentId) => {
     if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention)) return;
     // 1. Resolve Pending Ability / Modification Equip Target
     if (pendingAbility) {
@@ -1530,6 +1617,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const nextState = appendLogs(res.state, res.logs, 'ABILITY');
       setGameState(nextState);
       setPendingAbility(null);
+      noteManualResolutionFromLogs(pendingAbility.sourceCard, res.logs);
       showNotification(res.logs[0] || 'เปิดใช้งานความสามารถสำเร็จ!');
       return;
     }
@@ -1547,7 +1635,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     // 3. Battle Phase: Click own Avatar
     if (isMyAvatar) {
-      if (selectedAttackerId && selectedAttackerId !== avatar.instanceId && !avatar.isRested &&
+      if (attackCommittedId && selectedAttackerId === attackCommittedId && selectedAttackerId !== avatar.instanceId && !avatar.isRested &&
         (avatarHasKeyword(avatar, 'สามัคคี') || avatarHasKeyword(avatar, 'แทงหลัง'))) {
         const keyword = avatarHasKeyword(avatar, 'สามัคคี') ? 'สามัคคี' : 'แทงหลัง';
         const nextState = payCombatKeyword(gameState, selectedAttackerId, avatar.instanceId, keyword);
@@ -1572,34 +1660,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         return;
       }
 
-      const attackWindow = openReactionWindow(
-        gameState,
-        {
-          type: 'ATTACK_DECLARED',
-          actorId: meId,
-          targetInstanceId: avatar.instanceId,
-          targetCardName: avatar.card.name,
-          sourceCardName: avatar.card.name
-        },
-        { type: 'START_ATTACK', actorId: meId, sourceCard: avatar }
-      );
-      if (attackWindow !== gameState) {
-        setGameState(attackWindow);
-        showNotification(`ประกาศโจมตีด้วย "${avatar.card.name}" — เปิด Reaction Window`);
+      // Phase 6 two-step attack: the first tap only selects the attacker; the
+      // declaration itself is dispatched from the confirmation bar button.
+      if (selectedAttackerId === avatar.instanceId) {
+        setSelectedAttackerId(null);
+        setAttackCommittedId(null);
         return;
       }
-
-      // Trigger "เมื่อโจมตี" (ON_ATTACK) when selected as attacker
-      let nextState: GameState = { ...gameState };
-      const parsed = parseCardAbility(avatar.card);
-      if (parsed.hasOnAttack) {
-        const res = executeCardAbility(nextState, meId, avatar, 'ON_ATTACK');
-        nextState = appendLogs(res.state, res.logs, 'ABILITY');
-        setGameState(nextState);
-      }
-
       setSelectedAttackerId(avatar.instanceId);
-      showNotification(`เลือก "${avatar.card.name}" โจมตี! คลิกเป้าหมายฝ่ายตรงข้ามหรือ LIFE`);
+      setAttackCommittedId(null);
+      showNotification(`เลือก "${avatar.card.name}" — กดปุ่มประกาศโจมตีเพื่อยืนยัน`);
       return;
     }
 
@@ -1613,7 +1683,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     if (!attacker) return;
 
     // Enforce โล่มนุษย์ (Human Shield)
-    const shieldAvatars = opponent.avatarZone.filter(a => avatarHasKeyword(a, 'โล่มนุษย์'));
+    const targetPlayer = gameState.players[targetPlayerId];
+    const shieldAvatars = (targetPlayer?.avatarZone ?? []).filter(a => avatarHasKeyword(a, 'โล่มนุษย์'));
     const canBypassShield = avatarHasKeyword(attacker, 'แทงหลัง') || avatarHasKeyword(attacker, 'เตะไข่');
     if (shieldAvatars.length > 0 && !avatarHasKeyword(avatar, 'โล่มนุษย์') && !canBypassShield) {
       showNotification(`⚠️ ฝ่ายตรงข้ามมี "${shieldAvatars[0].card.name}" (โล่มนุษย์) ต้องโจมตีตัวโล่มนุษย์ก่อน!`);
@@ -1633,7 +1704,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         type: 'RESOLVE_COMBAT',
         actorId: meId,
         sourceCard: attacker,
-        targetPlayerId: opponentId,
+        targetPlayerId,
         targetAvatarId: avatar.instanceId
       }
     );
@@ -1643,14 +1714,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const combatResult = resolveCombatAction(gameState, meId, opponentId, attacker.instanceId, avatar.instanceId);
+    const combatResult = resolveCombatAction(gameState, meId, targetPlayerId, attacker.instanceId, avatar.instanceId);
     setGameState(combatResult.state);
     setSelectedAttackerId(null);
+    setAttackCommittedId(null);
     showNotification(combatResult.events[combatResult.events.length - 1] ?? 'การต่อสู้สิ้นสุดลง');
   };
 
   // Attack Opponent LIFE Zone Directly
-  const handleAttackLifeZone = () => {
+  const handleAttackLifeZone = (targetPlayerId: string = opponentId) => {
     if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || gameState.currentPhase !== 'BATTLE' || !isMyTurn || winnerName) return;
     if (!selectedAttackerId) {
       showNotification('กรุณาเลือก Avatar ของคุณที่จะโจมตีก่อน');
@@ -1660,7 +1732,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     const attacker = me.avatarZone.find(c => c.instanceId === selectedAttackerId);
     if (!attacker) return;
 
-    const hasOpponentAvatars = opponent.avatarZone.length > 0;
+    const decision = beginDispatch(dispatchGuardRef.current, `attack-life:${attacker.instanceId}:${targetPlayerId}`, Date.now());
+    dispatchGuardRef.current = decision.guard;
+    if (!decision.allowed) return;
+
+    const hasOpponentAvatars = (gameState.players[targetPlayerId]?.avatarZone ?? []).length > 0;
     const canEggKick = avatarHasKeyword(attacker, 'เตะไข่');
 
     if (hasOpponentAvatars && !canEggKick) {
@@ -1668,7 +1744,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
-    const declared = declareCombatAttack(gameState, attacker.instanceId, { type: 'LIFE', playerId: opponentId });
+    const declared = declareCombatAttack(gameState, attacker.instanceId, { type: 'LIFE', playerId: targetPlayerId });
     if (!declared) {
       showNotification('การโจมตี LIFE ไม่ถูกต้อง');
       return;
@@ -1683,7 +1759,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
     if (lifeRes.isGameOver) {
       if (gameState.mode === 'AD_MUA') {
-        const elimination = eliminatePlayer(nextState, opponentId, 'LIFE หมดและถูกกำจัดออกจากเกม (การ์ดทั้งหมดถูกนำออกจากเกม)');
+        const elimination = eliminatePlayer(nextState, targetPlayerId, 'LIFE หมดและถูกกำจัดออกจากเกม (การ์ดทั้งหมดถูกนำออกจากเกม)');
         nextState = elimination.state;
         if (elimination.winnerId) setWinnerName(nextState.players[elimination.winnerId].name);
       } else {
@@ -1716,10 +1792,129 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     const res = executeCardAbility(gameState, meId, cons, 'CONSTRUCT_ACTIVATE');
     if (res.logs.length > 0) {
       setGameState(appendLogs(res.state, res.logs, 'CONSTRUCT'));
+      noteManualResolutionFromLogs(cons, res.logs);
       showNotification(res.logs[0]);
     } else {
       setInspectedCard(cons);
     }
+  };
+
+  // Phase 6: one clearly identifiable board per opponent. `compact` tightens the zone
+  // heights when 2-3 opponent boards share the row; the zone relationships
+  // (Deck/Hell | Magic + Avatar | LIFE) stay identical to the official playmat.
+  const renderOpponentBoard = (boardPlayerId: string, compact: boolean) => {
+    const boardPlayer = gameState.players[boardPlayerId];
+    if (!boardPlayer) return null;
+    return (
+      <section
+        key={boardPlayerId}
+        aria-label={`สนามของ ${boardPlayer.name}`}
+        className="min-w-0 space-y-1.5 rounded-xl border border-amber-500/15 bg-slate-950/50 p-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.05)]"
+      >
+        <div className="flex items-center justify-between gap-2 px-1 text-[10px] text-slate-400 sm:text-xs">
+          <div className="flex min-w-0 items-center gap-2">
+            {boardPlayerId === activePlayerId && (
+              <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-400" aria-label="กำลังเล่นเทิร์น" />
+            )}
+            <span className="truncate font-bold text-red-400">{boardPlayer.name}</span>
+            {boardPlayer.isCritical && (
+              <span className="shrink-0 animate-pulse rounded bg-red-600 px-1.5 py-0.5 text-[9px] font-bold text-white">
+                สถานะสาหัส!
+              </span>
+            )}
+          </div>
+          <span className="shrink-0">มือ: {boardPlayer.hand.length} | เด็ค: {boardPlayer.deck.length}</span>
+        </div>
+
+        {/* Opponent 3-Column Body (Mirrored: Deck/Hell Left | Avatar+Magic Center | Life Right) */}
+        <div className="grid grid-cols-12 items-stretch gap-1.5 sm:gap-2">
+          {/* Left Col: Deck & Hell (2 cols) */}
+          <div className="col-span-2 flex flex-col gap-1.5">
+            <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center">
+              <span className="text-[9px] font-bold text-amber-300/80">Deck กองจั่ว</span>
+              <span className="text-sm font-black text-slate-200">{boardPlayer.deck.length}</span>
+            </div>
+            <div
+              onClick={() => {
+                setFocusedOpponentId(boardPlayerId);
+                setShowHellModal('OPPONENT');
+              }}
+              className="flex flex-1 cursor-pointer flex-col items-center justify-center rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center transition hover:border-red-500/50"
+            >
+              <span className="text-[9px] font-bold text-amber-300/80">Hell นรก</span>
+              <span className="text-sm font-black text-red-400">{boardPlayer.hell.length}</span>
+            </div>
+          </div>
+
+          {/* Center Col: Magic Zone (top) + Avatar Zone (bottom, facing center) (8 cols) */}
+          <div className="col-span-8 flex flex-col gap-1.5">
+            {/* Opponent Magic Zone */}
+            <div className="flex min-h-[42px] items-center justify-between rounded-lg border border-amber-500/15 bg-slate-950/60 px-2 py-1 text-[10px] text-slate-500">
+              <span className="font-semibold text-amber-300/70">Magic Zone (คู่แข่ง)</span>
+              <span>{boardPlayer.magicZone.length} ใบที่ใช้แล้ว</span>
+            </div>
+
+            {/* Opponent Avatar Zone (Max 4) */}
+            <div className={`relative flex items-center justify-center gap-2 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)] ${compact ? 'min-h-[96px]' : 'min-h-[115px] sm:min-h-[135px]'}`}>
+              {boardPlayer.avatarZone.length === 0 ? (
+                <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (สูงสุด 4 ใบ)</span>
+              ) : (
+                boardPlayer.avatarZone.map(avatar => (
+                  <div key={avatar.instanceId} className="relative flex flex-col items-center">
+                    <CardView
+                      cardInstance={avatar}
+                      size="sm"
+                      isRested={avatar.isRested}
+                      isOpponent
+                      onClick={() => handleAvatarClick(avatar, false, boardPlayerId)}
+                      onInspect={() => setInspectedCard(avatar)}
+                    />
+                    <AvatarStatusChips avatar={avatar} />
+                    {(selectedAttackerId || pendingAbility) && (
+                      <div className="pointer-events-none absolute -bottom-1.5 left-1/2 -translate-x-1/2 rounded bg-red-600 px-1.5 py-0.5 text-[8px] text-white shadow">
+                        เป้าหมาย
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Right Col: Opponent Life Zone (2 cols) */}
+          <div
+            onClick={() => handleAttackLifeZone(boardPlayerId)}
+            className={`col-span-2 flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 bg-slate-950/90 p-1.5 transition ${
+              selectedAttackerId
+                ? 'animate-pulse border-red-500 bg-red-950/30 ring-2 ring-red-500/40'
+                : 'border-slate-800 hover:border-red-500/50'
+            }`}
+            title="คลิกเพื่อโจมตี LIFE คู่แข่ง"
+          >
+            <span className="mb-1 flex items-center gap-0.5 text-[10px] font-bold text-red-400">
+              <Shield className="h-3 w-3" /> Life ({boardPlayer.lifeDeck.filter(c => !c.isFaceUp).length}/5)
+            </span>
+            <div className="flex flex-wrap justify-center gap-1">
+              {boardPlayer.lifeDeck.map((lifeCard, idx) => (
+                <div
+                  key={lifeCard.instanceId || idx}
+                  onClick={event => {
+                    if (lifeCard.isFaceUp) event.stopPropagation();
+                  }}
+                >
+                  <LifeCardTile
+                    card={lifeCard}
+                    index={idx}
+                    compact
+                    onInspect={() => setInspectedCard(lifeCard)}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+    );
   };
 
   return (
@@ -1917,133 +2112,20 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       <main className="flex-1 flex overflow-hidden relative">
         {/* Official Playmat Arena */}
         <div className="flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto bot-felt">
-          {/* ==================== OPPONENT PLAYMAT HALF (MIRRORED) ==================== */}
-          <div className="rounded-xl border border-amber-500/15 bg-slate-950/50 p-1.5 sm:p-2 space-y-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.05)]">
-            {opponentIds.length > 1 && (
-              <div role="tablist" aria-label="เลือกคู่แข่ง" className="flex gap-1.5 overflow-x-auto pb-0.5">
-                {opponentIds.map(id => {
-                  const rival = gameState.players[id];
-                  const isFocused = id === opponentId;
-                  return (
-                    <button
-                      key={id}
-                      role="tab"
-                      aria-selected={isFocused}
-                      onClick={() => setFocusedOpponentId(id)}
-                      className={`shrink-0 px-2.5 py-1 rounded-lg border text-[10px] sm:text-[11px] text-left transition ${
-                        isFocused
-                          ? 'bg-red-950/70 border-red-500 text-red-100'
-                          : 'bg-slate-950/70 border-slate-800 text-slate-400 hover:border-slate-600'
-                      }`}
-                    >
-                      <span className="font-bold flex items-center gap-1">
-                        {id === activePlayerId && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-label="กำลังเล่นเทิร์น" />}
-                        {rival.name}
-                      </span>
-                      <span className="block text-[9px] opacity-80">
-                        LIFE {rival.lifeDeck.filter(c => !c.isFaceUp).length}/5 • Avatar {rival.avatarZone.length} • มือ {rival.hand.length}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-            <div className="flex items-center justify-between text-[10px] sm:text-xs px-1 text-slate-400">
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-red-400">{opponent.name}</span>
-                {opponent.isCritical && (
-                  <span className="bg-red-600 text-white px-1.5 py-0.5 rounded text-[9px] font-bold animate-pulse">
-                    สถานะสาหัส!
-                  </span>
-                )}
-              </div>
-              <span>มือ: {opponent.hand.length} ใบ | เด็ค: {opponent.deck.length}</span>
-            </div>
-
-            {/* Opponent 3-Column Body (Mirrored: Deck/Hell Left | Avatar+Magic Center | Life Right) */}
-            <div className="grid grid-cols-12 gap-1.5 sm:gap-2 items-stretch">
-              {/* Left Col: Deck & Hell (2 cols) */}
-              <div className="col-span-2 flex flex-col gap-1.5">
-                <div className="flex-1 rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 flex flex-col items-center justify-center text-center">
-                  <span className="text-[9px] text-amber-300/80 font-bold">Deck กองจั่ว</span>
-                  <span className="text-sm font-black text-slate-200">{opponent.deck.length}</span>
-                </div>
-                <div
-                  onClick={() => setShowHellModal('OPPONENT')}
-                  className="flex-1 rounded-lg border border-amber-500/20 bg-slate-950/80 hover:border-red-500/50 p-1 flex flex-col items-center justify-center text-center cursor-pointer transition"
-                >
-                  <span className="text-[9px] text-amber-300/80 font-bold">Hell นรก</span>
-                  <span className="text-sm font-black text-red-400">{opponent.hell.length}</span>
-                </div>
-              </div>
-
-              {/* Center Col: Magic Zone (top) + Avatar Zone (bottom, facing center) (8 cols) */}
-              <div className="col-span-8 flex flex-col gap-1.5">
-                {/* Opponent Magic Zone */}
-                <div className="min-h-[42px] rounded-lg border border-amber-500/15 bg-slate-950/60 px-2 py-1 flex items-center justify-between text-[10px] text-slate-500">
-                  <span className="font-semibold text-amber-300/70">Magic Zone (คู่แข่ง)</span>
-                  <span>{opponent.magicZone.length} ใบที่ใช้แล้ว</span>
-                </div>
-
-                {/* Opponent Avatar Zone (Max 4) */}
-                <div className="min-h-[115px] sm:min-h-[135px] rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 flex items-center justify-center gap-2 relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
-                  {opponent.avatarZone.length === 0 ? (
-                    <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (สูงสุด 4 ใบ)</span>
-                  ) : (
-                    opponent.avatarZone.map(avatar => (
-                      <div key={avatar.instanceId} className="relative flex flex-col items-center">
-                        <CardView
-                          cardInstance={avatar}
-                          size="sm"
-                          isRested={avatar.isRested}
-                          isOpponent
-                          onClick={() => handleAvatarClick(avatar, false)}
-                          onInspect={() => setInspectedCard(avatar)}
-                        />
-                        <AvatarStatusChips avatar={avatar} />
-                        {(selectedAttackerId || pendingAbility) && (
-                          <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[8px] px-1.5 py-0.5 rounded shadow pointer-events-none">
-                            เป้าหมาย
-                          </div>
-                        )}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              {/* Right Col: Opponent Life Zone (2 cols) */}
-              <div
-                onClick={handleAttackLifeZone}
-                className={`col-span-2 bg-slate-950/90 border-2 rounded-xl p-1.5 flex flex-col items-center justify-center cursor-pointer transition ${
-                  selectedAttackerId
-                    ? 'border-red-500 bg-red-950/30 ring-2 ring-red-500/40 animate-pulse'
-                    : 'border-slate-800 hover:border-red-500/50'
-                }`}
-                title="คลิกเพื่อโจมตี LIFE คู่แข่ง"
-              >
-                <span className="text-[10px] font-bold text-red-400 mb-1 flex items-center gap-0.5">
-                  <Shield className="w-3 h-3" /> Life ({opponent.lifeDeck.filter(c => !c.isFaceUp).length}/5)
-                </span>
-                <div className="flex flex-wrap justify-center gap-1">
-                  {opponent.lifeDeck.map((lifeCard, idx) => (
-                    <div
-                      key={lifeCard.instanceId || idx}
-                      onClick={event => {
-                        if (lifeCard.isFaceUp) event.stopPropagation();
-                      }}
-                    >
-                      <LifeCardTile
-                        card={lifeCard}
-                        index={idx}
-                        compact
-                        onInspect={() => setInspectedCard(lifeCard)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+          {/* ==================== OPPONENT PLAYMAT BOARDS (2/3/4-player layouts) ==================== */}
+          {/* 2 players: one full-width mirrored board. 3 players: two boards side by side.
+              4 players: three boards in a responsive row — every participant keeps a clearly
+              identifiable board area with the official Rule Book 3.2 zone relationships. */}
+          <div
+            className={
+              opponentIds.length >= 3
+                ? 'grid grid-cols-1 gap-2 md:grid-cols-3'
+                : opponentIds.length === 2
+                  ? 'grid grid-cols-1 gap-2 md:grid-cols-2'
+                  : ''
+            }
+          >
+            {opponentIds.map(boardPlayerId => renderOpponentBoard(boardPlayerId, opponentIds.length > 1))}
           </div>
 
           <PhaseTracker
@@ -2241,6 +2323,48 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             </div>
           </div>
 
+          {/* Phase 6 two-step attack confirmation bar: the Attack button exists only
+              when the engine authorizes the declaration for the selected Avatar. */}
+          {selectedAttackerId && gameState.currentPhase === 'BATTLE' && isMyTurn &&
+            !gameState.reactionWindow && !gameState.pendingEndPhaseDiscardPlayerId && !winnerName && (() => {
+            const attackAvatar = me.avatarZone.find(card => card.instanceId === selectedAttackerId);
+            if (!attackAvatar) return null;
+            const legalAvatarActions = attackCommittedId === selectedAttackerId
+              ? []
+              : deriveLegalAvatarActions(gameState, meId, attackAvatar);
+            return (
+              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-950/40 px-3 py-2">
+                <span className="text-[11px] font-bold text-red-100">เลือกโจมตีด้วย "{attackAvatar.card.name}"</span>
+                {attackCommittedId === selectedAttackerId ? (
+                  <span className="text-[10px] text-red-200">ประกาศโจมตีแล้ว — คลิกเป้าหมายฝ่ายตรงข้าม (Avatar หรือ LIFE)</span>
+                ) : legalAvatarActions.length > 0 ? (
+                  legalAvatarActions.map(action => (
+                    <button
+                      key={action.kind}
+                      type="button"
+                      onClick={() => confirmDeclareAttack(attackAvatar)}
+                      className="rounded-lg bg-red-600 px-3 py-1.5 text-[11px] font-bold text-white shadow transition hover:bg-red-500"
+                    >
+                      {action.label}
+                    </button>
+                  ))
+                ) : (
+                  <span className="text-[10px] text-red-300/80">เอนจินยังไม่อนุญาตการโจมตีในขณะนี้</span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAttackerId(null);
+                    setAttackCommittedId(null);
+                  }}
+                  className="rounded-lg border border-slate-600 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-800"
+                >
+                  ยกเลิก
+                </button>
+              </div>
+            );
+          })()}
+
           {/* ==================== PLAYER HAND FAN (tap-first) ==================== */}
           <div className="mt-1.5 rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
             <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
@@ -2272,12 +2396,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                           handleInitiatePlayCard(handCard);
                           return;
                         }
-                        if (isSelected) {
-                          setSelectedHandCardId(null);
-                          handleInitiatePlayCard(handCard);
-                        } else {
-                          setSelectedHandCardId(handCard.instanceId);
-                        }
+                        // Phase 6 tap-first: a tap only selects/deselects for inspection.
+                        // Dispatching happens exclusively through the confirmation bar.
+                        setSelectedHandCardId(tapHandCard({ selectedHandCardId }, handCard.instanceId).selectedHandCardId);
                       }}
                       onInspect={() => setInspectedCard(handCard)}
                     />
@@ -2286,7 +2407,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               })}
             </div>
 
-            {/* Tap-first action dock: executes only real engine actions */}
+            {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine */}
             {selectedHandCard && !gameState.pendingEndPhaseDiscardPlayerId && !gameState.reactionWindow && (
               <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 border-t border-amber-500/20 pt-1.5">
                 <span className="max-w-[10rem] truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
@@ -2295,19 +2416,26 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   ใช้ {selectedHandCard.card.cost ?? 0} · GEM {selectedHandCard.card.gem ?? 0}
                   {selectedHandCard.card.power ? ` · PWR ${selectedHandCard.card.power}` : ''}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedHandCardId(null);
-                    handleInitiatePlayCard(selectedHandCard);
-                  }}
-                  className="rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-slate-950 shadow transition hover:bg-amber-400"
-                >
-                  {selectedHandCard.card.type === 'Avatar' ? 'อัญเชิญ (Summon)'
-                    : selectedHandCard.card.type === 'Magic' ? 'ร่ายเวทย์ (Cast)'
-                    : selectedHandCard.card.type === 'Construct' ? 'ก่อสร้าง (Set)'
-                    : 'เล่นการ์ด'}
-                </button>
+                {(() => {
+                  const legalHandActions = deriveLegalHandActions(gameState, meId, selectedHandCard);
+                  if (legalHandActions.length === 0) {
+                    return (
+                      <span className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-slate-400">
+                        เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้ในสถานะปัจจุบัน
+                      </span>
+                    );
+                  }
+                  return legalHandActions.map(action => (
+                    <button
+                      key={action.kind}
+                      type="button"
+                      onClick={() => dispatchConfirmedHandAction(selectedHandCard, action.kind)}
+                      className="rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-slate-950 shadow transition hover:bg-amber-400"
+                    >
+                      {action.label}
+                    </button>
+                  ));
+                })()}
                 <button
                   type="button"
                   onClick={() => setInspectedCard(selectedHandCard)}
@@ -2317,7 +2445,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedHandCardId(null)}
+                  onClick={() => setSelectedHandCardId(cancelHandSelection().selectedHandCardId)}
                   className="rounded-lg border border-slate-600 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-800"
                 >
                   ยกเลิก

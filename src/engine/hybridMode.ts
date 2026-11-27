@@ -52,6 +52,35 @@ export function isCardFullyVerified(card: Card): boolean {
   return classifyCard(card).status === 'VERIFIED_WORKING';
 }
 
+/**
+ * Log markers the ability engine emits when it refuses to resolve a printed effect
+ * (see `executeCardAbility` in abilityEngine.ts). They are the engine's own signal
+ * that the hybrid pipeline could not carry the card further.
+ */
+const ENGINE_UNRESOLVED_MARKERS: readonly string[] = [
+  'ยังไม่รองรับ',
+  'ยังไม่มีตัวจัดการผลของความสามารถนี้'
+];
+
+/** True only when the engine itself reported that it could not resolve an effect. */
+export function engineRequiresManualResolution(logs: readonly string[]): boolean {
+  return logs.some(log => ENGINE_UNRESOLVED_MARKERS.some(marker => log.includes(marker)));
+}
+
+/**
+ * Phase 6: manual resolution is granular. A MANUAL/UNSUPPORTED classification badge
+ * alone never forces the fallback procedure — the manual confirmation flow is offered
+ * only when the engine actually ran the card's resolution pipeline and reported that
+ * it could not resolve the printed effect.
+ */
+export function shouldOfferManualResolution(
+  classification: CardClassification,
+  logs: readonly string[]
+): boolean {
+  if (classification.status === 'VERIFIED_WORKING') return false;
+  return engineRequiresManualResolution(logs);
+}
+
 /** Auto-Strict rooms reject any deck containing a card the engine cannot resolve automatically. */
 export function deckViolatesAutoStrict(cards: readonly Card[]): Card | null {
   return cards.find(card => !isCardFullyVerified(card)) ?? null;
