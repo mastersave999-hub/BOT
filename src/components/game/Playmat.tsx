@@ -1093,8 +1093,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   // Automated AI Opponent Turn for smooth single-player testing.
   // Plays one action at a time with human-like pauses so the player can follow
   // each decision instead of the whole turn resolving in a single instant.
-  const AI_STEP_MIN_MS = 900;
-  const AI_STEP_JITTER_MS = 700;
+  const AI_STEP_MIN_MS = 1100;
+  const AI_STEP_JITTER_MS = 900;
 
   const runAiOpponentTurn = (startState: GameState, resumeAfterReaction = false, savedLogs: string[] = []) => {
     const token = ++aiTurnTokenRef.current;
@@ -2469,7 +2469,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — แตะเพื่อเลือก แล้วกดปุ่มสั่งการ`}</span>
               <span className="text-[10px]">แตะ 1 ครั้ง = เลือก/ดูตัวอย่าง · กด <b className="text-amber-300">i</b> เพื่อตรวจการ์ด</span>
             </div>
-            <div className="bot-hand-fan flex items-end justify-start overflow-x-auto pb-1 sm:justify-center">
+            {/* w-max + mx-auto keeps the fan centered when it fits and still lets
+                overflow-x scroll reach every card (justify-center would clip the left edge). */}
+            <div className="overflow-x-auto pb-1">
+              <div className="bot-hand-fan mx-auto flex w-max items-end">
               {me.hand.map((handCard, handIndex) => {
                 const center = (me.hand.length - 1) / 2;
                 const offset = handIndex - center;
@@ -2503,6 +2506,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   </div>
                 );
               })}
+              </div>
             </div>
 
             {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine */}

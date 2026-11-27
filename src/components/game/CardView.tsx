@@ -2,8 +2,7 @@
 
 import React from 'react';
 import { CardInstance } from '../../engine/types';
-import { calculateNetPower } from '../../engine/layers';
-import { CardBack, ClassificationBadge } from './botTheme';
+import { CardBack } from './botTheme';
 import { Info } from 'lucide-react';
 
 interface CardProps {
@@ -63,6 +62,8 @@ export const CardView: React.FC<CardProps> = ({
 
   const borderClass = colorAccents[card.color] || 'border-slate-600 shadow-slate-950/50';
 
+  // Card face only: full-bleed artwork with a name strip. Stats, cost and rules
+  // live in the detail view (tap the info button or select the card).
   return (
     <div
       onClick={onClick}
@@ -70,99 +71,47 @@ export const CardView: React.FC<CardProps> = ({
         e.preventDefault();
         onInspect?.();
       }}
-      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 bot-card-depth flex flex-col overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${
+      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 bot-card-depth overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${
         isRested ? 'rotate-90 origin-center my-3' : ''
       } ${isSelected ? 'ring-2 ring-amber-400 shadow-lg shadow-amber-500/30' : ''} ${className}`}
       title={card.name}
     >
-      {/* Top Header: Cost, GEM, Name */}
-      <div className="bg-slate-950/90 px-1 py-0.5 flex items-center justify-between border-b border-slate-800 text-[10px]">
-        <div className="flex items-center space-x-1">
-          {card.cost !== undefined && (
-            <span className="w-3.5 h-3.5 rounded bg-amber-600 text-white font-bold flex items-center justify-center text-[9px]">
-              {card.cost}
-            </span>
-          )}
-          {card.gem !== undefined && card.gem > 0 && (
-            <span className="w-3.5 h-3.5 rounded-full bg-emerald-600 text-white font-bold flex items-center justify-center text-[9px]">
-              {card.gem}
-            </span>
-          )}
-        </div>
-        <span className="font-semibold text-slate-200 truncate flex-1 min-w-0 text-center px-1">
+      {card.imageUrl ? (
+        <img
+          src={card.imageUrl}
+          alt={card.name}
+          referrerPolicy="no-referrer"
+          crossOrigin="anonymous"
+          className="absolute inset-0 h-full w-full object-cover"
+          loading="lazy"
+          onError={(e) => {
+            // Hide the broken image so the name fallback below stays readable.
+            (e.target as HTMLElement).style.display = 'none';
+          }}
+        />
+      ) : null}
+
+      {/* Name strip doubles as the fallback face when no artwork loaded. */}
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950 via-slate-950/90 to-transparent px-1 pb-1 pt-3">
+        <span className="block truncate text-center font-semibold leading-tight text-slate-100">
           {card.name}
         </span>
       </div>
 
-      {/* Card Artwork / Image */}
-      <div className="flex-1 relative bg-slate-950 flex items-center justify-center overflow-hidden">
-        {/* AUTO/MANUAL resolution badge (classifyCard) — compact corner tag, never covers the art */}
-        <div className="absolute bottom-0.5 left-0.5 z-10">
-          <ClassificationBadge card={card} size="sm" />
-        </div>
-        {card.imageUrl ? (
-          <img
-            src={card.imageUrl}
-            alt={card.name}
-            referrerPolicy="no-referrer"
-            crossOrigin="anonymous"
-            className="w-full h-full object-cover"
-            loading="lazy"
-            onError={(e) => {
-              // Fallback to text placeholder on load fail
-              (e.target as HTMLElement).style.display = 'none';
-            }}
-          />
-        ) : null}
-        <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-80" />
-        {onInspect && (
-          <button
-            type="button"
-            aria-label={`ดูความสามารถ ${card.name}`}
-            title="ดูความสามารถการ์ด"
-            onClick={(e) => {
-              e.stopPropagation();
-              onInspect();
-            }}
-            className="absolute top-1 right-1 z-10 w-5 h-5 rounded-full bg-slate-950/90 border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950 transition"
-          >
-            <Info className="w-3 h-3" />
-          </button>
-        )}
-      </div>
-
-      {/* Card Footer: Power / Type — the type label shrinks with an ellipsis and the
-          PWR badge never wraps, so the two can never collide on 64px-wide cards. */}
-      <div className={`bg-slate-950/95 px-1 py-0.5 flex items-center justify-between gap-1 border-t border-slate-800 ${size === 'sm' ? 'text-[8px]' : 'text-[9px]'}`}>
-        <span className="text-slate-400 font-medium truncate min-w-0 flex-1 flex items-center gap-0.5">
-          {card.type}
-          {cardInstance.attachedInstances && cardInstance.attachedInstances.length > 0 && (
-            <span className="text-indigo-400 font-bold shrink-0" title="มีการ์ดสวมใส่">
-              +{cardInstance.attachedInstances.length}
-            </span>
-          )}
-        </span>
-        {card.type === 'Avatar' && (() => {
-          const netPwr = calculateNetPower(cardInstance);
-          const isBuffed = netPwr > card.power;
-          const isDebuffed = netPwr < card.power;
-          return (
-            <span
-              title={`POWER ${netPwr}`}
-              aria-label={`POWER ${netPwr}`}
-              className={`shrink-0 whitespace-nowrap font-bold px-1 rounded border ${
-                isBuffed
-                  ? 'text-emerald-300 bg-emerald-950/90 border-emerald-600/60'
-                  : isDebuffed
-                  ? 'text-amber-300 bg-amber-950/90 border-amber-600/60'
-                  : 'text-red-400 bg-red-950/80 border-red-800/60'
-              }`}
-            >
-              {size === 'sm' ? netPwr : `PWR ${netPwr}`}
-            </span>
-          );
-        })()}
-      </div>
+      {onInspect && (
+        <button
+          type="button"
+          aria-label={`ดูรายละเอียด ${card.name}`}
+          title="ดูรายละเอียดการ์ด"
+          onClick={(e) => {
+            e.stopPropagation();
+            onInspect();
+          }}
+          className="absolute top-1 right-1 z-10 w-5 h-5 rounded-full bg-slate-950/90 border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950 transition"
+        >
+          <Info className="w-3 h-3" />
+        </button>
+      )}
     </div>
   );
 };
