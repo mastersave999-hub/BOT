@@ -86,6 +86,7 @@ export interface CardInstance {
   registeredActivatedAbilities?: import('./cardTextAdapter').ParsedCardTextClause[];
   registeredContinuousAbilities?: import('./cardTextAdapter').ParsedCardTextClause[];
   cardTextContinuousEffects?: ContinuousPowerEffect[];
+  destroyAtEndPhase?: { playerId: string; turnNumber: number };
   layerModifiers: {
     layer: 1 | 2 | 3 | 4;
     powerMod: number;
@@ -279,6 +280,8 @@ export interface PendingHellChoice {
   maxSelect: number;
   cardType: 'Avatar' | 'Construct' | 'Magic';
   names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }>;
+  symbol?: string;
+  powerAtMost?: number;
   destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish' | 'avatarZone';
   rested?: boolean;
   expectedRevision: number;

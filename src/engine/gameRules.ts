@@ -116,7 +116,9 @@ export function validateGameState(state: GameState): string | null {
       new Set(pending.candidateInstanceIds).size !== pending.candidateInstanceIds.length ||
       pending.candidateInstanceIds.some(id => typeof id !== 'string' || !player.hell.some(card => card.instanceId === id && card.card.type === pending.cardType)) ||
       (pending.names !== undefined && (!Array.isArray(pending.names) || pending.names.some(name => !name.value ||
-        !['DELIMITED_WORD_SEQUENCE', 'EXACT_CARD_NAME'].includes(name.matching))))) {
+        !['DELIMITED_WORD_SEQUENCE', 'EXACT_CARD_NAME'].includes(name.matching)))) ||
+      (pending.symbol !== undefined && !pending.symbol.trim()) ||
+      (pending.powerAtMost !== undefined && (!Number.isFinite(pending.powerAtMost) || pending.powerAtMost < 0))) {
       return 'Invalid pending Hell choice';
     }
   }
