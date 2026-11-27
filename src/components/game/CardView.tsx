@@ -3,7 +3,7 @@
 import React from 'react';
 import { CardInstance } from '../../engine/types';
 import { calculateNetPower } from '../../engine/layers';
-import { ClassificationBadge } from './botTheme';
+import { CardBack, ClassificationBadge } from './botTheme';
 import { Info } from 'lucide-react';
 
 interface CardProps {
@@ -43,14 +43,11 @@ export const CardView: React.FC<CardProps> = ({
           e.preventDefault();
           onInspect?.();
         }}
-        className={`relative ${sizeClasses} rounded-lg border-2 border-slate-700 bg-gradient-to-br from-red-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center shadow-lg transition-transform hover:scale-105 cursor-pointer ${
+        className={`relative ${sizeClasses} rounded-lg border-2 border-slate-700 shadow-lg transition-transform hover:scale-105 cursor-pointer ${
           isRested ? 'rotate-90 origin-center my-2' : ''
         } ${className}`}
       >
-        <div className="w-8 h-8 rounded-full border border-amber-500/50 flex items-center justify-center bg-slate-950/80">
-          <span className="text-amber-500 font-bold text-xs">BOT</span>
-        </div>
-        <span className="text-[9px] text-amber-500/80 mt-1 font-semibold tracking-wider">ตลิ่งชัน</span>
+        <CardBack className="absolute inset-0" />
       </div>
     );
   }

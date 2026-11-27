@@ -74,10 +74,10 @@ import {
   ManualOverrideBanner,
   ManualOverrideControls
 } from './Phase5Modals';
-import { ClassificationBadge, OrnamentDivider } from './botTheme';
+import { CardBack, CARD_BACK_SRC, ClassificationBadge, OrnamentDivider } from './botTheme';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
-  CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info, List
+  CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List
 } from 'lucide-react';
 
 interface PlaymatProps {
@@ -212,6 +212,23 @@ interface LifeCardTileProps {
   onInspect: () => void;
 }
 
+/** Stacked face-down deck pile rendered with the official card back. */
+const DeckPile: React.FC<{ count: number }> = ({ count }) => (
+  <span className="relative block h-14 w-10 sm:h-16 sm:w-11" aria-hidden="true">
+    {count === 0 ? (
+      <span className="absolute inset-0 flex items-center justify-center rounded-lg border-2 border-dashed border-slate-700 bg-slate-950/60 text-[9px] font-bold text-slate-600">
+        ว่าง
+      </span>
+    ) : (
+      <>
+        {count > 2 && <CardBack className="absolute inset-0 translate-x-1 translate-y-1 rotate-2 opacity-70" />}
+        {count > 1 && <CardBack className="absolute inset-0 -translate-x-0.5 translate-y-0.5 -rotate-1 opacity-85" />}
+        <CardBack className="absolute inset-0" />
+      </>
+    )}
+  </span>
+);
+
 const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, compact = false, onInspect }) => (
   <button
     type="button"
@@ -223,9 +240,12 @@ const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, compact = fals
     <span className={`absolute inset-0 overflow-hidden rounded ${card.isFaceUp ? 'life-card-flip' : ''}`}>
       <span
         aria-hidden="true"
-        className={`absolute inset-0 flex items-center justify-center rounded bg-slate-900 text-emerald-400 transition-opacity duration-150 ${card.isFaceUp ? 'opacity-0' : 'opacity-100'}`}
+        className={`absolute inset-0 transition-opacity duration-150 ${card.isFaceUp ? 'opacity-0' : 'opacity-100'}`}
       >
-        LIFE #{index + 1}
+        <CardBack className="absolute inset-0" />
+        <span className="absolute inset-x-0 bottom-0 bg-black/75 py-px text-center text-[7px] font-bold tracking-wide text-amber-300/90">
+          #{index + 1}
+        </span>
       </span>
       <span className={`absolute inset-0 overflow-hidden rounded transition-opacity duration-300 ${card.isFaceUp ? 'opacity-100' : 'opacity-0'}`}>
         <img
@@ -1823,16 +1843,23 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               </span>
             )}
           </div>
-          <span className="shrink-0">มือ: {boardPlayer.hand.length} | เด็ค: {boardPlayer.deck.length}</span>
+          <span className="flex shrink-0 items-center gap-1.5">
+            <span className="flex gap-0.5" aria-hidden="true">
+              {boardPlayer.hand.slice(0, 8).map((_, handIdx) => (
+                <CardBack key={handIdx} className="h-4 w-3" />
+              ))}
+            </span>
+            <span>มือ {boardPlayer.hand.length} · เด็ค {boardPlayer.deck.length}</span>
+          </span>
         </div>
 
         {/* Opponent 3-Column Body (Mirrored: Deck/Hell Left | Avatar+Magic Center | Life Right) */}
         <div className="grid grid-cols-12 items-stretch gap-1.5 sm:gap-2">
           {/* Left Col: Deck & Hell (2 cols) */}
           <div className="col-span-2 flex flex-col gap-1.5">
-            <div className="flex flex-1 flex-col items-center justify-center rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center">
-              <span className="text-[9px] font-bold text-amber-300/80">Deck กองจั่ว</span>
-              <span className="text-sm font-black text-slate-200">{boardPlayer.deck.length}</span>
+            <div className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center">
+              <DeckPile count={boardPlayer.deck.length} />
+              <span className="text-[9px] font-bold text-amber-300/80">Deck {boardPlayer.deck.length}</span>
             </div>
             <div
               onClick={() => {
@@ -2110,8 +2137,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
       {/* Main Playmat + Side Event Log */}
       <main className="flex-1 flex overflow-hidden relative">
-        {/* Official Playmat Arena */}
-        <div className="flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto bot-felt">
+        {/* Official Playmat Arena — felt carries the printed emblem watermark and gold corner brackets. */}
+        <div className="bot-felt relative flex min-h-0 flex-1">
+          {/* Diegetic playmat art: the official card-back emblem printed on the felt. */}
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center">
+            <img
+              src={CARD_BACK_SRC}
+              alt=""
+              className="max-h-[72%] max-w-[46%] object-contain opacity-[0.08] mix-blend-screen"
+            />
+          </div>
+          <span aria-hidden="true" className="bot-corner bot-corner-tl" />
+          <span aria-hidden="true" className="bot-corner bot-corner-tr" />
+          <span aria-hidden="true" className="bot-corner bot-corner-bl" />
+          <span aria-hidden="true" className="bot-corner bot-corner-br" />
+          <div className="relative z-10 flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto">
           {/* ==================== OPPONENT PLAYMAT BOARDS (2/3/4-player layouts) ==================== */}
           {/* 2 players: one full-width mirrored board. 3 players: two boards side by side.
               4 players: three boards in a responsive row — every participant keeps a clearly
@@ -2314,10 +2354,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* DECK ZONE */}
-                <div className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-center text-center">
-                  <Layers className="w-4 h-4 text-amber-400 mb-0.5" />
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck</span>
-                  <span className="text-[9px] text-slate-400">กองจั่ว ({me.deck.length})</span>
+                <div className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-center gap-1 text-center">
+                  <DeckPile count={me.deck.length} />
+                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck {me.deck.length}</span>
                 </div>
               </div>
             </div>
@@ -2453,6 +2492,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               </div>
             )}
           </div>
+        </div>
         </div>
 
         {showEventLog && (
