@@ -10,6 +10,7 @@ import type {
   PendingManualOverride,
 } from '../../engine/types';
 import { describeManualOverrideAction } from '../../engine/hybridMode';
+import { ClassificationBadge, OrnamentDivider } from './botTheme';
 
 function findInstances(state: GameState, ownerPlayerId: string, zone: 'deck' | 'hell', ids: string[]): Card[] {
   const player = state.players[ownerPlayerId];
@@ -39,8 +40,8 @@ export const DeckChoiceModal: React.FC<DeckChoiceModalProps> = ({ pending, state
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="deck-choice-title" className="bg-slate-900 border-2 border-amber-500/60 rounded-2xl max-w-lg w-full p-4 space-y-3 max-h-[85vh] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+      <div role="dialog" aria-modal="true" aria-labelledby="deck-choice-title" className="rounded-2xl border border-amber-500/60 bg-slate-900 max-w-lg w-full p-4 space-y-3 max-h-[85vh] overflow-y-auto shadow-2xl">
+        <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
           <h3 id="deck-choice-title" className="font-bold text-sm text-amber-400">{label} — เลือก {pending.minSelect === pending.maxSelect ? pending.minSelect : `${pending.minSelect}-${pending.maxSelect}`} ใบ</h3>
         </div>
         <p className="text-[11px] text-slate-400">{destinationLabel} (ด้านบนสุดของ Deck ก่อน)</p>
@@ -58,7 +59,10 @@ export const DeckChoiceModal: React.FC<DeckChoiceModalProps> = ({ pending, state
                 onClick={() => setSelected(prev => isSelected ? prev.filter(id => id !== instanceId) : [...prev, instanceId])}
                 className={`text-left px-3 py-2 rounded-lg border text-[11px] transition ${isSelected ? 'border-amber-400 bg-amber-950/50 text-amber-100' : 'border-slate-700 bg-slate-950 text-slate-200 hover:border-amber-500/60'} disabled:opacity-50`}
               >
-                <span className="font-bold block truncate">{card.name}</span>
+                <span className="flex items-center gap-1.5">
+                  <ClassificationBadge card={card} size="sm" />
+                  <span className="font-bold truncate">{card.name}</span>
+                </span>
                 <span className="text-[9px] text-slate-400">{card.type}{card.subtype ? ` · ${card.subtype}` : ''} · Cost {card.cost} · {card.printId}</span>
               </button>
             );
@@ -99,8 +103,8 @@ export const HellChoiceModal: React.FC<HellChoiceModalProps> = ({ pending, state
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="hell-choice-title" className="bg-slate-900 border-2 border-red-500/60 rounded-2xl max-w-lg w-full p-4 space-y-3 max-h-[85vh] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+      <div role="dialog" aria-modal="true" aria-labelledby="hell-choice-title" className="rounded-2xl border border-red-500/60 bg-slate-900 max-w-lg w-full p-4 space-y-3 max-h-[85vh] overflow-y-auto shadow-2xl">
+        <div className="flex items-center justify-between border-b border-red-500/20 pb-2">
           <h3 id="hell-choice-title" className="font-bold text-sm text-red-400">
             เลือกจากนรก ({pending.effectKind === 'summon_from_hell' ? 'อัญเชิญจากนรก' : 'นำกลับจากนรก'}) — {pending.minSelect} ใบ
           </h3>
@@ -120,7 +124,10 @@ export const HellChoiceModal: React.FC<HellChoiceModalProps> = ({ pending, state
                 onClick={() => setSelected(prev => isSelected ? prev.filter(id => id !== instanceId) : [...prev, instanceId])}
                 className={`text-left px-3 py-2 rounded-lg border text-[11px] transition ${isSelected ? 'border-red-400 bg-red-950/50 text-red-100' : 'border-slate-700 bg-slate-950 text-slate-200 hover:border-red-500/60'} disabled:opacity-50`}
               >
-                <span className="font-bold block truncate">{card.name}</span>
+                <span className="flex items-center gap-1.5">
+                  <ClassificationBadge card={card} size="sm" />
+                  <span className="font-bold truncate">{card.name}</span>
+                </span>
                 <span className="text-[9px] text-slate-400">{card.type} · POWER {card.power} · {card.printId}</span>
               </button>
             );
@@ -175,18 +182,21 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
-      <div role="dialog" aria-modal="true" aria-labelledby="manual-controls-title" className="bg-slate-900 border-2 border-purple-500/60 rounded-2xl max-w-lg w-full p-4 space-y-3 max-h-[88vh] overflow-y-auto">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-          <h3 id="manual-controls-title" className="font-bold text-sm text-purple-300 flex items-center gap-1.5">
+      <div role="dialog" aria-modal="true" aria-labelledby="manual-controls-title" className="rounded-2xl border border-amber-500/60 bg-slate-900 max-w-lg w-full p-4 space-y-3 max-h-[88vh] overflow-y-auto shadow-2xl">
+        <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+          <h3 id="manual-controls-title" className="font-bold text-sm text-amber-300 flex items-center gap-1.5">
             <Wrench className="w-4 h-4" /> Manual Effect Resolution — ช่องทางจัดการด้วยมือ
           </h3>
           <button type="button" aria-label="ปิดช่องทางจัดการด้วยมือ" onClick={onClose} className="text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
 
         {manualCard && (
-          <div className="rounded-lg border border-purple-500/40 bg-purple-950/30 p-2 space-y-1">
-            <p className="text-[11px] font-bold text-purple-200">
-              การ์ด: {manualCard.card.name} · สถานะ: {manualCard.status === 'AMBIGUOUS' ? 'AMBIGUOUS (คำสับสน)' : 'UNSUPPORTED (ยังไม่รองรับ)'}
+          <div className="rounded-lg border border-red-500/40 bg-red-950/30 p-2 space-y-1">
+            <p className="flex items-center gap-1.5 text-[11px] font-bold text-amber-100">
+              การ์ด: {manualCard.card.name}
+              <span className="rounded border border-amber-400/70 bg-red-950/90 px-1.5 py-0.5 text-[9px] font-black tracking-widest text-amber-300">
+                {manualCard.status === 'AMBIGUOUS' ? 'MANUAL · AMBIGUOUS' : 'MANUAL · UNSUPPORTED'}
+              </span>
             </p>
             <p className="text-[10px] text-slate-300 whitespace-pre-line max-h-24 overflow-y-auto">{manualCard.card.mainEffect}</p>
             <p className="text-[9px] text-slate-500">ทุกการกระทำต้องได้รับการยืนยันจากคู่แข่ง และถูกบันทึกใน Match Action Log</p>
@@ -293,17 +303,17 @@ export const ManualOverrideBanner: React.FC<ManualOverrideBannerProps> = ({ pend
   const isActor = pending.actorId === meId;
   const context = pending.context;
   return (
-    <section aria-label="Manual override approval" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-purple-400/50 bg-purple-950/95 px-3 py-2 text-xs text-purple-100">
+    <section aria-label="Manual override approval" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-amber-400/50 bg-red-950/95 px-3 py-2 text-xs text-amber-100">
       <div className="mr-auto min-w-0 space-y-0.5">
         <p className="font-bold">
           Manual Override · {state.players[pending.actorId]?.name ?? pending.actorId}
           {context?.cardName ? ` · ${context.cardName} (${context.cardStatus ?? 'Manual Effect Resolution'})` : ''}
         </p>
-        <p className="text-[11px] text-purple-200">{describeManualOverrideAction(state, pending.action)}</p>
-        {context?.cardText && <p className="text-[10px] text-purple-300/80 line-clamp-2">{context.cardText}</p>}
+        <p className="text-[11px] text-amber-200">{describeManualOverrideAction(state, pending.action)}</p>
+        {context?.cardText && <p className="text-[10px] text-amber-300/80 line-clamp-2">{context.cardText}</p>}
       </div>
       {isActor ? (
-        <span className="flex items-center gap-1.5 text-[11px] text-purple-300"><Loader2 className="w-3.5 h-3.5 animate-spin" /> รอคู่แข่งยืนยัน…</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-amber-300"><Loader2 className="w-3.5 h-3.5 animate-spin" /> รอคู่แข่งยืนยัน…</span>
       ) : (
         <span className="flex items-center gap-2">
           <button type="button" onClick={onApprove} className="rounded bg-emerald-400 px-3 py-1.5 font-bold text-slate-950 flex items-center gap-1"><ShieldCheck className="w-3.5 h-3.5" /> ยืนยัน</button>

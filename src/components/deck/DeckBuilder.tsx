@@ -3,6 +3,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Card } from '../../engine/types';
 import { validateDeck, DeckValidationResult } from '../../engine/deckValidator';
+import { ClassificationBadge, getCardClassification } from '../game/botTheme';
 import allCardsData from '../../../cards_clean.json';
 import starterDeckData from '../../engine/starterDeck.json';
 import {
@@ -93,6 +94,9 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
   const [selectedColor, setSelectedColor] = useState<string>('ALL');
   const [activeTab, setActiveTab] = useState<'MAIN' | 'LIFE'>('MAIN');
 
+  // Phase 6: AUTO/MANUAL engine-resolution filter (classifyCard is the single source of truth)
+  const [resolutionFilter, setResolutionFilter] = useState<'ALL' | 'AUTO' | 'MANUAL'>('ALL');
+
   // Mobile drawer/view toggle: 'POOL' or 'DECK'
   const [mobileView, setMobileView] = useState<'POOL' | 'DECK'>('POOL');
 
@@ -120,16 +124,28 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
         c.mainEffect.toLowerCase().includes(searchTerm.toLowerCase());
       const matchType = selectedType === 'ALL' || c.type === selectedType;
       const matchColor = selectedColor === 'ALL' || c.color === selectedColor;
-      return matchSearch && matchType && matchColor;
+      const status = getCardClassification(c).status;
+      const matchResolution =
+        resolutionFilter === 'ALL' ||
+        (resolutionFilter === 'AUTO' && status === 'VERIFIED_WORKING') ||
+        (resolutionFilter === 'MANUAL' && status !== 'VERIFIED_WORKING');
+      return matchSearch && matchType && matchColor && matchResolution;
     });
-  }, [allCards, searchTerm, selectedType, selectedColor]);
+  }, [allCards, searchTerm, selectedType, selectedColor, resolutionFilter]);
 
   // Pagination for high-performance rendering of 2,014 cards
   const [displayLimit, setDisplayLimit] = useState<number>(48);
 
   useEffect(() => {
     setDisplayLimit(48);
-  }, [searchTerm, selectedType, selectedColor]);
+  }, [searchTerm, selectedType, selectedColor, resolutionFilter]);
+
+  // Live AUTO/MANUAL breakdown of the current deck (50 Main + 5 LIFE)
+  const deckBreakdown = useMemo(() => {
+    const all = [...mainDeck, ...lifeDeck];
+    const auto = all.filter(c => getCardClassification(c).status === 'VERIFIED_WORKING').length;
+    return { auto, manual: all.length - auto, total: all.length };
+  }, [mainDeck, lifeDeck]);
 
   const visibleCards = useMemo(() => {
     return filteredCards.slice(0, displayLimit);
@@ -402,6 +418,32 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
                 </button>
               ))}
             </div>
+
+            {/* AUTO/MANUAL engine-resolution filter + live deck breakdown (classifyCard) */}
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] md:text-xs">
+              <span className="text-slate-500 shrink-0">สถานะเอนจิน:</span>
+              {(['ALL', 'AUTO', 'MANUAL'] as const).map(mode => (
+                <button
+                  key={mode}
+                  onClick={() => setResolutionFilter(mode)}
+                  aria-pressed={resolutionFilter === mode}
+                  className={`px-2 py-0.5 rounded shrink-0 border transition font-semibold ${
+                    resolutionFilter === mode
+                      ? mode === 'AUTO'
+                        ? 'bg-emerald-950 text-emerald-300 border-emerald-500/60'
+                        : mode === 'MANUAL'
+                          ? 'bg-red-950 text-amber-300 border-amber-500/60'
+                          : 'bg-amber-500 text-slate-950 border-amber-500 font-bold'
+                      : 'bg-slate-900 text-slate-400 border border-slate-800 hover:bg-slate-800'
+                  }`}
+                >
+                  {mode === 'ALL' ? 'ทั้งหมด' : mode}
+                </button>
+              ))}
+              <span className="ml-auto rounded border border-amber-500/30 bg-slate-950/80 px-2 py-0.5 text-[10px] text-slate-300">
+                เด็ค: <b className="text-emerald-400">AUTO {deckBreakdown.auto}</b> · <b className="text-amber-300">MANUAL {deckBreakdown.manual}</b> / {deckBreakdown.total} ใบ (Main 50 + LIFE 5)
+              </span>
+            </div>
           </div>
 
           {/* Scrollable Card Pool Wrapper */}
@@ -435,6 +477,7 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
                       <span className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-slate-950/90 text-amber-400 border border-slate-800">
                         {card.printId}
                       </span>
+                      <ClassificationBadge card={card} size="sm" />
                     </div>
 
                     {card.isOnlyOne && (
@@ -653,6 +696,7 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
                         <div className="truncate">
                           <div className="flex items-center gap-1.5">
                             <span className="font-bold text-slate-100 truncate text-xs">{card.name}</span>
+                            <ClassificationBadge card={card} size="sm" />
                             {card.isOnlyOne && (
                               <span className="px-1 py-0.2 rounded bg-red-600 text-white text-[8px] font-bold shrink-0">
                                 Only #1
@@ -782,7 +826,10 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
                           />
                         </div>
                         <div className="truncate">
-                          <span className="font-bold text-slate-100 block text-xs truncate">{card.name}</span>
+                          <span className="flex items-center gap-1.5">
+                            <span className="font-bold text-slate-100 block text-xs truncate">{card.name}</span>
+                            <ClassificationBadge card={card} size="sm" />
+                          </span>
                           <span className="text-[10px] text-slate-400">{card.type} • {card.printId} • ใช้ {card.cost ?? 0}</span>
                         </div>
                       </div>
@@ -839,9 +886,12 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
             </div>
 
             <div className="p-4 space-y-2">
-              <div className="flex items-center justify-between">
-                <h3 className="font-bold text-base text-amber-400">{previewCard.name}</h3>
-                <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="flex items-center gap-2 font-bold text-base text-amber-400 min-w-0">
+                  <span className="truncate">{previewCard.name}</span>
+                  <ClassificationBadge card={previewCard} size="md" />
+                </h3>
+                <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 shrink-0">
                   {previewCard.printId}
                 </span>
               </div>
