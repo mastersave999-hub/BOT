@@ -29,7 +29,7 @@ import {
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
 import { OpeningDiceRoll } from './OpeningDiceRoll';
-import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, nextPhaseAfterMain, transitionGamePhase } from '../../engine/turnEngine';
+import { executeDrawPhase, eliminatePlayer, finishEndPhaseTurn, mainPhaseAdvanceLabel, nextPhaseAfterMain, transitionGamePhase } from '../../engine/turnEngine';
 import { declareCombatAttack, payCombatKeyword, resolveDeclaredBattle } from '../../engine/combatKeywords';
 import { resolveAvatarCombat } from '../../engine/combatEngine';
 import {
@@ -205,6 +205,19 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
   );
 };
 
+/** True below the `sm` breakpoint (360-412px phones): tiles tighten to keep the whole playmat reachable. */
+function useCompactViewport(): boolean {
+  const [isCompact, setIsCompact] = useState(false);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 639px)');
+    const onChange = (event: MediaQueryListEvent) => setIsCompact(event.matches);
+    setIsCompact(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  return isCompact;
+}
+
 interface LifeCardTileProps {
   card: CardInstance;
   index: number;
@@ -325,6 +338,7 @@ const AvatarStatusChips: React.FC<{ avatar: CardInstance }> = ({ avatar }) => {
 
 export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, isHost = true, link }) => {
   const [gameState, setGameState] = useState<GameState>(() => recomputeContinuousAuras(initialState));
+  const isCompactViewport = useCompactViewport();
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<CardInstance | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
@@ -1043,8 +1057,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
 
     if (gameState.currentPhase === 'MAIN') {
-      const firstPlayerSkipsBattle = gameState.turnNumber === 1 && gameState.currentTurnPlayerIndex === 0;
-      const phase = firstPlayerSkipsBattle ? 'END' : 'BATTLE';
+      // The button label and this transition share one source of truth: nextPhaseAfterMain().
+      const phase = nextPhaseAfterMain(gameState, meId);
+      const firstPlayerSkipsBattle = phase === 'END';
       setGameState(prev => appendLogs(
         transitionGamePhase(prev, meId, phase),
         [firstPlayerSkipsBattle ? `${me.name} ข้าม Battle Phase ในเทิร์นแรก` : `${me.name} เข้าสู่ Battle Phase`],
@@ -1881,10 +1896,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <span>{boardPlayer.magicZone.length} ใบที่ใช้แล้ว</span>
             </div>
 
-            {/* Opponent Avatar Zone (Max 4) */}
-            <div className={`relative flex items-center justify-center gap-2 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)] ${compact ? 'min-h-[96px]' : 'min-h-[115px] sm:min-h-[135px]'}`}>
+            {/* Opponent Avatar Zone (Avatar max 4, total with Tokens max 6 — Rule Book 3.2 Board Area 1) */}
+            <div className={`relative flex items-center justify-center gap-2 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)] ${compact ? 'min-h-[96px]' : 'min-h-[96px] sm:min-h-[135px]'}`}>
               {boardPlayer.avatarZone.length === 0 ? (
-                <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (สูงสุด 4 ใบ)</span>
+                <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (Avatar ≤ 4 · รวม Token ≤ 6)</span>
               ) : (
                 boardPlayer.avatarZone.map(avatar => (
                   <div key={avatar.instanceId} className="relative flex flex-col items-center">
@@ -1995,8 +2010,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span>
-                  {gameState.currentPhase === 'MAIN' && gameState.turnNumber === 1 && gameState.currentTurnPlayerIndex === 0 && 'ข้าม Battle → End Phase'}
-                  {gameState.currentPhase === 'MAIN' && !(gameState.turnNumber === 1 && gameState.currentTurnPlayerIndex === 0) && 'เข้า Battle Phase'}
+                  {gameState.currentPhase === 'MAIN' && mainPhaseAdvanceLabel(gameState, meId)}
                   {gameState.currentPhase === 'BATTLE' && 'เข้า End Phase'}
                   {gameState.currentPhase === 'END' && 'จบเทิร์น'}
                 </span>
@@ -2179,9 +2193,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
           {/* ==================== SHARED CENTER & MY TOP ROW (Matches Playmat Top Row!) ==================== */}
           {/* Construct Zone (Left 37%) | Land Magic Zone (Center 26%) | Dark Dimension (Right 37%) */}
-          <div className="grid grid-cols-12 gap-2 my-1.5 items-stretch">
+          <div className="grid grid-cols-12 gap-1.5 my-1 sm:gap-2 sm:my-1.5 items-stretch">
             {/* Construct Zone (Left ~37% -> 4.5 cols, use col-span-5) */}
-            <div className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px] shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+            <div className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[56px] sm:min-h-[70px] shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
               <div className="flex items-center justify-between text-[10px]">
                 <span className="font-bold text-amber-300/90">Construct Zone</span>
                 <span className="text-slate-400 text-[9px]">มี Construct บนสนามได้สูงสุด 3 ใบ ({me.constructZone.length}/3)</span>
@@ -2225,7 +2239,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             {/* Dark Dimension Zone (Rule Book 3.2 Zone 7 — มิติมืด, public banish pile) */}
             <div
               onClick={() => setShowDarkDimensionModal(true)}
-              className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px] cursor-pointer hover:border-amber-400/50 transition shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]"
+              className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[56px] sm:min-h-[70px] cursor-pointer hover:border-amber-400/50 transition shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]"
               title="คลิกเพื่อดูการ์ดในมิติมืด"
             >
               <div className="flex items-center justify-between text-[10px]">
@@ -2243,7 +2257,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           {/* ==================== MY PLAYMAT HALF (EXACT OFFICIAL PROPORTIONS) ==================== */}
           <OrnamentDivider className="my-1" label="สนามของคุณ" />
           <div className="rounded-2xl border border-amber-500/25 bg-slate-950/70 p-2 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_4px_14px_rgba(0,0,0,0.5)]">
-            <div className="grid grid-cols-12 gap-2 items-stretch">
+            <div className="grid grid-cols-12 gap-1.5 sm:gap-2 items-stretch">
               {/* LEFT COLUMN: LIFE ZONE (Full Height spanning Avatar + Magic rows) */}
               <div className="col-span-2 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-between">
                 <div className="text-center">
@@ -2257,6 +2271,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                       key={lifeCard.instanceId || idx}
                       card={lifeCard}
                       index={idx}
+                      compact={isCompactViewport}
                       onInspect={() => setInspectedCard(lifeCard)}
                     />
                   ))}
@@ -2270,17 +2285,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               </div>
 
               {/* CENTER COLUMN: AVATAR ZONE (TOP) + MAGIC ZONE (BOTTOM) */}
-              <div className="col-span-8 flex flex-col gap-2">
-                {/* AVATAR ZONE */}
-                <div className="min-h-[135px] sm:min-h-[155px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+              <div className="col-span-8 flex flex-col gap-1.5 sm:gap-2">
+                {/* AVATAR ZONE — two separate limits (Rule Book 3.2 Board Area 1):
+                    normal Avatars max 4, Avatar+Token total max 6. */}
+                <div className="min-h-[112px] sm:min-h-[155px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+                  <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400">
                     <span className="font-bold text-amber-300/90 text-xs">Avatar Zone</span>
-                    <span>มี Avatar บนสนามได้สูงสุด 4 ใบ ({me.avatarZone.length}/4)</span>
+                    <span className="flex items-center gap-1 whitespace-nowrap">
+                      <span>Avatar {me.avatarZone.filter(card => card.card.type === 'Avatar').length}/4</span>
+                      <span className="text-slate-600">·</span>
+                      <span>รวม Token {me.avatarZone.length}/6</span>
+                    </span>
                   </div>
 
                   <div className="flex-1 flex items-center justify-center gap-2 sm:gap-3 py-1">
                     {me.avatarZone.length === 0 ? (
-                      <span className="text-xs text-slate-500">คลิกการ์ด Avatar บนมือด้านล่างเพื่ออัญเชิญลงสนาม</span>
+                      <span className="text-xs text-slate-500">แตะการ์ดบนมือเพื่อเลือก แล้วกดปุ่มคำสั่ง</span>
                     ) : (
                       me.avatarZone.map(avatar => (
                         <div key={avatar.instanceId} className="relative flex flex-col items-center">
@@ -2315,7 +2335,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* MAGIC ZONE */}
-                <div className="min-h-[85px] sm:min-h-[100px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+                <div className="min-h-[64px] sm:min-h-[100px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
                     <span className="font-bold text-amber-300/90 text-xs">Magic Zone</span>
                     <span>สามารถเล่น Magic ได้ประเภทละครั้ง ({me.magicZone.length} ใบในเทิร์น)</span>
@@ -2323,7 +2343,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
                   <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
                     {me.magicZone.length === 0 ? (
-                      <span className="text-[11px] text-slate-600 mx-auto">คลิกการ์ด Magic บนมือเพื่อร่ายเวทย์</span>
+                      <span className="text-[11px] text-slate-600 mx-auto">แตะการ์ดบนมือเพื่อเลือก แล้วกดปุ่มคำสั่ง</span>
                     ) : (
                       me.magicZone.map(m => (
                         <div
@@ -2341,7 +2361,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               </div>
 
               {/* RIGHT COLUMN: HELL (TOP) + DECK (BOTTOM) */}
-              <div className="col-span-2 flex flex-col gap-2">
+              <div className="col-span-2 flex flex-col gap-1.5 sm:gap-2">
                 {/* HELL ZONE */}
                 <div
                   onClick={() => setShowHellModal('ME')}
@@ -2405,7 +2425,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           })()}
 
           {/* ==================== PLAYER HAND FAN (tap-first) ==================== */}
-          <div className="mt-1.5 rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+          <div className="mt-1.5 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 sm:p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
             <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
               <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — แตะเพื่อเลือก แล้วกดปุ่มสั่งการ`}</span>
               <span className="text-[10px]">แตะ 1 ครั้ง = เลือก/ดูตัวอย่าง · กด <b className="text-amber-300">i</b> เพื่อตรวจการ์ด</span>

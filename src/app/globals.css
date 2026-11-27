@@ -113,6 +113,14 @@ body {
   padding-top: 14px;
 }
 
+/* Compact phones (360-412px): trim the fan's vertical padding so the whole
+   playmat fits with less scrolling; desktop keeps the roomier arc. */
+@media (max-width: 639px) {
+  .bot-hand-fan {
+    padding-top: 8px;
+  }
+}
+
 .bot-hand-card {
   transform: rotate(var(--fan-rot, 0deg)) translateY(var(--fan-y, 0px));
   transform-origin: bottom center;
