@@ -12,6 +12,15 @@ export function nextPhaseAfterMain(state: GameState, playerId: string): 'BATTLE'
   return isFirstPlayerFirstTurn(state, playerId) ? 'END' : 'BATTLE';
 }
 
+/**
+ * UI label for the MAIN-phase advance button. Derived from nextPhaseAfterMain()
+ * so the button always describes the transition the engine will actually perform
+ * (the first player's Turn 1 has no Battle Phase — Rule Book 3.2 p.22).
+ */
+export function mainPhaseAdvanceLabel(state: GameState, playerId: string): string {
+  return nextPhaseAfterMain(state, playerId) === 'END' ? 'จบ Main → End Phase' : 'เข้า Battle Phase';
+}
+
 export function transitionGamePhase(state: GameState, playerId: string, nextPhase: GameState['currentPhase']): GameState {
   if (!state.players[playerId] || state.playerOrder[state.currentTurnPlayerIndex] !== playerId || state.currentPhase === nextPhase) return state;
   const nextTurnNumber = nextPhase === 'DRAW' && state.currentPhase === 'END' ? state.turnNumber + 1 : state.turnNumber;

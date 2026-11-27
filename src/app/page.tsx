@@ -8,11 +8,12 @@ import { DeckBuilder } from '../components/deck/DeckBuilder';
 import { MatchmakingLobby } from '../components/lobby/MatchmakingLobby';
 import { AuthModal } from '../components/auth/AuthModal';
 import { ProfileMenu } from '../components/auth/ProfileMenu';
-import { GameState, CardInstance, Card, PlayerState } from '../engine/types';
+import { GameState, Card, PlayerState } from '../engine/types';
 import {
   playerIdForSeat,
   type MatchSession, type PlayerSetup, type RoomMode
 } from '../engine/multiplayer';
+import { createCardInstance, createLocalMatchState, shuffled } from '../engine/localMatch';
 import {
   getCurrentUser, saveDeckForUser, deleteDeckForUser,
   type SavedDeck, type UserAccount
@@ -23,20 +24,6 @@ import starterDeckData from '../engine/starterDeck.json';
 import packageJson from '../../package.json';
 import { Swords, Users, Play, Library, Globe, User, Plus } from 'lucide-react';
 import { PwaInstallButton } from '../components/PwaInstallButton';
-
-function createCardInstance(card: Card, ownerId: string, instanceId: string, isFaceUp = true): CardInstance {
-  return {
-    instanceId,
-    card,
-    ownerId,
-    originalOwnerId: ownerId,
-    controllerId: ownerId,
-    isRested: false,
-    isFaceUp,
-    attachedInstances: [],
-    layerModifiers: []
-  };
-}
 
 function resolveDecks(main: Card[] | undefined, life: Card[] | undefined) {
   return {
@@ -66,15 +53,6 @@ function createOnlinePlayer(playerId: string, seat: number, setup: PlayerSetup):
     reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 },
     usedMagicTypesThisTurn: new Set()
   };
-}
-
-function shuffled<T>(items: T[]): T[] {
-  const copy = [...items];
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]];
-  }
-  return copy;
 }
 
 function buildOnlineState(mode: RoomMode, setups: PlayerSetup[]): GameState {
@@ -234,69 +212,24 @@ export default function Home() {
       customLifeDeck && customLifeDeck.length === 5 ? customLifeDeck : (starterDeckData.lifeDeck as Card[])
     );
 
-    // Player 1
-    const p1DeckCards = mainCardsPool.slice(5).map((c, i) => createCardInstance(c, 'player-1', `p1-deck-${i}`, false));
-    const p1Hand = mainCardsPool.slice(0, 5).map((c, i) => createCardInstance(c, 'player-1', `p1-hand-${i}`, true));
-    const p1Life = lifeCardsPool.map((c, i) => createCardInstance(c, 'player-1', `p1-life-${i}`, false));
-
-    // Player 2 uses disjoint Main and LIFE pools, with exactly five LIFE cards.
-    const p2DeckCards = aiMainPool.slice(5).map((c, i) => createCardInstance(c, 'player-2', `p2-deck-${i}`, false));
-    const p2Hand = aiMainPool.slice(0, 5).map((c, i) => createCardInstance(c, 'player-2', `p2-hand-${i}`, false));
-    const p2Life = aiLifePool.map((c, i) => createCardInstance(c, 'player-2', `p2-life-${i}`, false));
-    const p2StarterAvatar = createCardInstance(aiMainPool.find(c => c.type === 'Avatar') ?? aiMainPool[0], 'player-2', 'p2-starter-1', true);
-
-    const initialGame: GameState = {
-      id: `match-${Date.now()}`,
+    // Rule Book 3.2 Game Set up: both sides start with empty field zones —
+    // no Avatar is pre-spawned; the AI summons during its own Main Phase.
+    const initialGame = createLocalMatchState(
       mode,
-      playerOrder: ['player-1', 'player-2'],
-      currentTurnPlayerIndex: 0,
-      currentPhase: 'DRAW',
-      turnNumber: 1,
-      roundNumber: 1,
-      landMagicZone: null,
-      players: {
-        'player-1': {
-          id: 'player-1',
-          name: user ? user.username : 'ผู้เล่นฝั่งเรา (You)',
-          seat: 0,
-          deck: p1DeckCards,
-          hand: p1Hand,
-          lifeDeck: p1Life,
-          avatarZone: [],
-          constructZone: [],
-          magicZone: [],
-          hell: [],
-          darkDimension: [],
-          isCritical: false,
-          reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 },
-          usedMagicTypesThisTurn: new Set()
-        },
-        'player-2': {
-          id: 'player-2',
-          name: opponentName,
-          seat: 1,
-          deck: p2DeckCards,
-          hand: p2Hand,
-          lifeDeck: p2Life,
-          avatarZone: [p2StarterAvatar],
-          constructZone: [],
-          magicZone: [],
-          hell: [],
-          darkDimension: [],
-          isCritical: false,
-          reactMagicBudget: { ownTurnRemaining: 1, opponentTurnRemaining: 1 },
-          usedMagicTypesThisTurn: new Set()
-        }
-      },
-      eventLog: [
+      [
         {
-          timestamp: Date.now(),
-          type: 'GAME_STARTED',
-          description: `ยินดีต้อนรับสู่ Battle of Talingchan Online (${mode} Mode)! เริ่มเกมรอบแรก`,
-          actorId: 'system'
+          name: user ? user.username : 'ผู้เล่นฝั่งเรา (You)',
+          mainDeck: mainCardsPool,
+          lifeDeck: lifeCardsPool
+        },
+        {
+          name: opponentName,
+          mainDeck: aiMainPool,
+          lifeDeck: aiLifePool,
+          hideHand: true
         }
       ]
-    };
+    );
 
     setGameMode(mode);
     setOnlineSession(null);
@@ -467,7 +400,7 @@ export default function Home() {
                 Duel Mode (ดวล 2 ผู้เล่น)
               </h2>
               <p className="text-xs sm:text-sm text-slate-400 mt-2 leading-relaxed">
-                การประลองตัวต่อตัวตามกฎทางการ <b>Rule Book Ver. 3.2</b> เต็มรูปแบบ บริหาร Avatar Zone (สูงสุด 4 ตัว), ก่อสร้าง Construct, ร่ายเวทย์ และชิงทำลาย LIFE Deck 5 ใบ
+                การประลองตัวต่อตัวตามกฎทางการ <b>Rule Book Ver. 3.2</b> เต็มรูปแบบ บริหาร Avatar Zone (Avatar สูงสุด 4 ตัว รวม Token ไม่เกิน 6 ใบ), ก่อสร้าง Construct, ร่ายเวทย์ และชิงทำลาย LIFE Deck 5 ใบ
               </p>
             </div>
 

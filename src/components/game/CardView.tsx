@@ -89,7 +89,7 @@ export const CardView: React.FC<CardProps> = ({
             </span>
           )}
         </div>
-        <span className="font-semibold text-slate-200 truncate flex-1 text-center px-1">
+        <span className="font-semibold text-slate-200 truncate flex-1 min-w-0 text-center px-1">
           {card.name}
         </span>
       </div>
@@ -131,12 +131,13 @@ export const CardView: React.FC<CardProps> = ({
         )}
       </div>
 
-      {/* Card Footer: Power / Type */}
-      <div className="bg-slate-950/95 px-1 py-0.5 flex items-center justify-between border-t border-slate-800 text-[9px]">
-        <span className="text-slate-400 font-medium truncate flex items-center gap-0.5">
+      {/* Card Footer: Power / Type — the type label shrinks with an ellipsis and the
+          PWR badge never wraps, so the two can never collide on 64px-wide cards. */}
+      <div className={`bg-slate-950/95 px-1 py-0.5 flex items-center justify-between gap-1 border-t border-slate-800 ${size === 'sm' ? 'text-[8px]' : 'text-[9px]'}`}>
+        <span className="text-slate-400 font-medium truncate min-w-0 flex-1 flex items-center gap-0.5">
           {card.type}
           {cardInstance.attachedInstances && cardInstance.attachedInstances.length > 0 && (
-            <span className="text-indigo-400 font-bold" title="มีการ์ดสวมใส่">
+            <span className="text-indigo-400 font-bold shrink-0" title="มีการ์ดสวมใส่">
               +{cardInstance.attachedInstances.length}
             </span>
           )}
@@ -147,7 +148,9 @@ export const CardView: React.FC<CardProps> = ({
           const isDebuffed = netPwr < card.power;
           return (
             <span
-              className={`font-bold px-1 rounded border ${
+              title={`POWER ${netPwr}`}
+              aria-label={`POWER ${netPwr}`}
+              className={`shrink-0 whitespace-nowrap font-bold px-1 rounded border ${
                 isBuffed
                   ? 'text-emerald-300 bg-emerald-950/90 border-emerald-600/60'
                   : isDebuffed
@@ -155,7 +158,7 @@ export const CardView: React.FC<CardProps> = ({
                   : 'text-red-400 bg-red-950/80 border-red-800/60'
               }`}
             >
-              PWR {netPwr}
+              {size === 'sm' ? netPwr : `PWR ${netPwr}`}
             </span>
           );
         })()}
