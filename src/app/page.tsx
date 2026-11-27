@@ -20,6 +20,7 @@ import {
 import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
+import packageJson from '../../package.json';
 import { Swords, Users, Play, Library, Globe, User, Plus } from 'lucide-react';
 import { PwaInstallButton } from '../components/PwaInstallButton';
 
@@ -523,6 +524,7 @@ export default function Home() {
       {/* Footer */}
       <footer className="w-full max-w-5xl mx-auto text-center py-3 border-t border-slate-900 text-[11px] text-slate-500 flex flex-col md:flex-row items-center justify-between gap-1.5">
         <span>© 2026 Battle of Talingchan Online • Licensed by PASULOL & Team YUK</span>
+        <span className="text-slate-500">เวอร์ชัน {packageJson.version}</span>
         <div className="flex space-x-3 text-slate-400">
           <span>กฎฉบับ 3.2 ของแทร่</span>
           <span>•</span>
