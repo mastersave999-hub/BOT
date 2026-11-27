@@ -22,8 +22,9 @@ import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
 import packageJson from '../../package.json';
-import { Swords, Users, Play, Library, Globe, User, Plus } from 'lucide-react';
+import { Swords, Users, Library, Globe, User, Plus, Flame } from 'lucide-react';
 import { PwaInstallButton } from '../components/PwaInstallButton';
+import { CARD_BACK_SRC, OrnamentDivider } from '../components/game/botTheme';
 
 function resolveDecks(main: Card[] | undefined, life: Card[] | undefined) {
   return {
@@ -281,46 +282,28 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-slate-950 text-slate-100 font-kanit flex flex-col justify-between p-3 sm:p-6">
-      {/* Top Header Banner */}
-      <header className="w-full max-w-5xl mx-auto flex flex-wrap items-center justify-between gap-3 py-3 border-b border-slate-800">
-        <div className="flex items-center space-x-3">
-          <div className="w-10 h-10 md:w-11 md:h-11 rounded-xl bg-gradient-to-tr from-red-600 via-amber-500 to-yellow-400 flex items-center justify-center font-black text-lg md:text-xl shadow-lg shadow-red-950/60 border border-amber-400/30 shrink-0">
-            BOT
-          </div>
-          <div>
-            <h1 className="text-base sm:text-xl font-extrabold text-amber-400 tracking-wide">
-              BATTLE OF TALINGCHAN ONLINE
-            </h1>
-            <p className="text-[11px] text-slate-400">ศึกตลิ่งชัน ออนไลน์ • การ์ดเกมไทยทางการ</p>
-          </div>
-        </div>
+    <div className="bot-felt relative min-h-[100dvh] overflow-hidden text-slate-100 font-kanit flex flex-col">
+      {/* Diegetic title-screen backdrop: the official emblem printed on the felt */}
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center">
+        <img
+          src={CARD_BACK_SRC}
+          alt=""
+          className="max-h-[80%] max-w-[60%] object-contain opacity-[0.07] mix-blend-screen"
+        />
+      </div>
+      <span aria-hidden="true" className="bot-corner bot-corner-tl" />
+      <span aria-hidden="true" className="bot-corner bot-corner-tr" />
+      <span aria-hidden="true" className="bot-corner bot-corner-bl" />
+      <span aria-hidden="true" className="bot-corner bot-corner-br" />
 
-        {/* Top Nav Buttons & User Profile */}
-        <div className="flex flex-wrap items-center justify-end gap-2 text-xs">
+      {/* Slim top bar: account + utilities only */}
+      <header className="relative z-10 flex w-full items-center justify-between gap-2 px-3 py-2 sm:px-6">
+        <span className="flex items-center gap-1.5 text-[11px] font-bold tracking-wider text-amber-500/90 sm:text-xs">
+          <Flame className="h-3.5 w-3.5 fill-red-500 text-red-500" />
+          RULE BOOK VER. 3.2
+        </span>
+        <div className="flex items-center gap-2 text-xs">
           <PwaInstallButton />
-          <button
-            onClick={() => {
-              setAccountMessage(null);
-              setCurrentView('DECK_BUILDER');
-            }}
-            className="px-2.5 sm:px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium flex items-center gap-1.5 transition"
-          >
-            <Library className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">จัดเด็ค</span>
-            <span className="sm:hidden">เด็ค</span>
-          </button>
-
-          <button
-            onClick={() => setCurrentView('LOBBY')}
-            className="px-2.5 sm:px-3.5 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 font-medium flex items-center gap-1.5 transition"
-          >
-            <Globe className="w-3.5 h-3.5 text-indigo-400" />
-            <span className="hidden sm:inline">สร้างห้อง / เล่นกับเพื่อน</span>
-            <span className="sm:hidden">ห้องเล่น</span>
-          </button>
-
-          {/* User Account Button */}
           {user ? (
             <ProfileMenu user={user} onLogout={() => void handleLogout()} />
           ) : !isClerkLoaded || isSignedIn ? (
@@ -328,143 +311,122 @@ export default function Home() {
           ) : (
             <button
               onClick={() => setIsAuthOpen(true)}
-              className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow transition"
+              className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-slate-950/70 px-3 py-1.5 text-xs font-bold text-amber-300 shadow transition hover:bg-amber-500 hover:text-slate-950"
             >
-              <User className="w-3.5 h-3.5" />
+              <User className="h-3.5 w-3.5" />
               เข้าสู่ระบบ
             </button>
           )}
         </div>
       </header>
 
-      {/* Hero Action Cards & Saved Decks Drawer */}
-      <div className="w-full max-w-5xl mx-auto my-auto py-4 sm:py-8 space-y-6">
-        {/* Active Deck Selector Bar */}
-        <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl flex flex-wrap items-center justify-between gap-2 text-xs">
-          <div className="flex items-center gap-2">
-            {accountMessage && <span role="status" className="text-red-300">{accountMessage}</span>}
-            <span className="text-slate-400">เด็คที่เลือกใช้:</span>
-            <span className="font-bold text-amber-400">{activeDeckName}</span>
-            <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/60 px-1.5 py-0.5 rounded">
-              Main {customMainDeck.length}/50 ใบ • LIFE {customLifeDeck.length}/5
+      {/* Title & Matchmaking hero */}
+      <main className="relative z-10 mx-auto flex w-full max-w-2xl flex-1 flex-col items-center justify-center gap-4 px-4 py-6 text-center">
+        {/* Official emblem in a gold ring */}
+        <div className="relative mb-1 h-24 w-24 sm:h-28 sm:w-28">
+          <span aria-hidden="true" className="absolute -inset-1.5 rounded-full border border-amber-500/40 shadow-[0_0_24px_rgba(251,191,36,0.15)]" />
+          <img
+            src={CARD_BACK_SRC}
+            alt="ตราสัญลักษณ์ศึกตลิ่งชัน"
+            className="h-full w-full rounded-full border-2 border-amber-500/60 object-cover shadow-2xl"
+          />
+        </div>
+
+        <div>
+          <h1 className="bg-gradient-to-b from-amber-200 via-amber-400 to-amber-600 bg-clip-text text-4xl font-black tracking-wide text-transparent drop-shadow-[0_2px_12px_rgba(251,191,36,0.25)] sm:text-5xl">
+            ศึกตลิ่งชัน
+          </h1>
+          <p className="mt-1 text-[11px] font-bold tracking-[0.35em] text-amber-500/70 sm:text-xs">
+            BATTLE OF TALINGCHAN ONLINE
+          </p>
+        </div>
+
+        <OrnamentDivider className="w-56 sm:w-72" />
+
+        {/* Active deck selector pill */}
+        <div className="flex w-full max-w-sm flex-col items-center gap-2">
+          <div className="flex items-center gap-2 rounded-full border border-amber-500/40 bg-slate-950/80 px-4 py-1.5 shadow-lg">
+            <Library className="h-3.5 w-3.5 shrink-0 text-amber-400" aria-hidden="true" />
+            <span className="max-w-[10rem] truncate text-xs font-bold text-amber-300">{activeDeckName}</span>
+            <span className="shrink-0 rounded-full border border-emerald-700/60 bg-emerald-950/60 px-1.5 py-px font-mono text-[9px] text-emerald-300">
+              {customMainDeck.length}+{customLifeDeck.length} ใบ
             </span>
           </div>
+          {accountMessage && <span role="status" className="text-[11px] text-red-300">{accountMessage}</span>}
 
-          <div className="w-full space-y-2 pt-1">
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-400 text-[11px]">ช่องจัดเด็คของคุณ <span className="text-slate-500">({deckSlots.length})</span></span>
-              {!user && <span className="text-[10px] text-slate-500">เข้าสู่ระบบเพื่อซิงก์ข้ามอุปกรณ์</span>}
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+          {/* Saved deck chips */}
+          {deckSlots.length > 0 && (
+            <div className="no-scrollbar flex w-full max-w-sm items-center gap-1.5 overflow-x-auto pb-1">
               {deckSlots.map((deck) => (
                 <button
                   key={deck.id}
                   type="button"
                   aria-pressed={activeDeckId === deck.id}
                   onClick={() => handleLoadSavedDeck(deck)}
-                  className={`min-w-0 rounded-lg border p-2 text-left transition ${
+                  className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-semibold transition ${
                     activeDeckId === deck.id
-                      ? 'border-amber-500/70 bg-amber-500/10'
-                      : 'border-slate-800 bg-slate-950/60 hover:border-slate-600'
+                      ? 'border-amber-500/70 bg-amber-500/15 text-amber-300'
+                      : 'border-slate-700 bg-slate-950/60 text-slate-300 hover:border-slate-500'
                   }`}
                 >
-                  <span className={`block truncate text-[11px] font-bold ${activeDeckId === deck.id ? 'text-amber-300' : 'text-slate-200'}`}>
-                    {deck.name}
-                  </span>
-                  <span className="mt-1 block text-[10px] text-slate-500">
-                    Main {deck.mainDeck.length}/50 · LIFE {deck.lifeDeck.length}/5
-                  </span>
+                  {deck.name}
                 </button>
               ))}
               <button
                 type="button"
                 onClick={handleCreateDeck}
-                className="min-h-12 rounded-lg border border-dashed border-slate-700 bg-slate-950/30 p-2 text-slate-400 hover:border-amber-500/60 hover:text-amber-300 transition flex items-center justify-center gap-1.5 text-[11px] font-semibold"
+                aria-label="สร้างเด็คใหม่"
+                className="shrink-0 rounded-full border border-dashed border-slate-700 bg-slate-950/40 p-1 text-slate-400 transition hover:border-amber-500/60 hover:text-amber-300"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                เพิ่มช่องจัดเด็ค
               </button>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* Game Mode Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-          {/* Duel Mode */}
-          <div className="group relative bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 hover:border-amber-500/50 rounded-2xl p-5 sm:p-6 shadow-xl transition-all flex flex-col justify-between">
-            <div>
-              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-red-950/80 border border-red-500/30 flex items-center justify-center text-red-400 mb-3 sm:mb-4">
-                <Swords className="w-5 h-5 sm:w-6 sm:h-6" />
-              </div>
-              <h2 className="text-xl sm:text-2xl font-bold text-slate-100 group-hover:text-amber-400 transition">
-                Duel Mode (ดวล 2 ผู้เล่น)
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-400 mt-2 leading-relaxed">
-                การประลองตัวต่อตัวตามกฎทางการ <b>Rule Book Ver. 3.2</b> เต็มรูปแบบ บริหาร Avatar Zone (Avatar สูงสุด 4 ตัว รวม Token ไม่เกิน 6 ใบ), ก่อสร้าง Construct, ร่ายเวทย์ และชิงทำลาย LIFE Deck 5 ใบ
-              </p>
-            </div>
+        {/* Primary & secondary triggers */}
+        <div className="flex w-full max-w-sm flex-col gap-2.5">
+          <button
+            onClick={() => startMatch('DUEL')}
+            className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-700 via-red-600 to-amber-600 px-6 py-3.5 text-base font-black text-white shadow-xl shadow-red-950/50 ring-1 ring-amber-400/40 transition hover:from-red-600 hover:to-amber-500 active:scale-[0.98]"
+          >
+            <Swords className="h-5 w-5 fill-white/20" aria-hidden="true" />
+            เข้าดวลทันที (Quick Match)
+          </button>
 
-            <div className="mt-5 sm:mt-6 flex gap-2">
-              <button
-                onClick={() => startMatch('DUEL')}
-                className="flex-1 py-2.5 sm:py-3 rounded-xl bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-red-950/50 flex items-center justify-center gap-2 transition cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-white" /> เล่นทันที (Quick Match)
-              </button>
-              <button
-                onClick={() => setCurrentView('LOBBY')}
-                className="px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition"
-                title="สร้างห้องให้เพื่อนเข้าร่วม"
-              >
-                สร้างห้อง
-              </button>
-            </div>
-          </div>
-
-          {/* Ad-Mua Mode */}
-          <div className="group relative bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 hover:border-purple-500/50 rounded-2xl p-5 sm:p-6 shadow-xl transition-all flex flex-col justify-between">
-            <div>
-              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-purple-950/80 border border-purple-500/30 flex items-center justify-center text-purple-400 mb-3 sm:mb-4">
-                <Users className="w-5 h-5 sm:w-6 sm:h-6" />
-              </div>
-              <h2 className="text-xl sm:text-2xl font-bold text-slate-100 group-hover:text-purple-400 transition">
-                โหมดอัดมั่ว (Ad-Mua 3–4 คน)
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-400 mt-2 leading-relaxed">
-                โหมดชุลมุนหลายคน Free-For-All วนเทิร์นตามเข็มนาฬิกา คนสุดท้ายของรอบแรกได้ตีคนแรก พร้อมระบบโควตา React Magic รวม และการกำจัดผู้เล่นจนเหลือผู้ชนะคนสุดท้าย
-              </p>
-            </div>
-
-            <div className="mt-5 sm:mt-6 flex gap-2">
-              <button
-                onClick={() => startMatch('AD_MUA')}
-                className="flex-1 py-2.5 sm:py-3 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs sm:text-sm shadow-lg shadow-purple-950/50 flex items-center justify-center gap-2 transition cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-white" /> เล่นโหมดอัดมั่ว
-              </button>
-              <button
-                onClick={() => setCurrentView('LOBBY')}
-                className="px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs border border-slate-700 transition"
-                title="สร้างห้องสำหรับกลุ่มเพื่อน 3-4 คน"
-              >
-                สร้างห้อง
-              </button>
-            </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              onClick={() => setCurrentView('LOBBY')}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-amber-500/30 bg-slate-950/70 px-3 py-2.5 text-[11px] font-bold text-amber-200 shadow transition hover:border-amber-400/60 hover:bg-slate-900"
+            >
+              <Globe className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+              ห้องออนไลน์ 2–4 คน
+            </button>
+            <button
+              onClick={() => startMatch('AD_MUA')}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-purple-500/30 bg-slate-950/70 px-3 py-2.5 text-[11px] font-bold text-purple-200 shadow transition hover:border-purple-400/60 hover:bg-slate-900"
+            >
+              <Users className="h-3.5 w-3.5 text-purple-400" aria-hidden="true" />
+              อัดมั่ว 3–4 คน
+            </button>
+            <button
+              onClick={() => {
+                setAccountMessage(null);
+                setCurrentView('DECK_BUILDER');
+              }}
+              className="flex items-center justify-center gap-1.5 rounded-xl border border-slate-600/60 bg-slate-950/70 px-3 py-2.5 text-[11px] font-bold text-slate-200 shadow transition hover:border-slate-400 hover:bg-slate-900"
+            >
+              <Library className="h-3.5 w-3.5 text-slate-300" aria-hidden="true" />
+              จัดเด็ค (Deck Builder)
+            </button>
           </div>
         </div>
-      </div>
+      </main>
 
       {/* Footer */}
-      <footer className="w-full max-w-5xl mx-auto text-center py-3 border-t border-slate-900 text-[11px] text-slate-500 flex flex-col md:flex-row items-center justify-between gap-1.5">
-        <span>© 2026 Battle of Talingchan Online • Licensed by PASULOL & Team YUK</span>
-        <span className="text-slate-500">เวอร์ชัน {packageJson.version}</span>
-        <div className="flex space-x-3 text-slate-400">
-          <span>กฎฉบับ 3.2 ของแทร่</span>
-          <span>•</span>
-          <span>โมบายล์ Responsive</span>
-          <span>•</span>
-          <span>คลังข้อมูลการ์ด 2,014 ใบ</span>
-        </div>
+      <footer className="relative z-10 mx-auto flex w-full max-w-3xl flex-col items-center justify-between gap-1 border-t border-amber-500/10 px-4 py-2.5 text-center text-[10px] text-slate-500 sm:flex-row">
+        <span>© 2026 Battle of Talingchan Online • Licensed by PASULOL &amp; Team YUK</span>
+        <span>เวอร์ชัน {packageJson.version} • คลังการ์ด 2,014 ใบ</span>
       </footer>
 
       {/* Auth Modal */}

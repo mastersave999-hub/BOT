@@ -74,7 +74,7 @@ import {
   ManualOverrideBanner,
   ManualOverrideControls
 } from './Phase5Modals';
-import { CardBack, CARD_BACK_SRC, ClassificationBadge, OrnamentDivider } from './botTheme';
+import { CardBack, CARD_BACK_SRC, ClassificationBadge, ClassificationDot, OrnamentDivider } from './botTheme';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
   CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List
@@ -153,16 +153,19 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
   return (
     <section
       aria-label="ลำดับ Phase ของเกม"
-      className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-xl border border-amber-500/30 bg-slate-950/95 px-2 py-1.5 shadow-lg backdrop-blur sm:px-4"
+      className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-lg border border-amber-500/30 bg-slate-950/95 px-1.5 py-1 shadow-lg backdrop-blur"
     >
-      <div aria-live="polite" className="mb-1 flex flex-wrap items-center justify-center gap-2 text-[9px] sm:text-[10px]">
-        <span className={`rounded-full px-2 py-0.5 font-bold ${isMyTurn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-300'}`}>
-          {isMyTurn ? 'YOUR TURN' : 'OPPONENT TURN'}
+      <div aria-live="polite" className="flex items-center gap-1.5">
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold leading-none sm:text-[9px] ${isMyTurn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-300'}`}>
+          {isMyTurn ? 'YOUR TURN' : 'OPPONENT'}
         </span>
-        <span className="truncate font-semibold text-slate-200">{activePlayerName || 'ผู้เล่น'} · TURN {turnNumber}</span>
+        <span className="hidden min-w-0 truncate text-[9px] font-semibold text-slate-300 sm:inline">
+          {activePlayerName || 'ผู้เล่น'} · T{turnNumber}
+        </span>
+        <span className="min-w-0 truncate text-[9px] font-semibold text-slate-300 sm:hidden">T{turnNumber}</span>
         {priorityPlayerName && (
           <span
-            className={`rounded-full border px-2 py-0.5 font-bold ${
+            className={`hidden shrink-0 rounded-full border px-1.5 py-0.5 text-[8px] font-bold leading-none md:inline ${
               isPriorityMine
                 ? 'border-amber-400/70 bg-amber-500/15 text-amber-300'
                 : 'border-slate-600 bg-slate-900 text-slate-300'
@@ -171,36 +174,33 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
             สิทธิ์ตอบโต้: {priorityPlayerName}
           </span>
         )}
+        <ol className="ml-auto grid min-w-0 flex-1 grid-cols-4 gap-1 sm:w-56 sm:flex-none" aria-label="DRAW, MAIN, BATTLE, END">
+          {PHASE_STEPS.map((step, index) => {
+            const isCurrent = index === currentIndex;
+            const isCompleted = index < currentIndex;
+            return (
+              <li
+                key={step.phase}
+                aria-current={isCurrent ? 'step' : undefined}
+                className={`flex min-w-0 items-center justify-center gap-1 rounded-md border px-1 py-0.5 text-center transition-colors ${
+                  isCurrent
+                    ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.25)]'
+                    : isCompleted
+                      ? 'border-emerald-700/60 bg-emerald-950/50 text-emerald-300'
+                      : 'border-slate-800 bg-slate-900/60 text-slate-500'
+                }`}
+              >
+                {isCompleted ? (
+                  <CheckCircle2 aria-hidden="true" className="h-3 w-3 shrink-0" />
+                ) : (
+                  <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isCurrent ? 'bg-slate-950' : 'bg-slate-700'}`} aria-hidden="true" />
+                )}
+                <span className="min-w-0 truncate text-[9px] font-extrabold tracking-wide leading-none">{step.label}</span>
+              </li>
+            );
+          })}
+        </ol>
       </div>
-      <ol className="grid grid-cols-4 gap-1" aria-label="DRAW, MAIN, BATTLE, END">
-        {PHASE_STEPS.map((step, index) => {
-          const isCurrent = index === currentIndex;
-          const isCompleted = index < currentIndex;
-          return (
-            <li
-              key={step.phase}
-              aria-current={isCurrent ? 'step' : undefined}
-              className={`flex min-w-0 items-center justify-center gap-1 rounded-md border px-1 py-1 text-center transition-colors sm:gap-1.5 ${
-                isCurrent
-                  ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.25)]'
-                  : isCompleted
-                    ? 'border-emerald-700/60 bg-emerald-950/50 text-emerald-300'
-                    : 'border-slate-800 bg-slate-900/60 text-slate-500'
-              }`}
-            >
-              {isCompleted ? (
-                <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-              ) : (
-                <span className={`h-2 w-2 shrink-0 rounded-full ${isCurrent ? 'bg-slate-950' : 'bg-slate-700'}`} aria-hidden="true" />
-              )}
-              <span className="min-w-0 leading-tight">
-                <span className="block truncate text-[9px] font-extrabold tracking-wide sm:text-[10px]">{step.label}</span>
-                <span className={`block truncate text-[8px] ${isCurrent ? 'text-slate-800' : 'opacity-75'}`}>{step.description}</span>
-              </span>
-            </li>
-          );
-        })}
-      </ol>
     </section>
   );
 };
@@ -222,6 +222,8 @@ interface LifeCardTileProps {
   card: CardInstance;
   index: number;
   compact?: boolean;
+  /** Extra-small phone tile (360-412px): keeps the whole playmat inside 100dvh. */
+  xs?: boolean;
   onInspect: () => void;
 }
 
@@ -242,13 +244,21 @@ const DeckPile: React.FC<{ count: number }> = ({ count }) => (
   </span>
 );
 
-const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, compact = false, onInspect }) => (
+const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, compact = false, xs = false, onInspect }) => (
   <button
     type="button"
     disabled={!card.isFaceUp}
     aria-label={card.isFaceUp ? `Revealed LIFE card: ${card.card.name}. Inspect card` : `Face-down LIFE card ${index + 1}`}
     onClick={onInspect}
-    className={`relative shrink-0 [perspective:700px] transition-all duration-500 ${compact ? 'h-8 w-6' : card.isFaceUp ? 'h-16 w-12 border-emerald-400 shadow-lg shadow-emerald-900/40 sm:h-20 sm:w-14' : 'h-8 w-12 sm:h-9 sm:w-14'} rounded border border-slate-700 text-[8px] font-bold disabled:cursor-default`}
+    className={`bot-life-tile relative shrink-0 [perspective:700px] transition-all duration-500 ${
+      xs
+        ? 'h-6 w-4'
+        : compact
+          ? 'h-8 w-6'
+          : card.isFaceUp
+            ? 'h-16 w-12 border-emerald-400 shadow-lg shadow-emerald-900/40 sm:h-20 sm:w-14'
+            : 'h-8 w-12 sm:h-9 sm:w-14'
+    } rounded border border-slate-700 text-[8px] font-bold disabled:cursor-default`}
   >
     <span className={`absolute inset-0 overflow-hidden rounded ${card.isFaceUp ? 'life-card-flip' : ''}`}>
       <span
@@ -1903,26 +1913,29 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 <CardBack key={handIdx} className="h-4 w-3" />
               ))}
             </span>
-            <span>มือ {boardPlayer.hand.length} · เด็ค {boardPlayer.deck.length}</span>
+            <span className="flex shrink-0 items-center gap-1 font-mono text-[9px] text-slate-300">
+              <span className="rounded border border-slate-700 bg-slate-900 px-1 py-px">HAND {boardPlayer.hand.length}</span>
+              <span className="rounded border border-amber-500/30 bg-slate-900 px-1 py-px text-amber-300">DECK {boardPlayer.deck.length}</span>
+            </span>
           </span>
         </div>
 
         {/* Opponent 3-Column Body (Mirrored: Deck/Hell Left | Avatar+Magic Center | Life Right) */}
-        <div className="grid grid-cols-12 items-stretch gap-1.5 sm:gap-2">
+        <div className="grid grid-cols-12 items-stretch gap-1 sm:gap-2">
           {/* Left Col: Deck & Hell (2 cols) */}
           <div className="col-span-2 flex flex-col gap-1.5">
-            <div className="flex flex-1 flex-col items-center justify-center gap-1 rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center">
+            <div className="bot-zone flex flex-1 flex-col items-center justify-center gap-1 rounded-lg p-1 text-center">
               <DeckPile count={boardPlayer.deck.length} />
-              <span className="text-[9px] font-bold text-amber-300/80">Deck {boardPlayer.deck.length}</span>
+              <span className="text-[9px] font-black tracking-wider text-amber-300">DECK {boardPlayer.deck.length}</span>
             </div>
             <div
               onClick={() => {
                 setFocusedOpponentId(boardPlayerId);
                 setShowHellModal('OPPONENT');
               }}
-              className="flex flex-1 cursor-pointer flex-col items-center justify-center rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 text-center transition hover:border-red-500/50"
+              className="bot-zone-crimson flex flex-1 cursor-pointer flex-col items-center justify-center rounded-lg p-1 text-center transition hover:border-red-400"
             >
-              <span className="text-[9px] font-bold text-amber-300/80">Hell นรก</span>
+              <span className="text-[9px] font-black tracking-wider text-red-300">HELL</span>
               <span className="text-sm font-black text-red-400">{boardPlayer.hell.length}</span>
             </div>
           </div>
@@ -1930,15 +1943,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           {/* Center Col: Magic Zone (top) + Avatar Zone (bottom, facing center) (8 cols) */}
           <div className="col-span-8 flex flex-col gap-1.5">
             {/* Opponent Magic Zone */}
-            <div className="flex min-h-[42px] items-center justify-between rounded-lg border border-amber-500/15 bg-slate-950/60 px-2 py-1 text-[10px] text-slate-500">
-              <span className="font-semibold text-amber-300/70">Magic Zone (คู่แข่ง)</span>
-              <span>{boardPlayer.magicZone.length} ใบที่ใช้แล้ว</span>
+            <div className="bot-zone flex min-h-[26px] items-center justify-between rounded-lg px-2 py-1 text-[10px]">
+              <span className="font-black tracking-wider text-amber-300">MAGIC</span>
+              <span className="font-mono text-[10px] text-slate-200">{boardPlayer.magicZone.length}</span>
             </div>
 
             {/* Opponent Avatar Zone (Avatar max 4, total with Tokens max 6 — Rule Book 3.2 Board Area 1) */}
-            <div className={`relative flex items-center justify-center gap-2 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)] ${compact ? 'min-h-[96px]' : 'min-h-[96px] sm:min-h-[135px]'}`}>
+            <div className={`bot-zone relative flex items-center justify-center gap-2 rounded-xl p-1.5 ${compact ? 'min-h-[64px]' : 'min-h-[64px] sm:min-h-[104px]'}`}>
               {boardPlayer.avatarZone.length === 0 ? (
-                <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (Avatar ≤ 4 · รวม Token ≤ 6)</span>
+                <span className="font-mono text-[10px] tracking-wider text-slate-500">AVATAR 0/4 (0/6)</span>
               ) : (
                 boardPlayer.avatarZone.map(avatar => (
                   <div key={avatar.instanceId} className="relative flex flex-col items-center">
@@ -1972,8 +1985,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             }`}
             title="คลิกเพื่อโจมตี LIFE คู่แข่ง"
           >
-            <span className="mb-1 flex items-center gap-0.5 text-[10px] font-bold text-red-400">
-              <Shield className="h-3 w-3" /> Life ({boardPlayer.lifeDeck.filter(c => !c.isFaceUp).length}/5)
+            <span className="mb-1 flex items-center gap-0.5 text-[10px] font-black tracking-wider text-red-300">
+              <Shield className="h-3 w-3" /> LIFE {boardPlayer.lifeDeck.filter(c => !c.isFaceUp).length}
             </span>
             <div className="flex flex-wrap justify-center gap-1">
               {boardPlayer.lifeDeck.map((lifeCard, idx) => (
@@ -1987,6 +2000,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                     card={lifeCard}
                     index={idx}
                     compact
+                    xs={isCompactViewport}
                     onInspect={() => setInspectedCard(lifeCard)}
                   />
                 </div>
@@ -2204,7 +2218,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           <span aria-hidden="true" className="bot-corner bot-corner-tr" />
           <span aria-hidden="true" className="bot-corner bot-corner-bl" />
           <span aria-hidden="true" className="bot-corner bot-corner-br" />
-          <div className="relative z-10 flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto">
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col justify-between gap-1 p-1.5 sm:p-3 overflow-y-auto no-scrollbar">
           {/* ==================== OPPONENT PLAYMAT BOARDS (2/3/4-player layouts) ==================== */}
           {/* 2 players: one full-width mirrored board. 3 players: two boards side by side.
               4 players: three boards in a responsive row — every participant keeps a clearly
@@ -2212,10 +2226,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           <div
             className={
               opponentIds.length >= 3
-                ? 'grid grid-cols-1 gap-2 md:grid-cols-3'
+                ? 'grid shrink-0 grid-cols-1 gap-2 md:grid-cols-3'
                 : opponentIds.length === 2
-                  ? 'grid grid-cols-1 gap-2 md:grid-cols-2'
-                  : ''
+                  ? 'grid shrink-0 grid-cols-1 gap-2 md:grid-cols-2'
+                  : 'shrink-0'
             }
           >
             {opponentIds.map(boardPlayerId => renderOpponentBoard(boardPlayerId, opponentIds.length > 1))}
@@ -2232,24 +2246,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
           {/* ==================== SHARED CENTER & MY TOP ROW (Matches Playmat Top Row!) ==================== */}
           {/* Construct Zone (Left 37%) | Land Magic Zone (Center 26%) | Dark Dimension (Right 37%) */}
-          <div className="grid grid-cols-12 gap-1.5 my-1 sm:gap-2 sm:my-1.5 items-stretch">
+          <div className="grid shrink-0 grid-cols-12 gap-1.5 my-0.5 sm:gap-2 sm:my-1 items-stretch">
             {/* Construct Zone (Left ~37% -> 4.5 cols, use col-span-5) */}
-            <div className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[56px] sm:min-h-[70px] shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+            <div className="bot-zone col-span-5 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[44px] sm:min-h-[56px]">
               <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-amber-300/90">Construct Zone</span>
-                <span className="text-slate-400 text-[9px]">มี Construct บนสนามได้สูงสุด 3 ใบ ({me.constructZone.length}/3)</span>
+                <span className="font-black tracking-wider text-amber-300">CONSTRUCT</span>
+                <span className="font-mono text-[10px] text-slate-200">{me.constructZone.length}/3</span>
               </div>
               <div className="flex items-center gap-1.5 mt-1 overflow-x-auto no-scrollbar">
-                {me.constructZone.length === 0 ? (
-                  <span className="text-[10px] text-slate-600 italic">วาง Construct ที่นี่</span>
-                ) : (
+                {me.constructZone.length === 0 ? null : (
                   me.constructZone.map(cons => (
                     <div
                       key={cons.instanceId}
                       onClick={() => handleConstructClick(cons)}
                       className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 border border-amber-500/40 text-[10px] font-semibold text-amber-300 cursor-pointer hover:bg-slate-800 shrink-0"
                     >
-                      <ClassificationBadge card={cons.card} size="sm" />
+                      <ClassificationDot card={cons.card} />
                       {cons.card.name}
                     </div>
                   ))
@@ -2260,57 +2272,58 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             {/* Land Magic Zone (Center ~20% -> col-span-2) */}
             <div
               onClick={() => gameState.landMagicZone && setInspectedCard(gameState.landMagicZone)}
-              className="col-span-2 rounded-xl border border-amber-500/40 bg-slate-950/70 p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition"
+              className="bot-zone col-span-2 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition"
             >
-              <span className="text-[10px] font-bold text-amber-400 leading-tight">Land Magic Zone</span>
+              <span className="text-[10px] font-black tracking-wider text-amber-400 leading-tight">LAND</span>
               {gameState.landMagicZone ? (
                 <>
                   <span className="text-[10px] text-white font-semibold mt-1 truncate max-w-full">
                     {gameState.landMagicZone.card.name}
                   </span>
-                  <ClassificationBadge card={gameState.landMagicZone.card} size="sm" className="mt-0.5" />
+                  <ClassificationDot card={gameState.landMagicZone.card} className="mt-0.5" />
                 </>
-              ) : (
-                <span className="text-[9px] text-slate-500 mt-0.5">ว่าง</span>
-              )}
+              ) : null}
             </div>
 
             {/* Dark Dimension Zone (Rule Book 3.2 Zone 7 — มิติมืด, public banish pile) */}
             <div
               onClick={() => setShowDarkDimensionModal(true)}
-              className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[56px] sm:min-h-[70px] cursor-pointer hover:border-amber-400/50 transition shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]"
+              className="bot-zone col-span-5 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[44px] sm:min-h-[56px] cursor-pointer hover:border-amber-400/50 transition"
               title="คลิกเพื่อดูการ์ดในมิติมืด"
             >
               <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-amber-300/70">มิติมืด (Dark Dimension)</span>
-                <span className="text-slate-400 text-[9px]">{me.darkDimension.length} ใบ</span>
+                <span className="font-black tracking-wider text-amber-300/90">VOID</span>
+                <span className="font-mono text-[10px] text-slate-200">{me.darkDimension.length}</span>
               </div>
-              <div className="text-[10px] text-slate-500 italic">
-                {me.darkDimension.length > 0
-                  ? 'การ์ดที่ถูกนำออกจากเกม — คลิกเพื่อตรวจ'
-                  : 'โซนสำหรับการ์ดที่ถูกนำออกจากเกม (Banish)'}
+              <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                {me.darkDimension.slice(0, 6).map(card => (
+                  <span key={card.instanceId} className="shrink-0 rounded bg-slate-900 border border-slate-700 px-1.5 py-0.5 text-[9px] font-semibold text-slate-300">
+                    {card.card.name}
+                  </span>
+                ))}
               </div>
             </div>
           </div>
 
           {/* ==================== MY PLAYMAT HALF (EXACT OFFICIAL PROPORTIONS) ==================== */}
-          <OrnamentDivider className="my-1" label="สนามของคุณ" />
+          <OrnamentDivider className="my-0.5" label="สนามของคุณ" />
           <div className="rounded-2xl border border-amber-500/25 bg-slate-950/70 p-2 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_4px_14px_rgba(0,0,0,0.5)]">
-            <div className="grid grid-cols-12 gap-1.5 sm:gap-2 items-stretch">
+            <div className="grid grid-cols-12 gap-1 sm:gap-2 items-stretch">
               {/* LEFT COLUMN: LIFE ZONE (Full Height spanning Avatar + Magic rows) */}
-              <div className="col-span-2 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-between">
+              <div className="bot-zone-crimson col-span-2 rounded-xl p-1.5 flex flex-col items-center justify-between">
                 <div className="text-center">
-                  <span className="text-xs sm:text-sm font-extrabold text-emerald-400 block">Life</span>
-                  <span className="text-[9px] text-slate-400">ที่วาง Life ({me.lifeDeck.filter(c => !c.isFaceUp).length}/5)</span>
+                  <span className="text-xs sm:text-sm font-black tracking-wider text-red-300 block">LIFE</span>
+                  <span className="font-mono text-[10px] font-bold text-red-200">{me.lifeDeck.filter(c => !c.isFaceUp).length}</span>
                 </div>
 
-                <div className="flex flex-col gap-1 items-center my-auto py-1">
+                <div className="flex flex-row flex-wrap content-start items-center justify-center gap-1 my-auto py-1 sm:flex-col sm:content-center">
                   {me.lifeDeck.map((lifeCard, idx) => (
                     <LifeCardTile
                       key={lifeCard.instanceId || idx}
                       card={lifeCard}
                       index={idx}
                       compact={isCompactViewport}
+                      xs={isCompactViewport}
                       onInspect={() => setInspectedCard(lifeCard)}
                     />
                   ))}
@@ -2327,20 +2340,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <div className="col-span-8 flex flex-col gap-1.5 sm:gap-2">
                 {/* AVATAR ZONE — two separate limits (Rule Book 3.2 Board Area 1):
                     normal Avatars max 4, Avatar+Token total max 6. */}
-                <div className="min-h-[112px] sm:min-h-[155px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
-                  <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400">
-                    <span className="font-bold text-amber-300/90 text-xs">Avatar Zone</span>
-                    <span className="flex items-center gap-1 whitespace-nowrap">
-                      <span>Avatar {me.avatarZone.filter(card => card.card.type === 'Avatar').length}/4</span>
-                      <span className="text-slate-600">·</span>
-                      <span>รวม Token {me.avatarZone.length}/6</span>
+                <div className="bot-zone min-h-[88px] sm:min-h-[124px] rounded-xl p-2 flex flex-col justify-between relative">
+                  <div className="flex items-center justify-between gap-1 text-[10px]">
+                    <span className="font-black tracking-wider text-amber-300 text-xs">AVATAR</span>
+                    <span className="flex items-center gap-1 whitespace-nowrap font-mono text-slate-200">
+                      <span>{me.avatarZone.filter(card => card.card.type === 'Avatar').length}/4</span>
+                      <span className="text-slate-500">·</span>
+                      <span>{me.avatarZone.length}/6</span>
                     </span>
                   </div>
 
                   <div className="flex-1 flex items-center justify-center gap-2 sm:gap-3 py-1">
-                    {me.avatarZone.length === 0 ? (
-                      <span className="text-xs text-slate-500">แตะการ์ดบนมือเพื่อเลือก แล้วกดปุ่มคำสั่ง</span>
-                    ) : (
+                    {me.avatarZone.length === 0 ? null : (
                       me.avatarZone.map(avatar => (
                         <div key={avatar.instanceId} className="relative flex flex-col items-center">
                           <CardView
@@ -2374,23 +2385,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* MAGIC ZONE */}
-                <div className="min-h-[64px] sm:min-h-[100px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="font-bold text-amber-300/90 text-xs">Magic Zone</span>
-                    <span>สามารถเล่น Magic ได้ประเภทละครั้ง ({me.magicZone.length} ใบในเทิร์น)</span>
+                <div className="bot-zone min-h-[48px] sm:min-h-[72px] rounded-xl p-2 flex flex-col justify-between">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="font-black tracking-wider text-amber-300 text-xs">MAGIC</span>
+                    <span className="font-mono text-[10px] text-slate-200">{me.magicZone.length}</span>
                   </div>
 
                   <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
-                    {me.magicZone.length === 0 ? (
-                      <span className="text-[11px] text-slate-600 mx-auto">แตะการ์ดบนมือเพื่อเลือก แล้วกดปุ่มคำสั่ง</span>
-                    ) : (
+                    {me.magicZone.length === 0 ? null : (
                       me.magicZone.map(m => (
                         <div
                           key={m.instanceId}
                           onClick={() => setInspectedCard(m)}
                           className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 text-[10px] font-semibold cursor-pointer shrink-0"
                         >
-                          <ClassificationBadge card={m.card} size="sm" />
+                          <ClassificationDot card={m.card} />
                           {m.card.name} ({m.card.subtype})
                         </div>
                       ))
@@ -2404,18 +2413,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 {/* HELL ZONE */}
                 <div
                   onClick={() => setShowHellModal('ME')}
-                  className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 hover:border-red-500/60 p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition"
+                  className="bot-zone-crimson flex-1 rounded-xl hover:border-red-400 p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition"
                   title="คลิกเพื่อดูการ์ดในนรก"
                 >
                   <Skull className="w-4 h-4 text-red-400 mb-0.5" />
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Hell</span>
-                  <span className="text-[9px] text-slate-400">นรก ({me.hell.length})</span>
+                  <span className="text-xs sm:text-sm font-black tracking-wider text-red-300">HELL</span>
+                  <span className="font-mono text-[10px] font-bold text-red-200">{me.hell.length}</span>
                 </div>
 
                 {/* DECK ZONE */}
-                <div className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-center gap-1 text-center">
+                <div className="bot-zone flex-1 rounded-xl p-1.5 flex flex-col items-center justify-center gap-1 text-center">
                   <DeckPile count={me.deck.length} />
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck {me.deck.length}</span>
+                  <span className="text-xs sm:text-sm font-black tracking-wider text-amber-300">DECK {me.deck.length}</span>
                 </div>
               </div>
             </div>
@@ -2464,12 +2473,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           })()}
 
           {/* ==================== PLAYER HAND FAN (tap-first) ==================== */}
-          <div className="mt-1.5 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 sm:p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
-            <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
-              <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — แตะเพื่อเลือก แล้วกดปุ่มสั่งการ`}</span>
-              <span className="text-[10px]">แตะ 1 ครั้ง = เลือก/ดูตัวอย่าง · กด <b className="text-amber-300">i</b> เพื่อตรวจการ์ด</span>
+          <div className="mt-1 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 sm:p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
+            <div className="flex items-center justify-between text-[11px] mb-1 px-1">
+              <span className="font-black tracking-wider text-amber-400">
+                {gameState.pendingEndPhaseDiscardPlayerId === meId
+                  ? `ทิ้งการ์ด (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})`
+                  : gameState.pendingEndPhaseDiscardPlayerId
+                    ? `รอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} ทิ้งการ์ด`
+                    : 'HAND'}
+              </span>
+              <span className="font-mono text-[10px] text-slate-300">{me.hand.length}</span>
             </div>
-            <div className="bot-hand-fan flex items-end justify-start overflow-x-auto pb-1 sm:justify-center">
+            <div className="bot-hand-fan order-2 flex items-end justify-start overflow-x-auto sm:justify-center">
               {me.hand.map((handCard, handIndex) => {
                 const center = (me.hand.length - 1) / 2;
                 const offset = handIndex - center;
@@ -2505,12 +2520,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               })}
             </div>
 
-            {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine */}
+            {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine.
+                Rendered above the fan (order-1) so it pops up over the playmat, not off-screen. */}
             {selectedHandCard && !gameState.pendingEndPhaseDiscardPlayerId && !gameState.reactionWindow && (
-              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 border-t border-amber-500/20 pt-1.5">
-                <span className="max-w-[10rem] truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
+              <div className="order-1 mb-1.5 flex items-center gap-2 overflow-x-auto no-scrollbar rounded-lg border border-amber-500/30 bg-slate-950/95 px-2 py-1.5">
+                <span className="max-w-[7rem] shrink-0 truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
                 <ClassificationBadge card={selectedHandCard.card} size="md" />
-                <span className="text-[10px] text-slate-400">
+                <span className="shrink-0 font-mono text-[10px] text-slate-400">
                   ใช้ {selectedHandCard.card.cost ?? 0} · GEM {selectedHandCard.card.gem ?? 0}
                   {selectedHandCard.card.power ? ` · PWR ${selectedHandCard.card.power}` : ''}
                 </span>
@@ -2518,8 +2534,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   const legalHandActions = deriveLegalHandActions(gameState, meId, selectedHandCard);
                   if (legalHandActions.length === 0) {
                     return (
-                      <span className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-slate-400">
-                        เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้ในสถานะปัจจุบัน
+                      <span className="shrink-0 truncate rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-slate-400">
+                        เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้
                       </span>
                     );
                   }
@@ -2528,7 +2544,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                       key={action.kind}
                       type="button"
                       onClick={() => dispatchConfirmedHandAction(selectedHandCard, action.kind)}
-                      className="rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-slate-950 shadow transition hover:bg-amber-400"
+                      className="shrink-0 rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-slate-950 shadow transition hover:bg-amber-400"
                     >
                       {action.label}
                     </button>
@@ -2537,14 +2553,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 <button
                   type="button"
                   onClick={() => setInspectedCard(selectedHandCard)}
-                  className="rounded-lg border border-amber-500/50 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10"
+                  className="shrink-0 rounded-lg border border-amber-500/50 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10"
                 >
-                  ตรวจการ์ด (Inspect)
+                  ตรวจการ์ด
                 </button>
                 <button
                   type="button"
                   onClick={() => setSelectedHandCardId(cancelHandSelection().selectedHandCardId)}
-                  className="rounded-lg border border-slate-600 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-800"
+                  className="shrink-0 rounded-lg border border-slate-600 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-800"
                 >
                   ยกเลิก
                 </button>
