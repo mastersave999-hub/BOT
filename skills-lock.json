@@ -7,6 +7,13 @@
       "sourceType": "github",
       "skillPath": "skills/genres/card-game/SKILL.md",
       "computedHash": "9de67b390fb28839eb24c92aed311836e9ec45c0cd07df45f1fe9568b5429421"
+    },
+    "game-ui-ux": {
+      "source": "gamedev-skills/awesome-gamedev-agent-skills",
+      "commit": "c6ca6c41c839b68319ffc08430b99ab768debc32",
+      "sourceType": "github",
+      "skillPath": "skills/disciplines/game-ui-ux/SKILL.md",
+      "computedHash": "8bf85f22ef57c78fd2a5b14c086e6cb4a1a0f6b729111abeed29be96cf615610"
     }
   }
 }

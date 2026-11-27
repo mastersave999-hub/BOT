@@ -74,6 +74,36 @@ export const OrnamentDivider: React.FC<{ className?: string; label?: string }> =
   </div>
 );
 
+/** Official card back artwork (Battle of Talingchan — hand-inked pylon emblem). */
+export const CARD_BACK_SRC = '/images/card-back.png';
+
+interface CardBackProps {
+  /** Fills its parent when left empty; pass sizing classes for standalone use. */
+  className?: string;
+}
+
+/**
+ * The one true card back. Every face-down card in the game renders through this
+ * component so the hidden-information surface stays visually consistent
+ * (deck piles, LIFE tiles, opponent hands, face-down board cards).
+ */
+export const CardBack: React.FC<CardBackProps> = ({ className = '' }) => (
+  <span
+    aria-hidden="true"
+    className={`block overflow-hidden rounded-[inherit] border border-amber-500/30 bg-black shadow-[inset_0_0_0_1px_rgba(251,191,36,0.12),0_2px_6px_rgba(0,0,0,0.55)] ${className}`}
+  >
+    <img
+      src={CARD_BACK_SRC}
+      alt=""
+      draggable={false}
+      loading="lazy"
+      className="h-full w-full object-cover"
+    />
+    {/* Restrained sheen so stacks read as physical cards, not flat images. */}
+    <span className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-black/45" />
+  </span>
+);
+
 /** Standard gold-trimmed zone frame used across the playmat. */
 export const zoneFrameClass =
   'rounded-xl border border-amber-500/25 bg-slate-950/70 shadow-[inset_0_1px_0_rgba(251,191,36,0.08),0_2px_6px_rgba(0,0,0,0.45)]';
