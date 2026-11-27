@@ -55,6 +55,7 @@ import {
   approveManualOverride,
   autoApproveManualOverride,
   beginManualOverride,
+  beginManualOverrideQueue,
   classifyCard,
   rejectManualOverride,
   shouldOfferManualResolution
@@ -545,7 +546,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
           !isManualOverrideCommandCurrent(gameState, msg.command, senderPlayerId)) return;
         const result = msg.command.kind === 'SUBMIT_MANUAL_OVERRIDE'
-          ? beginManualOverride(gameState, senderPlayerId, msg.command.action!, msg.command.context, msg.command.commandId)
+          ? (msg.command.actions?.length
+            ? beginManualOverrideQueue(gameState, senderPlayerId, msg.command.actions, msg.command.context, msg.command.commandId)
+            : beginManualOverride(gameState, senderPlayerId, msg.command.action!, msg.command.context, msg.command.commandId))
           : msg.command.kind === 'APPROVE_MANUAL_OVERRIDE'
             ? approveManualOverride(gameState, senderPlayerId, msg.command.commandId)
             : rejectManualOverride(gameState, senderPlayerId, msg.command.commandId);
@@ -1026,19 +1029,25 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     finishDeckChoice(resolved, meId);
   };
 
-  // Phase 5: Hybrid manual fallback with anti-cheat opponent approval.
-  const submitManualOverride = (action: ManualOverrideAction, context?: ManualOverrideContext) => {
+  // Phase 5/8: Hybrid manual fallback with anti-cheat opponent approval.
+  // Accepts a single action or a Phase 8 multi-step queue resolved with one opponent confirmation.
+  const submitManualOverride = (action: ManualOverrideAction | ManualOverrideAction[], context?: ManualOverrideContext) => {
     if (activeRuleMode === 'AUTO_STRICT') return;
+    const actions = Array.isArray(action) ? action : [action];
     const commandId = globalThis.crypto.randomUUID();
     if (link && !isHost) {
       link.send({
         type: 'MANUAL_OVERRIDE_COMMAND',
-        command: { kind: 'SUBMIT_MANUAL_OVERRIDE', playerId: meId, commandId, expectedRevision: gameState.stateRevision ?? 0, action, ...(context ? { context } : {}) }
+        command: {
+          kind: 'SUBMIT_MANUAL_OVERRIDE', playerId: meId, commandId, expectedRevision: gameState.stateRevision ?? 0,
+          ...(actions.length === 1 ? { action: actions[0] } : { actions }),
+          ...(context ? { context } : {})
+        }
       });
       setManualControlsOpen(false);
       return;
     }
-    const begun = beginManualOverride(gameState, meId, action, context, commandId);
+    const begun = beginManualOverrideQueue(gameState, meId, actions, context, commandId);
     if (!begun.ok) {
       showNotification(begun.reason ?? 'ส่ง Manual Override ไม่สำเร็จ');
       return;

@@ -1982,3 +1982,33 @@ The full-corpus audit reports **VERIFIED_WORKING 142 / PARSED_READY 259 / UNSUPP
 | `Avatar ที่สวมใส่การ์ดใบนี้จะกลับมาเป็นสภาพตื่น ตอน End Phase` | 2: ODY1-079, PRMO-004 | `PARSED_READY`; no complete eligible attached-host fixture pair |
 
 End Phase timing follows Rule Book 3.2 phase handling; unsupported clauses remain fail-closed. The per-card sweep attempts every parser-ready record, but these catalog-target gaps and the remaining event/keyword/compound cases prevent the requested 200+ verified total. Full validation: `npx tsc --noEmit`, `npm test` (20 files / 486 tests), `npm run build`, `git diff --check`, full audit `PARSED_READY 259 / UNSUPPORTED 1,570 / AMBIGUOUS 4`; exact per-card harness `VERIFIED_WORKING 142`. Validation passed: `npx tsc --noEmit`, `npm test` (20 files / 486 tests), `npm run build`, `git diff --check`, and the full adapter audit. PR #22 is not ready to merge.
+
+## Phase 8 — Universal Manual Effect Resolver coverage matrix
+
+Programmatic audit over all 2014 database rows (1833 carry printed effect text).
+Each row is classified against the manual action primitives the Phase 8 resolver exposes.
+Categories overlap: one card effect may map to several primitives.
+
+| Primitive | Manual action | Cards matched | Example cards |
+|---|---|---|---|
+| Deck Search (Name/Type/Color/Cost/Symbol) + mandatory shuffle | `MANUAL_SEARCH_DECK` | 330 | SD02-001 กุ่ย · SD02-002 ฮอล |
+| Scout top N cards | `MANUAL_SCOUT_DECK` | 194 | SD04-001 กัปตันแบงค์ Tank Ranger · SD04-016 ใบดำใบแดง |
+| Mill top N cards to Hell | `MANUAL_MILL_DECK` | 3 | BT04-023 วิไลวรรณ แม่แบงค์ · CC02-036 วิไลวรรณ แม่แบงค์ |
+| Shuffle Deck | `MANUAL_SHUFFLE_DECK` | 0 | — |
+| Recover from Hell to Hand/Field/Deck | `MANUAL_HELL_CHOICE` | 399 | SD02-004 ริกกี้ เพื่อนรัก · SD02-005 วีรบุรุษปากซอย |
+| Move to/from Dark Dimension (Banish) | `MOVE_CARD (darkDimension)` | 101 | SD08-001 ไพรมอล รัททาทุย · SD08-001 ไพรมอล รัททาทุย |
+| Create/Remove Token (Avatar Zone cap 6 total) | `MANUAL_SPAWN_TOKEN` | 8 | SD09-002 นิลพัท วานรสีกาฬ · SD09-005 คิงคา วานรเจ้าป่า |
+| POWER ± modifier | `ADJUST_POWER` | 416 | SD01-001 พระอิศวร · SD01-002 พระนารายณ์ |
+| Wake / Rest state change | `SET_WAKE_STATE` | 123 | SD02-001 กุ่ย · SD02-002 ฮอล |
+| Change Controller | `MANUAL_CHANGE_CONTROL` | 48 | SD06-001 จัน หนวดเขี้ยว · SD06-001 จัน หนวดเขี้ยว |
+| Temporary Name/Color/Symbol override | `ADJUST_POWER + layerModifiers (symbolMod)` | 55 | SD07-005 ซุนเกี๋ยน ขุนพลพยัคฆ์แห่งง่อก๊ก · BT03-006 ยานเกราะผู้กล้า : ไดบาเรีย |
+| Destroy / Sacrifice target card on field | `MOVE_CARD (hell)` | 419 | SD01-017 อุบัติเหตุ!!! · SD02-016 ระเบิดVery Fat Man |
+| Move card between zones | `MOVE_CARD` | 93 | SD02-019 สละเพื่อนเพื่อช่วยเพื่อน · SD05-018 ตรีศูล ไตรตัน |
+| Draw N cards | `DRAW_CARD` | 248 | SD01-005 เมียพระอิศวร · SD01-005 เมียพระอิศวร |
+| Discard N selected hand cards | `DISCARD_CARD` | 231 | SD01-018 ความยุติธรรมสำหรับนนทก · SD03-020 จิ้มมันเลย จิ้ม! |
+| LIFE Sacrifice (face-up) / Heal (face-down) | `ADJUST_LIFE` | 125 | SD02-017 ไม้เกาหลัง · SD04-002 จ่ามะนาว Tank Ranger |
+
+**Coverage:** 1579/1833 effect-bearing cards (86.1%) match at least one
+manual primitive, so the resolver can legitimately resolve them under Rule Book 3.2 with
+opponent Confirm/Reject oversight. Effects outside these primitives remain resolvable through
+the generic Field/Hand/LIFE tabs plus free-form judge discussion.
