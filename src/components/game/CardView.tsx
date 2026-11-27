@@ -3,12 +3,14 @@
 import React from 'react';
 import { CardInstance } from '../../engine/types';
 import { calculateNetPower } from '../../engine/layers';
+import { ClassificationBadge } from './botTheme';
 import { Info } from 'lucide-react';
 
 interface CardProps {
   cardInstance: CardInstance;
   isOpponent?: boolean;
   isRested?: boolean;
+  isSelected?: boolean;
   onClick?: () => void;
   onInspect?: () => void;
   className?: string;
@@ -19,6 +21,7 @@ export const CardView: React.FC<CardProps> = ({
   cardInstance,
   isOpponent = false,
   isRested = false,
+  isSelected = false,
   onClick,
   onInspect,
   className = '',
@@ -70,9 +73,9 @@ export const CardView: React.FC<CardProps> = ({
         e.preventDefault();
         onInspect?.();
       }}
-      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 shadow-md flex flex-col overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${
+      className={`group relative ${sizeClasses} rounded-lg border-2 ${borderClass} bg-slate-900 bot-card-depth flex flex-col overflow-hidden transition-all hover:scale-105 hover:z-20 cursor-pointer ${
         isRested ? 'rotate-90 origin-center my-3' : ''
-      } ${className}`}
+      } ${isSelected ? 'ring-2 ring-amber-400 shadow-lg shadow-amber-500/30' : ''} ${className}`}
       title={card.name}
     >
       {/* Top Header: Cost, GEM, Name */}
@@ -96,6 +99,10 @@ export const CardView: React.FC<CardProps> = ({
 
       {/* Card Artwork / Image */}
       <div className="flex-1 relative bg-slate-950 flex items-center justify-center overflow-hidden">
+        {/* AUTO/MANUAL resolution badge (classifyCard) — compact corner tag, never covers the art */}
+        <div className="absolute bottom-0.5 left-0.5 z-10">
+          <ClassificationBadge card={card} size="sm" />
+        </div>
         {card.imageUrl ? (
           <img
             src={card.imageUrl}

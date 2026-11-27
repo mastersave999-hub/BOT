@@ -64,6 +64,7 @@ import {
   ManualOverrideBanner,
   ManualOverrideControls
 } from './Phase5Modals';
+import { ClassificationBadge, OrnamentDivider } from './botTheme';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
   CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info, List
@@ -131,9 +132,12 @@ interface PhaseTrackerProps {
   turnNumber: number;
   activePlayerName: string;
   isMyTurn: boolean;
+  /** Current Reaction Window priority owner, shown only while a window is open. */
+  priorityPlayerName?: string;
+  isPriorityMine?: boolean;
 }
 
-const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, activePlayerName, isMyTurn }) => {
+const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, activePlayerName, isMyTurn, priorityPlayerName, isPriorityMine }) => {
   const currentIndex = PHASE_STEPS.findIndex(step => step.phase === currentPhase);
 
   return (
@@ -141,11 +145,22 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
       aria-label="ลำดับ Phase ของเกม"
       className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-xl border border-amber-500/30 bg-slate-950/95 px-2 py-1.5 shadow-lg backdrop-blur sm:px-4"
     >
-      <div aria-live="polite" className="mb-1 flex items-center justify-center gap-2 text-[9px] sm:text-[10px]">
+      <div aria-live="polite" className="mb-1 flex flex-wrap items-center justify-center gap-2 text-[9px] sm:text-[10px]">
         <span className={`rounded-full px-2 py-0.5 font-bold ${isMyTurn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-300'}`}>
           {isMyTurn ? 'YOUR TURN' : 'OPPONENT TURN'}
         </span>
         <span className="truncate font-semibold text-slate-200">{activePlayerName || 'ผู้เล่น'} · TURN {turnNumber}</span>
+        {priorityPlayerName && (
+          <span
+            className={`rounded-full border px-2 py-0.5 font-bold ${
+              isPriorityMine
+                ? 'border-amber-400/70 bg-amber-500/15 text-amber-300'
+                : 'border-slate-600 bg-slate-900 text-slate-300'
+            }`}
+          >
+            สิทธิ์ตอบโต้: {priorityPlayerName}
+          </span>
+        )}
       </div>
       <ol className="grid grid-cols-4 gap-1" aria-label="DRAW, MAIN, BATTLE, END">
         {PHASE_STEPS.map((step, index) => {
@@ -230,6 +245,54 @@ const KEYWORD_LEGEND = [
   { kw: 'แทงหลัง', color: 'bg-purple-600', desc: 'สามารถเลือกโจมตี Avatar ที่อยู่ในสภาพนอนได้โดยตรง' },
 ];
 
+const AVATAR_KEYWORDS = KEYWORD_LEGEND.map(item => item.kw);
+
+/** Compact status row under an Avatar: live POWER delta, active keyword tags and tucked Modification cards. */
+const AvatarStatusChips: React.FC<{ avatar: CardInstance }> = ({ avatar }) => {
+  const netPower = calculateNetPower(avatar);
+  const delta = netPower - avatar.card.power;
+  const keywords = AVATAR_KEYWORDS.filter(kw => avatarHasKeyword(avatar, kw));
+  const attachments = avatar.attachedInstances ?? [];
+  if (delta === 0 && keywords.length === 0 && attachments.length === 0) return null;
+  return (
+    <div className="mt-0.5 flex max-w-[7.5rem] flex-col items-center gap-0.5">
+      {delta !== 0 && (
+        <span
+          className={`rounded border px-1 text-[8px] font-black leading-tight ${
+            delta > 0
+              ? 'border-emerald-600/50 bg-emerald-950/90 text-emerald-300'
+              : 'border-amber-600/50 bg-red-950/90 text-amber-300'
+          }`}
+        >
+          POWER {delta > 0 ? `+${delta}` : delta}
+        </span>
+      )}
+      {keywords.length > 0 && (
+        <div className="flex max-w-full flex-wrap justify-center gap-0.5">
+          {keywords.map(kw => (
+            <span key={kw} className="rounded-sm border border-amber-500/40 bg-slate-900 px-1 text-[7px] font-bold text-amber-300">
+              {kw}
+            </span>
+          ))}
+        </div>
+      )}
+      {attachments.length > 0 && (
+        <div className="flex max-w-full flex-wrap justify-center gap-0.5">
+          {attachments.map(mod => (
+            <span
+              key={mod.instanceId}
+              title={`Modification: ${mod.card.name}`}
+              className="max-w-full truncate rounded-sm border border-indigo-500/40 bg-indigo-950/90 px-1 text-[7px] font-semibold text-indigo-200"
+            >
+              {mod.card.name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, isHost = true, link }) => {
   const [gameState, setGameState] = useState<GameState>(() => recomputeContinuousAuras(initialState));
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
@@ -268,6 +331,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [manualResolution, setManualResolution] = useState<{ instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' } | null>(null);
   const [manualControlsOpen, setManualControlsOpen] = useState<boolean>(false);
   const activeRuleMode = gameState.ruleMode ?? 'HYBRID';
+  // Phase 6 tap-first hand: first tap selects/previews, the action dock executes.
+  const [selectedHandCardId, setSelectedHandCardId] = useState<string | null>(null);
+  const [showDarkDimensionModal, setShowDarkDimensionModal] = useState<boolean>(false);
 
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
@@ -275,6 +341,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   const me = gameState.players[meId];
   const opponent = gameState.players[opponentId];
+  // Derived (not stored): the selection self-clears when the card leaves the hand.
+  const selectedHandCard = (selectedHandCardId && me?.hand.find(card => card.instanceId === selectedHandCardId)) || null;
   const isMyTurn = gameState.playerOrder[gameState.currentTurnPlayerIndex] === meId;
   const isSubmittingEndPhaseDiscard = submittedDiscardRevision !== null && submittedDiscardRevision === gameState.pendingEndPhaseDiscardRevision;
 
@@ -1752,16 +1820,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       )}
 
       {manualResolution && activeRuleMode === 'HYBRID' && !gameState.pendingManualOverride && (
-        <section aria-label="Manual Effect Resolution" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-purple-400/50 bg-purple-950/95 px-3 py-2 text-xs text-purple-100">
+        <section aria-label="Manual Effect Resolution" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-amber-400/50 bg-red-950/95 px-3 py-2 text-xs text-amber-100">
           <div className="mr-auto min-w-0">
             <p className="font-bold">
               Manual Effect Resolution · {manualResolution.card.name}
-              <span className="ml-1.5 rounded bg-purple-500/30 px-1.5 py-0.5 text-[9px] font-bold">{manualResolution.status}</span>
+              <span className="ml-1.5 rounded border border-amber-400/70 bg-red-950/90 px-1.5 py-0.5 text-[9px] font-black tracking-widest text-amber-300">{manualResolution.status}</span>
             </p>
-            <p className="text-[10px] text-purple-200 line-clamp-2">{manualResolution.card.mainEffect}</p>
+            <p className="text-[10px] text-amber-200 line-clamp-2">{manualResolution.card.mainEffect}</p>
           </div>
           {isMyTurn && !gameState.reactionWindow && !gameState.pendingDeckChoice && !gameState.pendingHellChoice && (
-            <button type="button" onClick={() => setManualControlsOpen(true)} className="rounded bg-purple-400 px-3 py-1.5 font-bold text-slate-950">
+            <button type="button" onClick={() => setManualControlsOpen(true)} className="rounded bg-amber-400 px-3 py-1.5 font-bold text-slate-950">
               เปิดช่องทางจัดการด้วยมือ
             </button>
           )}
@@ -1848,9 +1916,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       {/* Main Playmat + Side Event Log */}
       <main className="flex-1 flex overflow-hidden relative">
         {/* Official Playmat Arena */}
-        <div className="flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900">
+        <div className="flex-1 flex flex-col justify-between p-1.5 sm:p-3 overflow-y-auto bot-felt">
           {/* ==================== OPPONENT PLAYMAT HALF (MIRRORED) ==================== */}
-          <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-1.5 sm:p-2 space-y-1.5">
+          <div className="rounded-xl border border-amber-500/15 bg-slate-950/50 p-1.5 sm:p-2 space-y-1.5 shadow-[inset_0_1px_0_rgba(251,191,36,0.05)]">
             {opponentIds.length > 1 && (
               <div role="tablist" aria-label="เลือกคู่แข่ง" className="flex gap-1.5 overflow-x-auto pb-0.5">
                 {opponentIds.map(id => {
@@ -1896,15 +1964,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             <div className="grid grid-cols-12 gap-1.5 sm:gap-2 items-stretch">
               {/* Left Col: Deck & Hell (2 cols) */}
               <div className="col-span-2 flex flex-col gap-1.5">
-                <div className="flex-1 bg-slate-950/80 border border-slate-800 rounded-lg p-1 flex flex-col items-center justify-center text-center">
-                  <span className="text-[9px] text-slate-400 font-bold">Deck กองจั่ว</span>
+                <div className="flex-1 rounded-lg border border-amber-500/20 bg-slate-950/80 p-1 flex flex-col items-center justify-center text-center">
+                  <span className="text-[9px] text-amber-300/80 font-bold">Deck กองจั่ว</span>
                   <span className="text-sm font-black text-slate-200">{opponent.deck.length}</span>
                 </div>
                 <div
                   onClick={() => setShowHellModal('OPPONENT')}
-                  className="flex-1 bg-slate-950/80 border border-slate-800 hover:border-red-500/50 rounded-lg p-1 flex flex-col items-center justify-center text-center cursor-pointer"
+                  className="flex-1 rounded-lg border border-amber-500/20 bg-slate-950/80 hover:border-red-500/50 p-1 flex flex-col items-center justify-center text-center cursor-pointer transition"
                 >
-                  <span className="text-[9px] text-slate-400 font-bold">Hell นรก</span>
+                  <span className="text-[9px] text-amber-300/80 font-bold">Hell นรก</span>
                   <span className="text-sm font-black text-red-400">{opponent.hell.length}</span>
                 </div>
               </div>
@@ -1912,18 +1980,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               {/* Center Col: Magic Zone (top) + Avatar Zone (bottom, facing center) (8 cols) */}
               <div className="col-span-8 flex flex-col gap-1.5">
                 {/* Opponent Magic Zone */}
-                <div className="min-h-[42px] bg-slate-950/50 border border-slate-800/80 rounded-lg px-2 py-1 flex items-center justify-between text-[10px] text-slate-500">
-                  <span className="font-semibold">Magic Zone (คู่แข่ง)</span>
+                <div className="min-h-[42px] rounded-lg border border-amber-500/15 bg-slate-950/60 px-2 py-1 flex items-center justify-between text-[10px] text-slate-500">
+                  <span className="font-semibold text-amber-300/70">Magic Zone (คู่แข่ง)</span>
                   <span>{opponent.magicZone.length} ใบที่ใช้แล้ว</span>
                 </div>
 
                 {/* Opponent Avatar Zone (Max 4) */}
-                <div className="min-h-[115px] sm:min-h-[135px] bg-slate-950/60 border-2 border-slate-800 rounded-xl p-1.5 flex items-center justify-center gap-2 relative">
+                <div className="min-h-[115px] sm:min-h-[135px] rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 flex items-center justify-center gap-2 relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
                   {opponent.avatarZone.length === 0 ? (
                     <span className="text-[11px] text-slate-600">Avatar Zone คู่แข่ง (สูงสุด 4 ใบ)</span>
                   ) : (
                     opponent.avatarZone.map(avatar => (
-                      <div key={avatar.instanceId} className="relative">
+                      <div key={avatar.instanceId} className="relative flex flex-col items-center">
                         <CardView
                           cardInstance={avatar}
                           size="sm"
@@ -1932,6 +2000,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                           onClick={() => handleAvatarClick(avatar, false)}
                           onInspect={() => setInspectedCard(avatar)}
                         />
+                        <AvatarStatusChips avatar={avatar} />
                         {(selectedAttackerId || pendingAbility) && (
                           <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 bg-red-600 text-white text-[8px] px-1.5 py-0.5 rounded shadow pointer-events-none">
                             เป้าหมาย
@@ -1982,18 +2051,20 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             turnNumber={gameState.turnNumber}
             activePlayerName={gameState.players[activePlayerId]?.name ?? ''}
             isMyTurn={isMyTurn}
+            priorityPlayerName={gameState.reactionWindow ? gameState.players[gameState.reactionWindow.priorityPlayerId]?.name : undefined}
+            isPriorityMine={gameState.reactionWindow?.priorityPlayerId === meId}
           />
 
           {/* ==================== SHARED CENTER & MY TOP ROW (Matches Playmat Top Row!) ==================== */}
           {/* Construct Zone (Left 37%) | Land Magic Zone (Center 26%) | Dark Dimension (Right 37%) */}
           <div className="grid grid-cols-12 gap-2 my-1.5 items-stretch">
             {/* Construct Zone (Left ~37% -> 4.5 cols, use col-span-5) */}
-            <div className="col-span-5 bg-slate-900/90 border-2 border-slate-700 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px]">
+            <div className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px] shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
               <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-slate-200">Construct Zone</span>
+                <span className="font-bold text-amber-300/90">Construct Zone</span>
                 <span className="text-slate-400 text-[9px]">มี Construct บนสนามได้สูงสุด 3 ใบ ({me.constructZone.length}/3)</span>
               </div>
-              <div className="flex items-center gap-1.5 mt-1 overflow-x-auto">
+              <div className="flex items-center gap-1.5 mt-1 overflow-x-auto no-scrollbar">
                 {me.constructZone.length === 0 ? (
                   <span className="text-[10px] text-slate-600 italic">วาง Construct ที่นี่</span>
                 ) : (
@@ -2001,8 +2072,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                     <div
                       key={cons.instanceId}
                       onClick={() => handleConstructClick(cons)}
-                      className="px-2 py-1 rounded bg-slate-800 border border-amber-500/40 text-[10px] font-semibold text-amber-300 cursor-pointer hover:bg-slate-700 shrink-0"
+                      className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 border border-amber-500/40 text-[10px] font-semibold text-amber-300 cursor-pointer hover:bg-slate-800 shrink-0"
                     >
+                      <ClassificationBadge card={cons.card} size="sm" />
                       {cons.card.name}
                     </div>
                   ))
@@ -2013,35 +2085,45 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             {/* Land Magic Zone (Center ~20% -> col-span-2) */}
             <div
               onClick={() => gameState.landMagicZone && setInspectedCard(gameState.landMagicZone)}
-              className="col-span-2 bg-slate-900/90 border-2 border-amber-500/50 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition"
+              className="col-span-2 rounded-xl border border-amber-500/40 bg-slate-950/70 p-1.5 flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 transition"
             >
               <span className="text-[10px] font-bold text-amber-400 leading-tight">Land Magic Zone</span>
               {gameState.landMagicZone ? (
-                <span className="text-[10px] text-white font-semibold mt-1 truncate max-w-full">
-                  {gameState.landMagicZone.card.name}
-                </span>
+                <>
+                  <span className="text-[10px] text-white font-semibold mt-1 truncate max-w-full">
+                    {gameState.landMagicZone.card.name}
+                  </span>
+                  <ClassificationBadge card={gameState.landMagicZone.card} size="sm" className="mt-0.5" />
+                </>
               ) : (
                 <span className="text-[9px] text-slate-500 mt-0.5">ว่าง</span>
               )}
             </div>
 
-            {/* Right Zone (Opponent Construct / Dark Dimension) (col-span-5) */}
-            <div className="col-span-5 bg-slate-900/60 border-2 border-slate-800 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px]">
+            {/* Dark Dimension Zone (Rule Book 3.2 Zone 7 — มิติมืด, public banish pile) */}
+            <div
+              onClick={() => setShowDarkDimensionModal(true)}
+              className="col-span-5 rounded-xl border border-amber-500/25 bg-slate-950/70 p-1.5 sm:p-2 flex flex-col justify-between min-h-[70px] cursor-pointer hover:border-amber-400/50 transition shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]"
+              title="คลิกเพื่อดูการ์ดในมิติมืด"
+            >
               <div className="flex items-center justify-between text-[10px]">
-                <span className="font-bold text-slate-400">มิติมืด (Dark Dimension) & Construct คู่แข่ง</span>
-                <span className="text-slate-500 text-[9px]">{me.darkDimension.length} ใบ</span>
+                <span className="font-bold text-amber-300/70">มิติมืด (Dark Dimension)</span>
+                <span className="text-slate-400 text-[9px]">{me.darkDimension.length} ใบ</span>
               </div>
-              <div className="text-[10px] text-slate-600 italic">
-                พื้นที่แยกส่วน / การ์ดที่ถูกส่งออกนอกเกม
+              <div className="text-[10px] text-slate-500 italic">
+                {me.darkDimension.length > 0
+                  ? 'การ์ดที่ถูกนำออกจากเกม — คลิกเพื่อตรวจ'
+                  : 'โซนสำหรับการ์ดที่ถูกนำออกจากเกม (Banish)'}
               </div>
             </div>
           </div>
 
           {/* ==================== MY PLAYMAT HALF (EXACT OFFICIAL PROPORTIONS) ==================== */}
-          <div className="bg-slate-900/80 border-2 border-slate-700 rounded-2xl p-2 shadow-2xl">
+          <OrnamentDivider className="my-1" label="สนามของคุณ" />
+          <div className="rounded-2xl border border-amber-500/25 bg-slate-950/70 p-2 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_4px_14px_rgba(0,0,0,0.5)]">
             <div className="grid grid-cols-12 gap-2 items-stretch">
               {/* LEFT COLUMN: LIFE ZONE (Full Height spanning Avatar + Magic rows) */}
-              <div className="col-span-2 bg-slate-950/90 border-2 border-slate-700 rounded-xl p-1.5 flex flex-col items-center justify-between">
+              <div className="col-span-2 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-between">
                 <div className="text-center">
                   <span className="text-xs sm:text-sm font-extrabold text-emerald-400 block">Life</span>
                   <span className="text-[9px] text-slate-400">ที่วาง Life ({me.lifeDeck.filter(c => !c.isFaceUp).length}/5)</span>
@@ -2068,9 +2150,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               {/* CENTER COLUMN: AVATAR ZONE (TOP) + MAGIC ZONE (BOTTOM) */}
               <div className="col-span-8 flex flex-col gap-2">
                 {/* AVATAR ZONE */}
-                <div className="min-h-[135px] sm:min-h-[155px] bg-slate-950/80 border-2 border-slate-700 rounded-xl p-2 flex flex-col justify-between relative">
+                <div className="min-h-[135px] sm:min-h-[155px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between relative shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="font-bold text-slate-200 text-xs">Avatar Zone</span>
+                    <span className="font-bold text-amber-300/90 text-xs">Avatar Zone</span>
                     <span>มี Avatar บนสนามได้สูงสุด 4 ใบ ({me.avatarZone.length}/4)</span>
                   </div>
 
@@ -2079,19 +2161,21 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                       <span className="text-xs text-slate-500">คลิกการ์ด Avatar บนมือด้านล่างเพื่ออัญเชิญลงสนาม</span>
                     ) : (
                       me.avatarZone.map(avatar => (
-                        <div key={avatar.instanceId} className="relative">
+                        <div key={avatar.instanceId} className="relative flex flex-col items-center">
                           <CardView
                             cardInstance={avatar}
                             size="sm"
                             isRested={avatar.isRested}
+                            isSelected={selectedAttackerId === avatar.instanceId}
                             onClick={() => handleAvatarClick(avatar, true)}
                             onInspect={() => setInspectedCard(avatar)}
                             className={
                               selectedAttackerId === avatar.instanceId
-                                ? 'ring-2 ring-amber-400 scale-105 shadow-lg shadow-amber-500/40'
+                                ? 'scale-105 shadow-lg shadow-amber-500/40'
                                 : ''
                             }
                           />
+                          <AvatarStatusChips avatar={avatar} />
                           {selectedAttackerId === avatar.instanceId && (
                             <div className="absolute -top-2 left-1/2 -translate-x-1/2 bg-amber-500 text-slate-950 font-black text-[8px] px-1.5 py-0.5 rounded shadow">
                               โจมตี!
@@ -2109,13 +2193,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* MAGIC ZONE */}
-                <div className="min-h-[85px] sm:min-h-[100px] bg-slate-950/80 border-2 border-slate-700 rounded-xl p-2 flex flex-col justify-between">
+                <div className="min-h-[85px] sm:min-h-[100px] rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col justify-between shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
                   <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="font-bold text-slate-200 text-xs">Magic Zone</span>
+                    <span className="font-bold text-amber-300/90 text-xs">Magic Zone</span>
                     <span>สามารถเล่น Magic ได้ประเภทละครั้ง ({me.magicZone.length} ใบในเทิร์น)</span>
                   </div>
 
-                  <div className="flex items-center gap-2 overflow-x-auto py-1">
+                  <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
                     {me.magicZone.length === 0 ? (
                       <span className="text-[11px] text-slate-600 mx-auto">คลิกการ์ด Magic บนมือเพื่อร่ายเวทย์</span>
                     ) : (
@@ -2123,8 +2207,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                         <div
                           key={m.instanceId}
                           onClick={() => setInspectedCard(m)}
-                          className="px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 text-[10px] font-semibold cursor-pointer shrink-0"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-950/80 border border-indigo-500/40 text-indigo-200 text-[10px] font-semibold cursor-pointer shrink-0"
                         >
+                          <ClassificationBadge card={m.card} size="sm" />
                           {m.card.name} ({m.card.subtype})
                         </div>
                       ))
@@ -2138,7 +2223,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 {/* HELL ZONE */}
                 <div
                   onClick={() => setShowHellModal('ME')}
-                  className="flex-1 bg-slate-950/90 border-2 border-slate-700 hover:border-red-500/60 rounded-xl p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition"
+                  className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 hover:border-red-500/60 p-1.5 flex flex-col items-center justify-center text-center cursor-pointer transition"
                   title="คลิกเพื่อดูการ์ดในนรก"
                 >
                   <Skull className="w-4 h-4 text-red-400 mb-0.5" />
@@ -2147,7 +2232,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* DECK ZONE */}
-                <div className="flex-1 bg-slate-950/90 border-2 border-slate-700 rounded-xl p-1.5 flex flex-col items-center justify-center text-center">
+                <div className="flex-1 rounded-xl border border-amber-500/25 bg-slate-950/80 p-1.5 flex flex-col items-center justify-center text-center">
                   <Layers className="w-4 h-4 text-amber-400 mb-0.5" />
                   <span className="text-xs sm:text-sm font-extrabold text-slate-200">Deck</span>
                   <span className="text-[9px] text-slate-400">กองจั่ว ({me.deck.length})</span>
@@ -2156,24 +2241,89 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             </div>
           </div>
 
-          {/* ==================== PLAYER HAND TRAY ==================== */}
-          <div className="mt-1.5 bg-slate-900/95 border border-slate-700 rounded-xl p-2 flex flex-col shrink-0">
+          {/* ==================== PLAYER HAND FAN (tap-first) ==================== */}
+          <div className="mt-1.5 rounded-xl border border-amber-500/25 bg-slate-950/80 p-2 flex flex-col shrink-0 shadow-[inset_0_1px_0_rgba(251,191,36,0.06)]">
             <div className="flex items-center justify-between text-[11px] text-slate-400 mb-1.5 px-1">
-              <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — คลิกเพื่อเล่นลงสนาม`}</span>
-              <span className="text-[10px]">กดปุ่ม <b className="text-amber-300">i</b> บนการ์ดเพื่อดูความสามารถก่อนลง</span>
+              <span className="font-bold text-amber-400">{gameState.pendingEndPhaseDiscardPlayerId === meId ? `เลือกการ์ดทิ้ง (${pendingEndPhaseDiscards?.length ?? 0}/${Math.max(0, me.hand.length - 7)})` : gameState.pendingEndPhaseDiscardPlayerId ? `กำลังรอ ${gameState.players[gameState.pendingEndPhaseDiscardPlayerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดทิ้ง` : `การ์ดบนมือของคุณ (${me.hand.length} ใบ) — แตะเพื่อเลือก แล้วกดปุ่มสั่งการ`}</span>
+              <span className="text-[10px]">แตะ 1 ครั้ง = เลือก/ดูตัวอย่าง · กด <b className="text-amber-300">i</b> เพื่อตรวจการ์ด</span>
             </div>
-            <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              {me.hand.map(handCard => (
-                <CardView
-                  key={handCard.instanceId}
-                  cardInstance={handCard}
-                  size="sm"
-                  onClick={() => handleInitiatePlayCard(handCard)}
-                  onInspect={() => setInspectedCard(handCard)}
-                  className="shrink-0 hover:-translate-y-1.5"
-                />
-              ))}
+            <div className="bot-hand-fan flex items-end justify-start overflow-x-auto pb-1 sm:justify-center">
+              {me.hand.map((handCard, handIndex) => {
+                const center = (me.hand.length - 1) / 2;
+                const offset = handIndex - center;
+                const isSelected = selectedHandCardId === handCard.instanceId;
+                return (
+                  <div
+                    key={handCard.instanceId}
+                    className={`bot-hand-card shrink-0 ${isSelected ? 'is-selected' : ''}`}
+                    style={{
+                      ['--fan-rot' as string]: `${(offset * 2.2).toFixed(2)}deg`,
+                      ['--fan-y' as string]: `${(Math.abs(offset) * 2).toFixed(1)}px`,
+                      marginLeft: handIndex === 0 ? undefined : '-0.85rem',
+                      zIndex: handIndex
+                    }}
+                  >
+                    <CardView
+                      cardInstance={handCard}
+                      size="sm"
+                      isSelected={isSelected}
+                      onClick={() => {
+                        if (gameState.pendingEndPhaseDiscardPlayerId || gameState.reactionWindow) {
+                          handleInitiatePlayCard(handCard);
+                          return;
+                        }
+                        if (isSelected) {
+                          setSelectedHandCardId(null);
+                          handleInitiatePlayCard(handCard);
+                        } else {
+                          setSelectedHandCardId(handCard.instanceId);
+                        }
+                      }}
+                      onInspect={() => setInspectedCard(handCard)}
+                    />
+                  </div>
+                );
+              })}
             </div>
+
+            {/* Tap-first action dock: executes only real engine actions */}
+            {selectedHandCard && !gameState.pendingEndPhaseDiscardPlayerId && !gameState.reactionWindow && (
+              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 border-t border-amber-500/20 pt-1.5">
+                <span className="max-w-[10rem] truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
+                <ClassificationBadge card={selectedHandCard.card} size="md" />
+                <span className="text-[10px] text-slate-400">
+                  ใช้ {selectedHandCard.card.cost ?? 0} · GEM {selectedHandCard.card.gem ?? 0}
+                  {selectedHandCard.card.power ? ` · PWR ${selectedHandCard.card.power}` : ''}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedHandCardId(null);
+                    handleInitiatePlayCard(selectedHandCard);
+                  }}
+                  className="rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-slate-950 shadow transition hover:bg-amber-400"
+                >
+                  {selectedHandCard.card.type === 'Avatar' ? 'อัญเชิญ (Summon)'
+                    : selectedHandCard.card.type === 'Magic' ? 'ร่ายเวทย์ (Cast)'
+                    : selectedHandCard.card.type === 'Construct' ? 'ก่อสร้าง (Set)'
+                    : 'เล่นการ์ด'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInspectedCard(selectedHandCard)}
+                  className="rounded-lg border border-amber-500/50 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10"
+                >
+                  ตรวจการ์ด (Inspect)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedHandCardId(null)}
+                  className="rounded-lg border border-slate-600 px-3 py-1.5 text-[11px] font-semibold text-slate-300 transition hover:bg-slate-800"
+                >
+                  ยกเลิก
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2381,12 +2531,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       {/* Hell Inspection Modal */}
       {showHellModal && (
         <div onClick={() => setShowHellModal(null)} className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div onClick={e => e.stopPropagation()} className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-4 space-y-3 max-h-[80vh] overflow-y-auto">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+          <div onClick={e => e.stopPropagation()} className="rounded-2xl border border-amber-500/40 bg-slate-900 max-w-lg w-full p-4 space-y-3 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
               <h3 className="font-bold text-sm text-red-400">
                 นรก (Hell) — {showHellModal === 'ME' ? me.name : opponent.name}
               </h3>
-              <button onClick={() => setShowHellModal(null)} className="text-slate-400 hover:text-white">
+              <button onClick={() => setShowHellModal(null)} aria-label="ปิดดูการ์ดในนรก" className="text-slate-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -2399,6 +2549,34 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               ))}
               {(showHellModal === 'ME' ? me.hell : opponent.hell).length === 0 && (
                 <div className="col-span-3 text-center py-6 text-slate-500 text-xs">ยังไม่มีการ์ดในนรก</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dark Dimension (Banish) Inspection Modal — Rule Book 3.2 Zone 7 */}
+      {showDarkDimensionModal && (
+        <div onClick={() => setShowDarkDimensionModal(false)} className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div onClick={e => e.stopPropagation()} className="rounded-2xl border border-amber-500/40 bg-slate-900 max-w-lg w-full p-4 space-y-3 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+              <h3 className="font-bold text-sm text-amber-400">
+                มิติมืด (Dark Dimension) — {me.name}
+              </h3>
+              <button onClick={() => setShowDarkDimensionModal(false)} aria-label="ปิดดูการ์ดในมิติมืด" className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[10px] text-slate-500">โซนสาธารณะสำหรับการ์ดที่ถูกนำออกจากเกม (Banish) ตาม Rule Book 3.2</p>
+            <div className="grid grid-cols-3 gap-2">
+              {me.darkDimension.map((c, idx) => (
+                <div key={idx} onClick={() => setInspectedCard(c)} className="p-2 rounded bg-slate-950 border border-slate-800 text-[11px] cursor-pointer hover:border-amber-500">
+                  <div className="font-bold text-slate-200 truncate">{c.card.name}</div>
+                  <div className="text-[9px] text-slate-400">{c.card.type} • {c.card.printId}</div>
+                </div>
+              ))}
+              {me.darkDimension.length === 0 && (
+                <div className="col-span-3 text-center py-6 text-slate-500 text-xs">ยังไม่มีการ์ดถูกเนรเทศไปมิติมืด</div>
               )}
             </div>
           </div>
