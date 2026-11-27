@@ -1,6 +1,13 @@
 import { clerkMiddleware } from '@clerk/nextjs/server'
 
-export default clerkMiddleware()
+// Clerk is optional: without keys the middleware passes requests through so the
+// app runs in guest mode instead of throwing on every route.
+const clerkEnabled =
+  !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && !!process.env.CLERK_SECRET_KEY;
+
+export default clerkEnabled
+  ? clerkMiddleware()
+  : function clerkOptionalPassthrough() {};
 
 export const config = {
   matcher: [

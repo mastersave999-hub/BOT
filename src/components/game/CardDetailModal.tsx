@@ -30,12 +30,12 @@ export const CardDetailModal: React.FC<CardDetailModalProps> = ({ cardInstance, 
       role="dialog"
       aria-modal="true"
       aria-label={`ตรวจการ์ด ${card.name}`}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-3 sm:p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-black/85 to-slate-950/90 backdrop-blur-sm p-3 sm:p-4"
       onClick={onClose}
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="relative w-full max-w-lg rounded-2xl border border-amber-500/40 bg-slate-900 shadow-2xl overflow-hidden flex flex-col md:flex-row max-h-[92vh]"
+        className="bot-modal-in relative w-full max-w-lg rounded-2xl border border-amber-500/50 bg-slate-900 shadow-[0_0_50px_rgba(251,191,36,0.12),0_24px_60px_rgba(0,0,0,0.7)] overflow-hidden flex flex-col md:flex-row max-h-[92vh]"
       >
         {/* Close Button */}
         <button

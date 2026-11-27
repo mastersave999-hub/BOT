@@ -86,14 +86,36 @@ function buildOnlineState(mode: RoomMode, setups: PlayerSetup[]): GameState {
   };
 }
 
+// Clerk is optional: without a publishable key the app renders in guest mode
+// (local decks only) instead of crashing inside Clerk hooks.
+const CLERK_ENABLED = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
+interface ClerkAuth {
+  isLoaded: boolean;
+  isSignedIn: boolean;
+  signOut: () => Promise<void>;
+}
+
 export default function Home() {
+  if (!CLERK_ENABLED) {
+    return <HomeShell clerk={{ isLoaded: true, isSignedIn: false, signOut: async () => {} }} />;
+  }
+  return <ClerkHomeShell />;
+}
+
+function ClerkHomeShell() {
+  const { isLoaded: isClerkLoaded, isSignedIn } = useUser();
+  const { signOut } = useClerk();
+  return <HomeShell clerk={{ isLoaded: isClerkLoaded, isSignedIn, signOut }} />;
+}
+
+function HomeShell({ clerk }: { clerk: ClerkAuth }) {
   const [currentView, setCurrentView] = useState<'HOME' | 'DECK_BUILDER' | 'LOBBY' | 'GAME'>('HOME');
   const [gameMode, setGameMode] = useState<'DUEL' | 'AD_MUA'>('DUEL');
   const [initialGameState, setInitialGameState] = useState<GameState | null>(null);
   const [onlineSession, setOnlineSession] = useState<MatchSession | null>(null);
 
-  const { isLoaded: isClerkLoaded, isSignedIn } = useUser();
-  const { signOut } = useClerk();
+  const { isLoaded: isClerkLoaded, isSignedIn } = clerk;
   const { data: user = null, mutate: mutateUser } = useSWR<UserAccount | null>(
     isClerkLoaded && isSignedIn ? 'current-user' : null,
     getCurrentUser,
@@ -123,7 +145,7 @@ export default function Home() {
   }, [user]);
 
   const handleLogout = async () => {
-    await signOut();
+    await clerk.signOut();
     loadedDeckUserId.current = null;
     await mutateUser(null, { revalidate: false });
   };
@@ -308,6 +330,10 @@ export default function Home() {
             <ProfileMenu user={user} onLogout={() => void handleLogout()} />
           ) : !isClerkLoaded || isSignedIn ? (
             <span role="status" className="text-xs text-slate-500">กำลังโหลดบัญชี…</span>
+          ) : !CLERK_ENABLED ? (
+            <span className="rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-1.5 text-xs font-semibold text-slate-400">
+              โหมดผู้เล่น (Guest)
+            </span>
           ) : (
             <button
               onClick={() => setIsAuthOpen(true)}
@@ -429,11 +455,13 @@ export default function Home() {
         <span>เวอร์ชัน {packageJson.version} • คลังการ์ด 2,014 ใบ</span>
       </footer>
 
-      {/* Auth Modal */}
-      <AuthModal
-        isOpen={isAuthOpen}
-        onClose={() => setIsAuthOpen(false)}
-      />
+      {/* Auth Modal — Clerk hooks require the provider, so it only mounts when Clerk is configured. */}
+      {CLERK_ENABLED && (
+        <AuthModal
+          isOpen={isAuthOpen}
+          onClose={() => setIsAuthOpen(false)}
+        />
+      )}
     </div>
   );
 }

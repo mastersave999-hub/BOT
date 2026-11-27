@@ -154,7 +154,7 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
   return (
     <section
       aria-label="ลำดับ Phase ของเกม"
-      className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-lg border border-amber-500/30 bg-slate-950/95 px-1.5 py-1 shadow-lg backdrop-blur"
+      className="sticky top-0 z-20 mx-auto w-full max-w-3xl self-center rounded-xl border border-amber-500/40 bg-gradient-to-b from-slate-900/95 to-slate-950/95 px-1.5 py-1 shadow-[0_4px_18px_rgba(0,0,0,0.55),0_0_0_1px_rgba(251,191,36,0.06)] backdrop-blur"
     >
       <div aria-live="polite" className="flex items-center gap-1.5">
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold leading-none sm:text-[9px] ${isMyTurn ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-800 text-slate-300'}`}>
@@ -185,7 +185,7 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
                 aria-current={isCurrent ? 'step' : undefined}
                 className={`flex min-w-0 items-center justify-center gap-1 rounded-md border px-1 py-0.5 text-center transition-colors ${
                   isCurrent
-                    ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_14px_rgba(251,191,36,0.25)]'
+                    ? 'border-amber-300 bg-amber-400 text-slate-950 shadow-[0_0_18px_rgba(251,191,36,0.55)]'
                     : isCompleted
                       ? 'border-emerald-700/60 bg-emerald-950/50 text-emerald-300'
                       : 'border-slate-800 bg-slate-900/60 text-slate-500'
@@ -2227,7 +2227,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   return (
     <div className="flex flex-col h-[100dvh] w-full bg-slate-950 select-none overflow-hidden text-slate-200 font-kanit">
       {/* Top Header Bar */}
-      <header className="shrink-0 min-h-9 sm:min-h-11 bg-slate-900 border-b border-slate-800 px-2 sm:px-3 py-0.5 sm:py-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 z-30 sm:flex-nowrap">
+      <header className="shrink-0 min-h-9 sm:min-h-11 bg-gradient-to-r from-slate-950 via-slate-900 to-slate-950 border-b border-amber-500/25 px-2 sm:px-3 py-0.5 sm:py-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 z-30 sm:flex-nowrap shadow-[0_2px_12px_rgba(0,0,0,0.5)]">
         <div className="flex items-center space-x-2">
           <span className="font-extrabold text-amber-500 tracking-wider flex items-center gap-1 text-xs sm:text-sm">
             <Flame className="w-4 h-4 text-red-500 fill-red-500" />
@@ -2580,6 +2580,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                       cardInstance={avatar}
                       size={isCompactViewport ? 'xs' : 'sm'}
                       isRested={avatar.isRested}
+                      className={selectedAttackerId === avatar.instanceId ? 'bot-attack-glow' : ''}
                       onClick={() => handleAvatarClick(avatar, true)}
                       onInspect={() => setInspectedCard(avatar)}
                     />
@@ -2649,7 +2650,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               ? []
               : deriveLegalAvatarActions(gameState, meId, attackAvatar);
             return (
-              <div className="mt-1.5 flex flex-wrap items-center justify-center gap-2 rounded-xl border border-red-500/40 bg-red-950/40 px-3 py-2">
+              <div className="bot-modal-in mt-1.5 flex flex-wrap items-center justify-center gap-2 rounded-xl border border-red-500/50 bg-gradient-to-r from-red-950/80 via-red-900/60 to-red-950/80 px-3 py-2 shadow-[0_0_24px_rgba(239,68,68,0.18)]">
                 <span className="text-[11px] font-bold text-red-100">เลือกโจมตีด้วย "{attackAvatar.card.name}"</span>
                 {attackCommittedId === selectedAttackerId ? (
                   <span className="text-[10px] text-red-200">ประกาศโจมตีแล้ว — คลิกเป้าหมายฝ่ายตรงข้าม (Avatar หรือ LIFE)</span>
@@ -2737,7 +2738,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine.
                 Rendered above the fan (order-1) so it pops up over the playmat, not off-screen. */}
             {selectedHandCard && !gameState.pendingEndPhaseDiscardPlayerId && !gameState.reactionWindow && (
-              <div className="order-1 mb-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-slate-950/95 px-2 py-1.5">
+              <div className="bot-modal-in order-1 mb-1.5 flex flex-wrap items-center gap-2 rounded-lg border border-amber-400/50 bg-gradient-to-r from-slate-950 via-amber-950/40 to-slate-950 px-2 py-1.5 shadow-[0_0_20px_rgba(251,191,36,0.12)]">
                 <span className="max-w-[7rem] shrink-0 truncate text-[11px] font-bold text-amber-300">{selectedHandCard.card.name}</span>
                 <ClassificationBadge card={selectedHandCard.card} size="md" />
                 <span className="shrink-0 font-mono text-[10px] text-slate-400">
