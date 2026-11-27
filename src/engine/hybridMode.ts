@@ -12,8 +12,10 @@ import {
   changeAvatarControl,
   validateAvatarZone,
   validateGameState,
+  getRegisteredLandMagicHook,
   type PlayerZone,
 } from './gameRules';
+import { getRuntimeExecutionBlockers, parseCardAbility } from './abilityEngine';
 import { appendGameEvents, type GameEvent } from './gameEvents';
 import { millCards, scoutCards, searchDeck, shuffleDeck } from './deckOperations';
 import { beginHellChoice } from './hellChoice';
@@ -33,6 +35,12 @@ export interface CardClassification {
 export function classifyCard(card: Card): CardClassification {
   const text = card.mainEffect ?? '';
   if (!text.trim()) return { status: 'VERIFIED_WORKING', reason: 'Vanilla card without rule text' };
+  // A registered continuous Land Magic hook is executed live by the engine
+  // (gameRules legality/payment recomputation), so it is fully verified.
+  const landHook = getRegisteredLandMagicHook(card);
+  if (landHook) {
+    return { status: 'VERIFIED_WORKING', reason: `Registered continuous Land Magic hook (${landHook.printId}): ${landHook.description}` };
+  }
   const parsed = parseCardText(card);
   if (parsed.status !== 'PARSED_READY') return { status: parsed.status, reason: parsed.reason };
   const blockers: string[] = [];
@@ -48,7 +56,16 @@ export function classifyCard(card: Card): CardClassification {
   if (parsed.clauses.some(clause => /เมื่อ|จุติ|คำสั่งเสีย|อัตโนมัติ|ต่อเนื่อง|เทิร์นละครั้ง|สั่งใช้/.test(clause.source))) {
     blockers.push('timing/event context not verified');
   }
-  if (blockers.length === 0) return { status: 'VERIFIED_WORKING' };
+  if (blockers.length === 0) {
+    // A card is AUTO only when its actual runtime execution mutates the game state
+    // as written; anything the runtime would refuse falls back to MANUAL so the
+    // player is never cheated out of an effect.
+    const runtimeBlockers = getRuntimeExecutionBlockers(card);
+    if (runtimeBlockers.length > 0) {
+      return { status: 'UNSUPPORTED', reason: `runtime execution not verified: ${runtimeBlockers.join('; ')}` };
+    }
+    return { status: 'VERIFIED_WORKING' };
+  }
   return { status: 'UNSUPPORTED', reason: blockers.join('; ') };
 }
 
@@ -88,6 +105,17 @@ export function shouldOfferManualResolution(
 /** Auto-Strict rooms reject any deck containing a card the engine cannot resolve automatically. */
 export function deckViolatesAutoStrict(cards: readonly Card[]): Card | null {
   return cards.find(card => !isCardFullyVerified(card)) ?? null;
+}
+
+/** How playing a Land Magic card must be resolved by the engine and the UI. */
+export type LandMagicActivationPlan = 'CONTINUOUS_HOOK' | 'EXECUTE' | 'MANUAL_FALLBACK';
+
+export function getLandMagicActivationPlan(card: Card): LandMagicActivationPlan {
+  if (card.type !== 'Magic' || card.subtype !== 'Land') return 'MANUAL_FALLBACK';
+  if (getRegisteredLandMagicHook(card)) return 'CONTINUOUS_HOOK';
+  if (classifyCard(card).status !== 'VERIFIED_WORKING') return 'MANUAL_FALLBACK';
+  // Verified continuous POWER auras are applied by recomputeContinuousAuras.
+  return parseCardAbility(card).powerMod !== 0 ? 'CONTINUOUS_HOOK' : 'EXECUTE';
 }
 
 export interface ManualOverrideResult {

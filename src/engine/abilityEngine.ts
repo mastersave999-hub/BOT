@@ -1,4 +1,5 @@
 import { GameState, CardInstance, PlayerState, Card } from './types';
+import { getRegisteredLandMagicHook } from './gameRules';
 import { resolveEffectPlan, type EffectDefinition } from './effectResolver';
 import { recomputeContinuousEffects, expirePreventionShieldsAt } from './continuousEffects';
 import { calculateEffectiveSymbol } from './layers';
@@ -63,9 +64,11 @@ export function parseCardAbility(card: Card): AbilityParseResult {
   const hasBackstab = eff.includes('แทงหลัง');
   const hasSacrifice = eff.includes('เซ่นไหว้');
 
-  // Parse draw count: "จั่วการ์ด X ใบ" or "จั่ว X ใบ"
+  // Parse draw count: "จั่วการ์ด X ใบ" or "จั่ว X ใบ". Intermediate words such as
+  // "จาก Deck เรา" (e.g. "จั่วการ์ดจาก Deck เรา 2 ใบ") are allowed between the
+  // verb and the count, otherwise verified draw cards would never execute.
   let drawCount = 0;
-  const drawMatch = eff.match(/จั่ว(?:การ์ด)?\s*(\d+)\s*ใบ/);
+  const drawMatch = eff.match(/จั่ว(?:การ์ด)?[^0-9]{0,40}?(\d+)\s*ใบ/);
   if (drawMatch) {
     drawCount = parseInt(drawMatch[1], 10);
   }
@@ -278,7 +281,7 @@ export function executeCardAbility(
   state: GameState,
   actorId: string,
   sourceCard: CardInstance,
-  triggerType: 'SUMMON_JUTI' | 'MAGIC_CAST' | 'ON_ATTACK' | 'LAST_WORDS' | 'LIFE_FLIP' | 'CONSTRUCT_ACTIVATE',
+  triggerType: 'SUMMON_JUTI' | 'MAGIC_CAST' | 'LAND_MAGIC' | 'ON_ATTACK' | 'LAST_WORDS' | 'LIFE_FLIP' | 'CONSTRUCT_ACTIVATE',
   targetAvatarId?: string
 ): { state: GameState; logs: string[] } {
   const logs: string[] = [];
@@ -296,6 +299,7 @@ export function executeCardAbility(
       case 'SUMMON_JUTI': return sourceCard.card.type === 'Avatar' && parsed.hasJuti;
       case 'MAGIC_CAST': return sourceCard.card.type === 'Magic' &&
         (sourceCard.card.subtype === 'Normal' || sourceCard.card.subtype === 'React');
+      case 'LAND_MAGIC': return sourceCard.card.type === 'Magic' && sourceCard.card.subtype === 'Land';
       case 'ON_ATTACK': return sourceCard.card.type === 'Avatar' && parsed.hasOnAttack;
       case 'LAST_WORDS': return parsed.hasLastWords;
       case 'LIFE_FLIP': return sourceCard.card.type === 'Life';
@@ -304,6 +308,15 @@ export function executeCardAbility(
     }
   })();
   if (!triggerIsValid) return { state, logs };
+
+  // Registered continuous Land Magic hooks (e.g. "สภาแบงค์" BT06-061) are live auras
+  // recomputed by gameRules on every legality and payment check; playing the card
+  // only announces the aura instead of performing a one-shot state change.
+  const landHook = sourceCard.card.subtype === 'Land' ? getRegisteredLandMagicHook(sourceCard.card) : null;
+  if (landHook) {
+    logs.push(`${sourceCard.card.name}: ออราต่อเนื่องทำงาน — ${landHook.description}`);
+    return { state, logs };
+  }
 
   // Rule Book 3.2 pp.12–13 requires an effect to resolve as a whole and costs
   // to be paid only when the complete effect is possible. Until the engine has
@@ -445,4 +458,64 @@ export function expireModifiersAt(
 
 export function clearEndOfTurnModifiers(state: GameState): GameState {
   return expireModifiersAt(state, 'END_OF_TURN');
+}
+
+/**
+ * Hotfix integrity audit: lists every reason the runtime pipeline
+ * (executeCardAbility / continuous aura hooks) would refuse to execute a card's
+ * printed effect. A card may only be classified VERIFIED_WORKING (AUTO) when this
+ * returns no blockers — otherwise players would be cheated out of the effect.
+ */
+export function getRuntimeExecutionBlockers(card: Card): string[] {
+  const text = card.mainEffect ?? '';
+  if (!text.trim()) return [];
+
+  if (card.type === 'Magic' && card.subtype === 'Land') {
+    if (getRegisteredLandMagicHook(card)) return [];
+    // Continuous POWER auras from Land Magic are applied by recomputeContinuousAuras.
+    if (parseCardAbility(card).powerMod !== 0) return [];
+    return ['Land Magic continuous aura has no registered runtime hook'];
+  }
+
+  if (card.type === 'Magic' && (card.subtype === 'Normal' || card.subtype === 'React')) {
+    const blockers: string[] = [];
+    const unsupportedReason = getUnsupportedEffectReason(card);
+    if (unsupportedReason) blockers.push(`runtime refuses the whole effect: ${unsupportedReason}`);
+    const parsed = parseCardAbility(card);
+    const hasResolvedOperation = parsed.drawCount > 0 || parsed.powerMod !== 0 || parsed.resetsPower ||
+      parsed.destroysTarget || parsed.destroysAllOpponentAvatars || parsed.bouncesTarget ||
+      parsed.summonsFromHell || parsed.recoversFromHell > 0 || /ยกเลิกการใช้\s*Magic Card/.test(text);
+    if (!hasResolvedOperation) {
+      blockers.push('no runtime handler resolves any printed effect');
+      return blockers;
+    }
+    // Clause coverage: every action word printed on the card must map to a runtime
+    // operation, otherwise the card would only partially resolve "as written".
+    if (/ทำลาย/.test(text) && !parsed.destroysTarget && !parsed.destroysAllOpponentAvatars) {
+      blockers.push('destruction clause has no runtime handler');
+    }
+    if (/จั่ว/.test(text) && parsed.drawCount === 0) {
+      blockers.push('draw clause has no runtime handler');
+    }
+    if ((text.match(/POWER\s*[+-]?\d+/gi)?.length ?? 0) > 1) {
+      blockers.push('multiple POWER modifiers exceed the single-target runtime handler');
+    }
+    if (/กลับขึ้นมือ|นำขึ้นมือ/.test(text) && !parsed.bouncesTarget) {
+      blockers.push('bounce-to-hand clause has no runtime handler');
+    }
+    if (/นรก/.test(text) && !parsed.summonsFromHell && parsed.recoversFromHell === 0) {
+      blockers.push('Hell interaction clause has no runtime handler');
+    }
+    return blockers;
+  }
+
+  if (card.type === 'Magic' && card.subtype === 'Modification') {
+    const parsed = parseCardAbility(card);
+    if (parsed.powerMod !== 0 || parsed.grantsKeyword) return [];
+    return ['Modification equip has no runtime handler for its printed effect'];
+  }
+
+  // Non-Magic cards resolve automatically only when they are vanilla (textless);
+  // any printed effect needs a verified trigger path the engine does not model here.
+  return ['printed effect has no verified runtime execution path'];
 }
