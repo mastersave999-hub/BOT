@@ -13,7 +13,7 @@ interface CardProps {
   onClick?: () => void;
   onInspect?: () => void;
   className?: string;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'xs' | 'sm' | 'md' | 'lg';
 }
 
 export const CardView: React.FC<CardProps> = ({
@@ -29,6 +29,9 @@ export const CardView: React.FC<CardProps> = ({
   const { card, isFaceUp } = cardInstance;
 
   const sizeClasses = {
+    // xs scales with viewport height (dvh) so short preview panes and tall phones
+    // both keep the whole playmat inside one screen.
+    xs: 'w-[clamp(2.5rem,8dvh,3.25rem)] h-[clamp(3.25rem,11dvh,4.5rem)] text-[9px]',
     sm: 'w-16 h-24 text-[10px]',
     md: 'w-24 h-36 text-xs',
     lg: 'w-32 h-48 text-sm'
@@ -143,7 +146,7 @@ export const CardView: React.FC<CardProps> = ({
                   : 'text-red-400 bg-red-950/80 border-red-800/60'
               }`}
             >
-              {size === 'sm' ? netPwr : `PWR ${netPwr}`}
+              {size === 'sm' || size === 'xs' ? netPwr : `PWR ${netPwr}`}
             </span>
           );
         })()}
