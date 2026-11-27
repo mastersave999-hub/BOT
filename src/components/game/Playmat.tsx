@@ -43,7 +43,7 @@ import {
 import { calculateNetPower } from '../../engine/layers';
 import { checkModificationEquip } from '../../engine/equipLegality';
 import { appendGameEvents } from '../../engine/gameEvents';
-import { beginEndPhaseDiscard, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateAvatarZone, validateMagicPlay } from '../../engine/gameRules';
+import { beginEndPhaseDiscard, declineExitPrevention, discardToHandLimit, moveCardBetweenZones, useExitPrevention, validateAvatarZone, validateMagicPlay, getEffectiveCost, getColorlessGemInstanceIds } from '../../engine/gameRules';
 import {
   getGemPaymentCardUnavailableReason,
   getSelectedGemTotal,
@@ -175,7 +175,7 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
             สิทธิ์ตอบโต้: {priorityPlayerName}
           </span>
         )}
-        <ol className="ml-auto grid min-w-0 flex-1 grid-cols-4 gap-1 sm:w-56 sm:flex-none" aria-label="DRAW, MAIN, BATTLE, END">
+        <ol className="ml-auto grid min-w-0 flex-1 grid-cols-4 gap-1 sm:w-64 sm:flex-none" aria-label="DRAW, MAIN, BATTLE, END">
           {PHASE_STEPS.map((step, index) => {
             const isCurrent = index === currentIndex;
             const isCompleted = index < currentIndex;
@@ -192,11 +192,11 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
                 }`}
               >
                 {isCompleted ? (
-                  <CheckCircle2 aria-hidden="true" className="h-3 w-3 shrink-0" />
+                  <CheckCircle2 aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
                 ) : (
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isCurrent ? 'bg-slate-950' : 'bg-slate-700'}`} aria-hidden="true" />
                 )}
-                <span className="min-w-0 truncate text-[9px] font-extrabold tracking-wide leading-none">{step.label}</span>
+                <span className="min-w-0 truncate text-[9px] font-extrabold tracking-normal leading-none">{step.label}</span>
               </li>
             );
           })}
@@ -392,6 +392,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<CardInstance | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
+  const [notificationLeaving, setNotificationLeaving] = useState(false);
+  const notificationTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [pendingAbility, setPendingAbility] = useState<PendingAbilityAction | null>(null);
   const [pendingCost, setPendingCost] = useState<PendingCostPayment | null>(null);
   const [pendingEndPhaseDiscards, setPendingEndPhaseDiscards] = useState<string[] | null>(null);
@@ -422,7 +424,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [leftTick, setLeftTick] = useState<number>(0);
   // Phase 5: Deck/Hell choice submission guard and Hybrid manual resolution tracking.
   const [submittedChoiceRevision, setSubmittedChoiceRevision] = useState<number | null>(null);
-  const [manualResolution, setManualResolution] = useState<{ instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' } | null>(null);
+  const [manualResolution, setManualResolution] = useState<{ instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' | 'VERIFIED_WORKING' } | null>(null);
   const [manualControlsOpen, setManualControlsOpen] = useState<boolean>(false);
   const activeRuleMode = gameState.ruleMode ?? 'HYBRID';
   // Phase 6 tap-first hand: first tap selects/previews, the action dock executes.
@@ -651,8 +653,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const showNotification = (msg: string) => {
+    notificationTimers.current.forEach(clearTimeout);
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3200);
+    setNotificationLeaving(false);
+    // Fade out before unmounting so consecutive messages never cut each other short.
+    notificationTimers.current = [
+      setTimeout(() => setNotificationLeaving(true), 2800),
+      setTimeout(() => setNotification(null), 3200)
+    ];
   };
 
   // Helper to append logs
@@ -684,6 +692,28 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       card: source.card,
       status: classification.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'UNSUPPORTED'
     });
+  };
+
+  // Always-available escape hatch: any card (AUTO included) can be resolved through
+  // the Phase 8 Universal Manual Effect Resolver if an edge case ever fails to trigger.
+  const canUseManualEscapeHatch = activeRuleMode === 'HYBRID' && isMyTurn && !winnerName &&
+    !gameState.reactionWindow && !gameState.pendingDeckChoice && !gameState.pendingHellChoice &&
+    !gameState.pendingManualOverride && !gameState.pendingEndPhaseDiscardPlayerId &&
+    !gameState.pendingExitPrevention && !gameState.pendingDeckSearchVerification;
+
+  const openManualOverrideEscapeHatch = (source: CardInstance) => {
+    if (!canUseManualEscapeHatch) {
+      showNotification('ตอนนี้ยังเปิดช่องทางแก้ผลด้วยมือไม่ได้');
+      return;
+    }
+    const status = classifyCard(source.card).status;
+    setManualResolution({
+      instanceId: source.instanceId,
+      card: source.card,
+      status: status === 'AMBIGUOUS' ? 'AMBIGUOUS' : status === 'VERIFIED_WORKING' ? 'VERIFIED_WORKING' : 'UNSUPPORTED'
+    });
+    setInspectedCard(null);
+    setManualControlsOpen(true);
   };
 
   const resolveCombatAction = (
@@ -1325,7 +1355,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       }
     }
 
-    const cost = handCard.card.cost ?? 0;
+    const cost = getEffectiveCost(gameState, meId, handCard);
     const requiresGemPayment =
       (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && cost > 0;
 
@@ -1364,13 +1394,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       showNotification('การ์ดนี้เล่นได้เฉพาะใน Main Phase');
       return;
     }
-    const requiredCost = handCard.card.cost ?? 0;
+    const requiredCost = getEffectiveCost(gameState, meId, handCard);
     const requiresGemPayment =
       (handCard.card.type === 'Avatar' || handCard.card.type === 'Construct') && requiredCost > 0;
 
     if (
       (requiresGemPayment &&
-        (!paidCost || !validateGemPayment(me.hand, handCard, discardIds, requiredCost).valid)) ||
+        (!paidCost || !validateGemPayment(me.hand, handCard, discardIds, requiredCost, {
+          colorlessGemInstanceIds: getColorlessGemInstanceIds(gameState, meId, me.hand)
+        }).valid)) ||
       (!requiresGemPayment && discardIds.length > 0)
     ) {
       showNotification('เลือก GEM ที่ถูกต้องและเพียงพอก่อนยืนยัน Cost');
@@ -1508,12 +1540,35 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             };
           }
         }
-        nextState.landMagicZone = { ...handCard, isFaceUp: true };
+        const landInstance: CardInstance = { ...handCard, isFaceUp: true };
+        nextState.landMagicZone = landInstance;
         nextState.players = { ...nextState.players, [meId]: updatedMe };
         nextState = recomputeContinuousAuras(nextState);
-        nextState = appendLogs(nextState, [`🏔️ ${me.name} ร่าย Land Magic "${handCard.card.name}" ลงใน Land Magic Zone`], 'MAGIC_LAND');
+        const landClassification = classifyCard(handCard.card);
+        if (landClassification.status === 'VERIFIED_WORKING') {
+          // VERIFIED_WORKING Land Magic executes in the engine: registered
+          // continuous hooks announce their live aura, other verified effects run.
+          const res = executeCardAbility(nextState, meId, landInstance, 'LAND_MAGIC');
+          nextState = appendLogs(nextState, [
+            `🏔️ ${me.name} ร่าย Land Magic "${handCard.card.name}" ลงใน Land Magic Zone`,
+            ...res.logs
+          ], 'MAGIC_LAND');
+          setGameState(nextState);
+          showNotification(`เปิดใช้งาน Land Magic "${handCard.card.name}"!`);
+          return;
+        }
+        // UNSUPPORTED / AMBIGUOUS Land Magic: open the Phase 8 Universal Manual
+        // Effect Resolver so the player resolves the effect legitimately.
+        nextState = appendLogs(nextState, [
+          `🏔️ ${me.name} ร่าย Land Magic "${handCard.card.name}" — ยังไม่มีตัวจัดการผลอัตโนมัติ เปิดช่องทางแก้ผลด้วยมือ`
+        ], 'MAGIC_LAND');
         setGameState(nextState);
-        showNotification(`เปิดใช้งาน Land Magic "${handCard.card.name}"!`);
+        setManualResolution({
+          instanceId: handCard.instanceId,
+          card: handCard.card,
+          status: landClassification.status === 'AMBIGUOUS' ? 'AMBIGUOUS' : 'UNSUPPORTED'
+        });
+        showNotification(`Land Magic "${handCard.card.name}" ต้องแก้ผลด้วยมือ (Manual Fallback)`);
         return;
       }
 
@@ -2746,9 +2801,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
       {/* Notification Banner */}
       {notification && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-slate-950 font-bold px-4 py-1.5 rounded-full shadow-2xl text-xs flex items-center gap-1.5">
-          <Swords className="w-3.5 h-3.5" />
-          <span>{notification}</span>
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50">
+          <div
+            role="status"
+            aria-live="polite"
+            className={`bot-toast flex items-center gap-1.5 rounded-full bg-amber-500 px-4 py-1.5 text-xs font-bold text-slate-950 shadow-2xl ${notificationLeaving ? 'is-leaving' : ''}`}
+          >
+            <Swords className="w-3.5 h-3.5" />
+            <span>{notification}</span>
+          </div>
         </div>
       )}
 
@@ -2760,7 +2821,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           me.hand,
           pendingCost.handCard,
           pendingCost.selectedDiscardIds,
-          pendingCost.requiredCost
+          pendingCost.requiredCost,
+          { colorlessGemInstanceIds: getColorlessGemInstanceIds(gameState, meId, me.hand) }
         );
         const actionLabel = pendingCost.handCard.card.type === 'Avatar' ? 'อัญเชิญ' : 'ก่อสร้าง';
 
@@ -2808,7 +2870,9 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   .filter(c => c.instanceId !== pendingCost.handCard.instanceId)
                   .map(c => {
                     const isSelected = pendingCost.selectedDiscardIds.includes(c.instanceId);
-                    const unavailableReason = getGemPaymentCardUnavailableReason(c, pendingCost.handCard);
+                    const unavailableReason = getGemPaymentCardUnavailableReason(c, pendingCost.handCard, {
+                      colorlessGemInstanceIds: getColorlessGemInstanceIds(gameState, meId, me.hand)
+                    });
                     const canToggle = isSelected || (!unavailableReason && selectedTotal < pendingCost.requiredCost);
 
                     return (
@@ -3034,7 +3098,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       )}
 
       {/* Card Detail Inspection Modal */}
-      <CardDetailModal cardInstance={inspectedCard} onClose={() => setInspectedCard(null)} />
+      <CardDetailModal
+        cardInstance={inspectedCard}
+        onClose={() => setInspectedCard(null)}
+        effectiveCost={inspectedCard && me.hand.some(card => card.instanceId === inspectedCard.instanceId)
+          ? getEffectiveCost(gameState, meId, inspectedCard)
+          : undefined}
+        onManualOverride={inspectedCard && canUseManualEscapeHatch
+          ? () => openManualOverrideEscapeHatch(inspectedCard)
+          : undefined}
+      />
 
       {showOpeningRoll && initialState.openingRolls && (
         <OpeningDiceRoll

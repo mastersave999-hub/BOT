@@ -1,5 +1,6 @@
 import type { CardInstance, GameState } from './types';
-import { validateAvatarZone, validateMagicPlay } from './gameRules';
+import { validateAvatarZone, validateMagicPlay, getEffectiveCost, getColorlessGemInstanceIds } from './gameRules';
+import { canPayCost } from './gemPayment';
 import { canUseNormalMagicAsReactOnOwnBattle, effectiveMagicSubtype } from './reactionEngine';
 import { classifyCard } from './hybridMode';
 
@@ -73,7 +74,14 @@ export function deriveLegalHandActions(
 
   if (handCard.card.type === 'Avatar') {
     if (inMainPhase && !validateAvatarZone({ avatarZone: [...player.avatarZone, handCard] })) {
-      return [{ kind: 'SUMMON', label: HAND_ACTION_LABELS.SUMMON }];
+      // The engine authorizes SUMMON only when the Cost Step can actually succeed,
+      // using the effective Cost after continuous Land Magic auras (e.g. "สภาแบงค์").
+      const effectiveCost = getEffectiveCost(state, playerId, handCard);
+      const colorlessGemInstanceIds = getColorlessGemInstanceIds(state, playerId, player.hand);
+      if (canPayCost(player.hand, handCard, effectiveCost, { colorlessGemInstanceIds })) {
+        return [{ kind: 'SUMMON', label: HAND_ACTION_LABELS.SUMMON }];
+      }
+      return [];
     }
     return [];
   }
@@ -81,7 +89,12 @@ export function deriveLegalHandActions(
   if (handCard.card.type === 'Construct') {
     if (inMainPhase && player.constructZone.length < 3 &&
       !player.constructZone.some(card => card.card.name === handCard.card.name)) {
-      return [{ kind: 'SET', label: HAND_ACTION_LABELS.SET }];
+      const effectiveCost = getEffectiveCost(state, playerId, handCard);
+      const colorlessGemInstanceIds = getColorlessGemInstanceIds(state, playerId, player.hand);
+      if (canPayCost(player.hand, handCard, effectiveCost, { colorlessGemInstanceIds })) {
+        return [{ kind: 'SET', label: HAND_ACTION_LABELS.SET }];
+      }
+      return [];
     }
     return [];
   }

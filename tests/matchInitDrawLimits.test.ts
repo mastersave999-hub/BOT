@@ -173,10 +173,15 @@ describe('Avatar Zone limits (Rule Book 3.2 Board Area 1: Avatars max 4, total w
       usedMagicTypesThisTurn: new Set()
     };
     const handAvatar = avatarInstance('hand-avatar');
+    // A summon requires a payable Cost Step, so the hand holds a matching Gem card.
+    const gemCard: CardInstance = {
+      ...avatarInstance('gem-card'),
+      card: { ...avatarInstance('a1').card, name: 'Gem Card', gem: 1, color: 'แดง' }
+    };
     const stateAt = (avatarZone: CardInstance[]): GameState => ({
       id: 'limits', mode: 'DUEL', playerOrder: ['p1', 'p2'], currentTurnPlayerIndex: 0,
       currentPhase: 'MAIN', turnNumber: 1, roundNumber: 1, landMagicZone: null, eventLog: [],
-      players: { p1: { ...basePlayer, hand: [handAvatar], avatarZone }, p2: { ...basePlayer, id: 'p2', seat: 1 } }
+      players: { p1: { ...basePlayer, hand: [handAvatar, gemCard], avatarZone }, p2: { ...basePlayer, id: 'p2', seat: 1 } }
     });
 
     // 3 Avatars + 2 Tokens = 5 total: a legal summon within both limits.

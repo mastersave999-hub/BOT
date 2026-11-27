@@ -1,8 +1,59 @@
-import type { CardInstance, GameState, PendingExitPrevention, PlayerState } from './types';
+import type { Card, CardInstance, GameState, PendingExitPrevention, PlayerState } from './types';
 import { appendGameEvents, type GameEvent } from './gameEvents';
 import { recomputeContinuousEffects } from './continuousEffects';
 import { preventDestruction } from './prevention';
 import { validateGemPayment } from './gemPayment';
+
+/**
+ * Registered continuous Land Magic auras the engine fully implements. A Land Magic
+ * card in this registry is VERIFIED_WORKING (AUTO): its aura is recomputed live on
+ * every legality and payment check instead of being a one-shot effect.
+ */
+export interface LandMagicContinuousHook {
+  printId: string;
+  description: string;
+}
+
+export const REGISTERED_LAND_MAGIC_HOOKS: readonly LandMagicContinuousHook[] = [
+  {
+    printId: 'BT06-061',
+    description: 'Avatar "แบงค์" ทุกใบบนมือ Cost -1 และ Gem ของ Avatar "แบงค์" ทุกใบบนมือ กลายเป็น Gem ไร้สี'
+  }
+];
+
+export function getRegisteredLandMagicHook(card: Card): LandMagicContinuousHook | null {
+  return REGISTERED_LAND_MAGIC_HOOKS.find(hook => hook.printId === card.printId) ?? null;
+}
+
+/** True while "สภาแบงค์" (BT06-061) is active in the Land Magic Zone under `playerId`'s control. */
+export function isBankCouncilActive(state: Pick<GameState, 'landMagicZone'>, playerId: string): boolean {
+  const land = state.landMagicZone;
+  return !!land && land.controllerId === playerId && land.card.printId === 'BT06-061';
+}
+
+/** 'Avatar "แบงค์" ทุกใบบนมือ' — any Avatar whose name contains แบงค์. */
+export function isBankCouncilDiscountedAvatar(card: Card): boolean {
+  return card.type === 'Avatar' && card.name.includes('แบงค์');
+}
+
+/** Effective summon Cost of a hand card, applying active continuous Land Magic auras. */
+export function getEffectiveCost(state: Pick<GameState, 'landMagicZone'>, playerId: string, card: CardInstance): number {
+  const baseCost = card.card.cost ?? 0;
+  if (isBankCouncilActive(state, playerId) && isBankCouncilDiscountedAvatar(card.card)) {
+    return Math.max(0, baseCost - 1);
+  }
+  return baseCost;
+}
+
+/** InstanceIds in hand whose Gem counts as ไร้สี (colorless) under an active Land Magic aura. */
+export function getColorlessGemInstanceIds(
+  state: Pick<GameState, 'landMagicZone'>,
+  playerId: string,
+  hand: readonly CardInstance[]
+): Set<string> {
+  if (!isBankCouncilActive(state, playerId)) return new Set();
+  return new Set(hand.filter(card => isBankCouncilDiscountedAvatar(card.card)).map(card => card.instanceId));
+}
 
 export type PlayerZone = 'deck' | 'hand' | 'lifeDeck' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension';
 

@@ -8,6 +8,10 @@ import { X, Sparkles } from 'lucide-react';
 interface CardDetailModalProps {
   cardInstance: CardInstance | null;
   onClose: () => void;
+  /** Effective summon Cost after continuous Land Magic auras (hand cards only). */
+  effectiveCost?: number;
+  /** Always-available escape hatch into the Phase 8 Universal Manual Effect Resolver. */
+  onManualOverride?: () => void;
 }
 
 /**
@@ -15,7 +19,7 @@ interface CardDetailModalProps {
  * classifyCard() resolution status. Tap-first: opened by tapping the info
  * corner of any visible card.
  */
-export const CardDetailModal: React.FC<CardDetailModalProps> = ({ cardInstance, onClose }) => {
+export const CardDetailModal: React.FC<CardDetailModalProps> = ({ cardInstance, onClose, effectiveCost, onManualOverride }) => {
   if (!cardInstance) return null;
   const { card } = cardInstance;
   const classification = getCardClassification(card);
@@ -95,6 +99,12 @@ export const CardDetailModal: React.FC<CardDetailModalProps> = ({ cardInstance, 
             {' · '}สี: <b className="text-slate-100">{card.color}</b>
           </p>
 
+          {effectiveCost !== undefined && effectiveCost !== (card.cost ?? 0) && (
+            <p className="rounded-lg border border-sky-500/40 bg-sky-950/40 px-2.5 py-1.5 text-[11px] text-sky-200">
+              Cost จาก {card.cost ?? 0} กลายเป็น <b>{effectiveCost}</b> ตาม Land Magic ต่อเนื่องที่กำลังทำงาน
+            </p>
+          )}
+
           {/* Exact Thai effect text */}
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-amber-400/90 mb-1 flex items-center gap-1">
@@ -129,6 +139,15 @@ export const CardDetailModal: React.FC<CardDetailModalProps> = ({ cardInstance, 
                 ? 'การ์ดนี้ถูกแก้ผลครบถ้วนโดยอัตโนมัติ 100% ตาม Rule Book 3.2'
                 : `ต้องใช้ช่องทางจัดการด้วยมือ (Manual Fallback) เมื่อเล่น: ${classification.reason ?? 'ยังไม่รองรับ'}`}
             </p>
+            {onManualOverride && (
+              <button
+                type="button"
+                onClick={onManualOverride}
+                className="mt-2 w-full rounded-lg border border-amber-400/60 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+              >
+                แก้ผลด้วยมือ (Manual Override)
+              </button>
+            )}
           </div>
 
           <div className="pt-1 border-t border-slate-800 text-[10px] text-slate-500 flex justify-between">

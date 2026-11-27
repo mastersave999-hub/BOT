@@ -151,7 +151,7 @@ export const HellChoiceModal: React.FC<HellChoiceModalProps> = ({ pending, state
 interface ManualOverrideControlsProps {
   state: GameState;
   actorId: string;
-  manualCard: { instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' } | null;
+  manualCard: { instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' | 'VERIFIED_WORKING' } | null;
   /** Accepts a single action or a Phase 8 multi-step queue resolved with one confirmation. */
   onSubmit: (action: ManualOverrideAction | ManualOverrideAction[], context?: ManualOverrideContext) => void;
   onClose: () => void;
@@ -502,7 +502,7 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
               <p className="flex items-center gap-1.5 text-[11px] font-bold text-amber-100">
                 การ์ด: {manualCard.card.name}
                 <span className="rounded border border-amber-400/70 bg-red-950/90 px-1.5 py-0.5 text-[9px] font-black tracking-widest text-amber-300">
-                  {manualCard.status === 'AMBIGUOUS' ? 'MANUAL · AMBIGUOUS' : 'MANUAL · UNSUPPORTED'}
+                  {manualCard.status === 'AMBIGUOUS' ? 'MANUAL · AMBIGUOUS' : manualCard.status === 'VERIFIED_WORKING' ? 'MANUAL · ESCAPE HATCH' : 'MANUAL · UNSUPPORTED'}
                 </span>
               </p>
               <p className="text-[10px] text-slate-200 whitespace-pre-line max-h-24 overflow-y-auto">{manualCard.card.mainEffect}</p>

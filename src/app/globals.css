@@ -128,16 +128,21 @@ body {
     inset 0 0 0 1px rgba(251, 191, 36, 0.06);
 }
 
-/* Hand fan: gentle arc, tap-first selection lifts the chosen card. */
+/* Hand fan: gentle arc, tap-first selection lifts the chosen card.
+   overflow-x-auto forces overflow-y to auto, so the padding below must cover
+   the painted overflow of rotated cards plus the selected card's lift+scale,
+   otherwise the lifted card gets its top clipped by the scroll container. */
 .bot-hand-fan {
-  padding-top: 10px;
+  padding-top: 34px;
+  padding-bottom: 12px;
 }
 
-/* Compact phones (360-412px): trim the fan's vertical padding so the whole
-   playmat fits with less scrolling; desktop keeps the roomier arc. */
+/* Compact phones (360-412px): slightly tighter headroom while still covering
+   the selected card's 18px lift, 1.06 scale, and fan rotation. */
 @media (max-width: 639px) {
   .bot-hand-fan {
-    padding-top: 4px;
+    padding-top: 26px;
+    padding-bottom: 8px;
   }
 }
 
@@ -166,6 +171,35 @@ body {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* Notification toast: fade/slide in on mount, fade back out before unmount. */
+@keyframes bot-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.bot-toast {
+  animation: bot-toast-in 200ms ease-out both;
+  transition: opacity 350ms ease, transform 350ms ease;
+}
+
+.bot-toast.is-leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-toast {
+    animation: none;
+    transition: none;
+  }
 }
 
 @keyframes life-card-flip {

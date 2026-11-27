@@ -291,7 +291,7 @@ export interface ManualOverrideContext {
   cardInstanceId?: string;
   cardName?: string;
   cardText?: string;
-  cardStatus?: 'UNSUPPORTED' | 'AMBIGUOUS';
+  cardStatus?: 'UNSUPPORTED' | 'AMBIGUOUS' | 'VERIFIED_WORKING';
 }
 
 /** A submitted manual override awaits Confirm/Reject approval from every other player. */
