@@ -137,7 +137,7 @@ body {
    playmat fits with less scrolling; desktop keeps the roomier arc. */
 @media (max-width: 639px) {
   .bot-hand-fan {
-    padding-top: 8px;
+    padding-top: 4px;
   }
 }
 
