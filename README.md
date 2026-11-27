@@ -63,7 +63,8 @@ npx vitest run
 ### 5.2 Hybrid Auto-100% + Manual Fallback
 - `classifyCard` (`src/engine/hybridMode.ts`) จำแนกการ์ดเป็น `VERIFIED_WORKING` / `UNSUPPORTED` / `AMBIGUOUS` ตามผล parse ของ `cardTextAdapter` และเกณฑ์ verification เดียวกับ Phase 4
 - การ์ด `VERIFIED_WORKING` ออกผลอัตโนมัติ 100% ไม่มีพรอมต์เพิ่ม
-- การ์ด `UNSUPPORTED` / `AMBIGUOUS` จะขึ้นแบนเนอร์ "Manual Effect Resolution" แสดงข้อความการ์ดภาษาไทยจริง พร้อมช่องทางจัดการด้วยมือแบบมีขอบเขตกติกา: ปรับ POWER ±, เปลี่ยนสภาพตื่น/นอน, ย้ายการ์ดระหว่างโซน, จั่ว/ทิ้ง 1 ใบ, เซ็น/ฮีล LIFE
+- การ์ด `UNSUPPORTED` / `AMBIGUOUS` จะขึ้นแบนเนอร์ "Manual Effect Resolution" แสดงข้อความการ์ดภาษาไทยจริง พร้อมช่องทางจัดการด้วยมือแบบมีขอบเขตกติกา: ปรับ POWER ±, เปลี่ยนสภาพตื่น/นอน, ย้ายการ์ดระหว่างโซน, จั่ว/ทิ้ง 1 ใบ, เซ็น/ฮีล LIFE, ค้นหา/สอดแนม/Mill/สับ Deck, เลือกการ์ดจากนรก, สร้าง Token, เปลี่ยนผู้ควบคุม (ถาวรหรือชั่วคราวจนจบเทิร์น), เปลี่ยน Symbol (layer modifier), และสั่งใช้ความสามารถ Activated ที่เอนจินแยกวิเคราะห์ได้ครบ (`MANUAL_ACTIVATE_ABILITY` — เอนจินตรวจ Cost/เป้าหมาย/เทิร์นละครั้งเอง)
+- Phase 8.1: "แอสการ์ดคือสถานที่ไม่ใช่ผู้คน" (BT02-060 / PRMO-155 / KD01-020) — ผลต่อเนื่องเปลี่ยน Symbol ทุก Avatar เป็น {เทพ} ทำงานใน Game State จริง (Layer 2 ทับ Layer 1 ตาม Rule Book หน้า 17) ส่วนความสามารถสั่งใช้ยึด Avatar ใช้ผ่าน Manual Resolver พร้อมการคืนการควบคุมอัตโนมัติจนจบเทิร์น
 - ทุก Manual Override ต้องได้ **ยืนยัน/ปฏิเสธจากคู่แข่ง** (หรือบันทึกอัตโนมัติใน Match Action Log สาธารณะ) ก่อนนำไปใช้ — ใครก็หลอกใช้เอฟเฟกต์เงียบ ๆ ไม่ได้
 
 ### 5.3 เลือกโหมดห้อง (Room Mode Selector)
@@ -73,5 +74,6 @@ npx vitest run
 ### 5.4 เทสต์และการตรวจสอบ
 - `tests/phase5MultiplayerHybrid.test.ts` — ครอบคลุมการไหลของเทิร์นออนไลน์, การ resolve `pendingDeckChoice` / `pendingHellChoice`, การ redact ข้อมูลลับ, และ flow ยืนยัน/ปฏิเสธ Manual Override
 - ตรวจด้วย `npx tsc --noEmit`, `npm test`, `npm run build`, `git diff --check` ทั้งหมดผ่าน
-#   B O T  
+#   B O T 
+ 
  
