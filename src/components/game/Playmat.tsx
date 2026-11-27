@@ -381,10 +381,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   // Phase 6: rapid-tap dispatch guard and two-step attack confirmation tracking.
   const dispatchGuardRef = useRef<DispatchGuard>(EMPTY_DISPATCH_GUARD);
   const [attackCommittedId, setAttackCommittedId] = useState<string | null>(null);
+  // Token that invalidates in-flight AI turn steps when a new turn starts or the mat unmounts.
+  const aiTurnTokenRef = useRef(0);
 
   useEffect(() => {
     setAttackCommittedId(current => (current !== null && current !== selectedAttackerId ? null : current));
   }, [selectedAttackerId]);
+
+  useEffect(() => {
+    return () => {
+      aiTurnTokenRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
@@ -1082,14 +1090,34 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     }
   };
 
-  // Automated AI Opponent Turn for smooth single-player testing
+  // Automated AI Opponent Turn for smooth single-player testing.
+  // Plays one action at a time with human-like pauses so the player can follow
+  // each decision instead of the whole turn resolving in a single instant.
+  const AI_STEP_MIN_MS = 900;
+  const AI_STEP_JITTER_MS = 700;
+
   const runAiOpponentTurn = (startState: GameState, resumeAfterReaction = false, savedLogs: string[] = []) => {
+    const token = ++aiTurnTokenRef.current;
+    void runAiTurnSteps(startState, resumeAfterReaction, savedLogs, token);
+  };
+
+  const runAiTurnSteps = async (startState: GameState, resumeAfterReaction: boolean, savedLogs: string[], token: number) => {
+    const alive = () => aiTurnTokenRef.current === token;
+    const pause = (ms: number) =>
+      new Promise<boolean>(resolve => {
+        setTimeout(() => resolve(alive()), ms);
+      });
+    const think = () => pause(AI_STEP_MIN_MS + Math.floor(Math.random() * AI_STEP_JITTER_MS));
+
     let state = resumeAfterReaction ? startState : executeDrawPhase(startState);
     const logs = resumeAfterReaction
       ? [...savedLogs]
       : [`🤖 ${state.players[opponentId].name} จั่วการ์ดและเข้าสู่ Main Phase`];
 
     if (!resumeAfterReaction) {
+      setGameState(state);
+      if (!(await think())) return;
+
       const aiForMain = { ...state.players[opponentId] };
       const playerForMain = { ...state.players[meId] };
       const avatarIdx = aiForMain.hand.findIndex(c => c.card.type === 'Avatar');
@@ -1122,12 +1150,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           setGameState(reactionState);
           return;
         }
+        showNotification(`คู่แข่งอัญเชิญ "${summoned.card.name}"`);
       }
+      setGameState(state);
+      if (!(await think())) return;
     }
 
     const ai = state.players[opponentId];
 
+    // Battle step: declare and resolve one attack, then pause before ending the turn.
     const readyAiAvatar = state.players[opponentId].avatarZone.find(a => !a.isRested && calculateNetPower(a) > 0);
+    let attacked = false;
     if (readyAiAvatar) {
       const targetPlayerAvatars = state.players[meId].avatarZone;
       const target = targetPlayerAvatars.length === 0
@@ -1140,10 +1173,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         const battle = declared ? resolveDeclaredBattle(declared) : null;
         if (battle?.ok) {
           state = battle.state;
+          attacked = true;
           logs.push(...battle.events.map(event => `🤖 ${event}`));
+          showNotification(`${ai.name} โจมตีด้วย "${readyAiAvatar.card.name}"!`);
           if (battle.events.some(event => event.includes('lost the game'))) setWinnerName(ai.name);
         }
       }
+    }
+    if (attacked) {
+      setGameState(state);
+      if (!(await think())) return;
     }
 
     // End AI Turn -> Return to Player 1 Draw Phase
