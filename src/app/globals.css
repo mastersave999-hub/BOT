@@ -43,12 +43,12 @@ body {
 
 /* ===== Battle of Talingchan tabletop theme (Phase 6) ===== */
 
-/* Tabletop felt: flat, dark, with a very subtle vignette — no neon, no heavy gradients. */
+/* Tabletop felt: flat, dark, with a very subtle top glow only. The bottom vignette
+   was removed deliberately — it painted a dark fade over the hand fan's labels. */
 .bot-felt {
   background-color: #101613;
   background-image:
-    radial-gradient(ellipse 120% 90% at 50% 0%, rgba(251, 191, 36, 0.04), transparent 60%),
-    radial-gradient(ellipse 140% 120% at 50% 110%, rgba(0, 0, 0, 0.55), transparent 70%);
+    radial-gradient(ellipse 120% 90% at 50% 0%, rgba(251, 191, 36, 0.04), transparent 60%);
 }
 
 /* Razor-sharp tabletop zone slots: gold trim for standard zones, crimson for
