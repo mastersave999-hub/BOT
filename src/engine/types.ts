@@ -254,6 +254,36 @@ export interface PendingDeckSearchVerification {
   expectedRevision: number;
 }
 
+/** Phase 5 room rule mode: Hybrid keeps every card playable, Auto-Strict allows only fully modeled cards. */
+export type RoomRuleMode = 'HYBRID' | 'AUTO_STRICT';
+
+/** Structured, rule-bounded manual resolution action for UNSUPPORTED/AMBIGUOUS cards. */
+export type ManualOverrideAction =
+  | { kind: 'ADJUST_POWER'; instanceId: string; delta: number }
+  | { kind: 'SET_WAKE_STATE'; instanceId: string; isRested: boolean }
+  | { kind: 'MOVE_CARD'; instanceId: string; destination: 'deck' | 'hand' | 'avatarZone' | 'constructZone' | 'magicZone' | 'hell' | 'darkDimension'; destinationPlayerId?: string; deckPosition?: 'top' | 'bottom' }
+  | { kind: 'DRAW_CARD'; playerId: string }
+  | { kind: 'DISCARD_CARD'; instanceId: string }
+  | { kind: 'ADJUST_LIFE'; playerId: string; face: 'up' | 'down' };
+
+export interface ManualOverrideContext {
+  cardInstanceId?: string;
+  cardName?: string;
+  cardText?: string;
+  cardStatus?: 'UNSUPPORTED' | 'AMBIGUOUS';
+}
+
+/** A submitted manual override awaits Confirm/Reject approval from every other player. */
+export interface PendingManualOverride {
+  action: ManualOverrideAction;
+  actorId: string;
+  expectedRevision: number;
+  commandId: string;
+  approvals: string[];
+  rejections: string[];
+  context?: ManualOverrideContext;
+}
+
 export interface PendingDeckChoice {
   kind: 'SCOUT' | 'SEARCH';
   deckOwnerId: string;
@@ -310,6 +340,10 @@ export interface GameState {
   pendingHellChoice?: PendingHellChoice;
   /** Public confirmation required by Rule Book 3.2 p.3 when a Deck Search finds no target. */
   pendingDeckSearchVerification?: PendingDeckSearchVerification;
+  /** Phase 5 Hybrid mode: staged manual resolution awaiting opponent Confirm/Reject approval. */
+  pendingManualOverride?: PendingManualOverride;
+  /** Room rule mode chosen at room creation; defaults to HYBRID for older states. */
+  ruleMode?: RoomRuleMode;
   /** Monotonic revision for command preconditions and duplicate-command rejection. */
   stateRevision?: number;
   /** Recent idempotency keys for accepted multiplayer commands. */

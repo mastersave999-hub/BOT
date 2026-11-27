@@ -100,7 +100,33 @@ export function validateGameState(state: GameState): string | null {
       pending.push(...current.attachedInstances);
     }
   }
-  if ([state.pendingDeckChoice, state.pendingHellChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId, state.pendingExitPrevention].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if (state.ruleMode !== undefined && !['HYBRID', 'AUTO_STRICT'].includes(state.ruleMode)) return 'Invalid room rule mode';
+  if ([state.pendingDeckChoice, state.pendingHellChoice, state.pendingDeckSearchVerification, state.pendingEndPhaseDiscardPlayerId, state.pendingExitPrevention, state.pendingManualOverride].filter(Boolean).length > 1) return 'Only one pending player choice is allowed';
+  if (state.pendingManualOverride) {
+    const pending = state.pendingManualOverride;
+    const action = pending.action;
+    const actionShapeValid = !!action && typeof action === 'object' && (
+      (action.kind === 'ADJUST_POWER' && Number.isSafeInteger(action.delta) && action.delta !== 0 && typeof action.instanceId === 'string') ||
+      (action.kind === 'SET_WAKE_STATE' && typeof action.isRested === 'boolean' && typeof action.instanceId === 'string') ||
+      (action.kind === 'MOVE_CARD' && typeof action.instanceId === 'string' &&
+        ['deck', 'hand', 'avatarZone', 'constructZone', 'magicZone', 'hell', 'darkDimension'].includes(action.destination) &&
+        (action.deckPosition === undefined || ['top', 'bottom'].includes(action.deckPosition)) &&
+        (action.destinationPlayerId === undefined || !!state.players[action.destinationPlayerId])) ||
+      (action.kind === 'DRAW_CARD' && typeof action.playerId === 'string' && !!state.players[action.playerId]) ||
+      (action.kind === 'DISCARD_CARD' && typeof action.instanceId === 'string') ||
+      (action.kind === 'ADJUST_LIFE' && typeof action.playerId === 'string' && !!state.players[action.playerId] && ['up', 'down'].includes(action.face))
+    );
+    if (!actionShapeValid || !state.players[pending.actorId] ||
+      state.playerOrder[state.currentTurnPlayerIndex] !== pending.actorId ||
+      !Number.isSafeInteger(pending.expectedRevision) || pending.expectedRevision !== state.stateRevision ||
+      typeof pending.commandId !== 'string' || !pending.commandId || pending.commandId.length > 128 ||
+      !Array.isArray(pending.approvals) || !Array.isArray(pending.rejections) ||
+      pending.approvals.some(id => typeof id !== 'string' || !state.players[id] || id === pending.actorId) ||
+      pending.rejections.some(id => typeof id !== 'string' || !state.players[id] || id === pending.actorId) ||
+      pending.approvals.some(id => pending.rejections.includes(id))) {
+      return 'Invalid pending manual override';
+    }
+  }
   if (state.pendingHellChoice) {
     const pending = state.pendingHellChoice;
     const player = state.players[pending.playerId];

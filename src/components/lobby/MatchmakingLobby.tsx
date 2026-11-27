@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Copy, Check, ArrowRight, Play, ArrowLeft, Loader2, AlertTriangle, User } from 'lucide-react';
-import type { GameState } from '../../engine/types';
+import { Copy, Check, ArrowRight, Play, ArrowLeft, Loader2, AlertTriangle, User, ShieldAlert, Shapes } from 'lucide-react';
+import type { GameState, RoomRuleMode } from '../../engine/types';
 import {
   hostRoom,
   joinRoom,
@@ -14,6 +14,7 @@ import {
   type RoomController,
   type RoomMode
 } from '../../engine/multiplayer';
+import { deckViolatesAutoStrict } from '../../engine/hybridMode';
 
 interface MatchmakingLobbyProps {
   onBack: () => void;
@@ -38,6 +39,8 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'HOST' | 'JOIN' | null>(null);
   const [hostMode, setHostMode] = useState<RoomMode>('DUEL');
+  // Phase 5: Hybrid keeps all 1,833 cards playable; Auto-Strict allows only fully modeled cards.
+  const [ruleMode, setRuleMode] = useState<RoomRuleMode>('HYBRID');
   const [roster, setRoster] = useState<string[]>([]);
   const [capacity, setCapacity] = useState<number>(2);
   const controllerRef = useRef<RoomController | HostController | null>(null);
@@ -71,6 +74,13 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
   const handleCreateRoom = (mode: RoomMode) => {
     resetRoom();
     setError(null);
+    if (ruleMode === 'AUTO_STRICT') {
+      const offender = deckViolatesAutoStrict(localDeck.mainDeck);
+      if (offender) {
+        setError(`โหมด Auto-Strict รองรับเฉพาะการ์ดที่ระบบเล่นได้อัตโนมัติ — เด็คของคุณมี "${offender.name}" ที่ยังไม่รองรับ`);
+        return;
+      }
+    }
     setHostMode(mode);
     setBusy('HOST');
     setStatus('กำลังสร้างห้อง...');
@@ -83,7 +93,7 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
         resetRoom();
       },
       onReady: onMatchReady
-    });
+    }, { ruleMode });
     controllerRef.current = controller;
     hostControllerRef.current = controller;
   };
@@ -211,6 +221,39 @@ export const MatchmakingLobby: React.FC<MatchmakingLobbyProps> = ({
         ) : (
           <div className="space-y-4">
             <span className="text-xs font-semibold text-slate-400 block">เลือกสร้างห้องใหม่:</span>
+
+            {/* Phase 5: Room rule mode selector */}
+            <fieldset className="space-y-2 rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+              <legend className="px-1 text-[11px] font-semibold text-slate-400">โหมดกติกาของห้อง (Rule Mode)</legend>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  aria-pressed={ruleMode === 'HYBRID'}
+                  onClick={() => setRuleMode('HYBRID')}
+                  className={`rounded-xl border p-3 text-left transition ${ruleMode === 'HYBRID' ? 'border-emerald-500/70 bg-emerald-950/40' : 'border-slate-800 bg-slate-950 hover:border-slate-600'}`}
+                >
+                  <span className={`flex items-center gap-1.5 text-xs font-bold ${ruleMode === 'HYBRID' ? 'text-emerald-300' : 'text-slate-300'}`}>
+                    <Shapes className="w-3.5 h-3.5" /> Hybrid (เล่นได้ทุกการ์ด)
+                  </span>
+                  <span className="mt-1 block text-[10px] leading-relaxed text-slate-400">
+                    การ์ดที่ระบบรองรับออกผลอัตโนมัติ 100% — การ์ดที่ยังไม่รองรับใช้ Manual Fallback โดยคู่แข่งต้องยืนยันทุกครั้ง
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={ruleMode === 'AUTO_STRICT'}
+                  onClick={() => setRuleMode('AUTO_STRICT')}
+                  className={`rounded-xl border p-3 text-left transition ${ruleMode === 'AUTO_STRICT' ? 'border-amber-500/70 bg-amber-950/40' : 'border-slate-800 bg-slate-950 hover:border-slate-600'}`}
+                >
+                  <span className={`flex items-center gap-1.5 text-xs font-bold ${ruleMode === 'AUTO_STRICT' ? 'text-amber-300' : 'text-slate-300'}`}>
+                    <ShieldAlert className="w-3.5 h-3.5" /> Auto-Strict (เฉพาะการ์ดที่รองรับ)
+                  </span>
+                  <span className="mt-1 block text-[10px] leading-relaxed text-slate-400">
+                    จำกัดเด็คและเอฟเฟกต์เฉพาะการ์ด VERIFIED_WORKING ปิดช่องทางเล่นด้วยมือทั้งหมด เพื่อการแข่งขันที่เข้มงวด
+                  </span>
+                </button>
+              </div>
+            </fieldset>
             <div className="grid grid-cols-2 gap-3">
               <button
                 onClick={() => handleCreateRoom('DUEL')}

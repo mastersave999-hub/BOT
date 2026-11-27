@@ -1,11 +1,14 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import { GameState, CardInstance, DeferredReactionAction } from '../../engine/types';
+import { GameState, CardInstance, Card, DeferredReactionAction, ManualOverrideAction, ManualOverrideContext } from '../../engine/types';
 import {
   isReactionCommandCurrent,
   isEndPhaseDiscardCommandCurrent,
   isExitPreventionCommandCurrent,
+  isDeckChoiceCommandCurrent,
+  isHellChoiceCommandCurrent,
+  isManualOverrideCommandCurrent,
   isGameStateValidForSync,
   isLegalGameStateSync,
   redactLifeCardsForViewer,
@@ -46,6 +49,21 @@ import {
   getSelectedGemTotal,
   validateGemPayment
 } from '../../engine/gemPayment';
+import { resolveDeckChoice, type DeckOperationResult } from '../../engine/deckOperations';
+import { resolveHellChoice } from '../../engine/hellChoice';
+import {
+  approveManualOverride,
+  autoApproveManualOverride,
+  beginManualOverride,
+  classifyCard,
+  rejectManualOverride
+} from '../../engine/hybridMode';
+import {
+  DeckChoiceModal,
+  HellChoiceModal,
+  ManualOverrideBanner,
+  ManualOverrideControls
+} from './Phase5Modals';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
   CheckCircle2, BookOpen, X, Sparkles, Skull, Layers, Info, List
@@ -245,6 +263,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     gameState.mode === 'AD_MUA' && gameState.turnNumber < Object.keys(gameState.players).length;
   const leftPlayerIdsRef = useRef<Set<string>>(new Set());
   const [leftTick, setLeftTick] = useState<number>(0);
+  // Phase 5: Deck/Hell choice submission guard and Hybrid manual resolution tracking.
+  const [submittedChoiceRevision, setSubmittedChoiceRevision] = useState<number | null>(null);
+  const [manualResolution, setManualResolution] = useState<{ instanceId: string; card: Card; status: 'UNSUPPORTED' | 'AMBIGUOUS' } | null>(null);
+  const [manualControlsOpen, setManualControlsOpen] = useState<boolean>(false);
+  const activeRuleMode = gameState.ruleMode ?? 'HYBRID';
 
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
@@ -323,6 +346,37 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         return;
       }
 
+      if (msg.type === 'DECK_CHOICE_COMMAND') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
+          !isDeckChoiceCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        const resolved = resolveDeckChoice(gameState, senderPlayerId, msg.command.selectedInstanceIds, msg.command.expectedRevision, {
+          commandId: msg.command.commandId,
+          ...(msg.command.topOrderIds ? { topOrderIds: msg.command.topOrderIds } : {})
+        });
+        if (!resolved.ok) return;
+        finishDeckChoice(resolved, senderPlayerId);
+        return;
+      }
+      if (msg.type === 'HELL_CHOICE_COMMAND') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
+          !isHellChoiceCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        const resolved = resolveHellChoice(gameState, senderPlayerId, msg.command.selectedInstanceIds, msg.command.expectedRevision, msg.command.commandId);
+        if (!resolved.ok) return;
+        finishDeckChoice(resolved, senderPlayerId);
+        return;
+      }
+      if (msg.type === 'MANUAL_OVERRIDE_COMMAND') {
+        if (!isHost || !senderPlayerId || msg.command.playerId !== senderPlayerId ||
+          !isManualOverrideCommandCurrent(gameState, msg.command, senderPlayerId)) return;
+        const result = msg.command.kind === 'SUBMIT_MANUAL_OVERRIDE'
+          ? beginManualOverride(gameState, senderPlayerId, msg.command.action!, msg.command.context, msg.command.commandId)
+          : msg.command.kind === 'APPROVE_MANUAL_OVERRIDE'
+            ? approveManualOverride(gameState, senderPlayerId, msg.command.commandId)
+            : rejectManualOverride(gameState, senderPlayerId, msg.command.commandId);
+        if (!result.ok) return;
+        setGameState(result.state);
+        return;
+      }
       if (msg.type !== 'SYNC') return;
       if (isHost && gameState.reactionWindow) return;
       if (!isGameStateValidForSync(msg.state) || (isHost && (!senderPlayerId || !isLegalGameStateSync(gameState, msg.state, senderPlayerId)))) return;
@@ -364,6 +418,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       setSelectedAttackerId(null);
       setPendingAbility(null);
       setPendingCost(null);
+      setManualResolution(null);
+      setManualControlsOpen(false);
     });
     const offClose = link.onClose(() => setOpponentLeft(true));
     const offPeerLeft = link.onPeerLeft?.(playerId => {
@@ -395,6 +451,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   useEffect(() => {
     if (activePlayerId && activePlayerId !== meId) setFocusedOpponentId(activePlayerId);
   }, [activePlayerId, meId]);
+
+  // Manual resolution tracking is scoped to the active player's own turn.
+  useEffect(() => {
+    if (!isMyTurn) {
+      setManualResolution(null);
+      setManualControlsOpen(false);
+    }
+  }, [isMyTurn]);
 
   useEffect(() => {
     if (!link) return;
@@ -723,6 +787,104 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     setGameState(result.state);
   };
 
+  // Phase 5: Deck/Hell choice resolution shared by the host command path and local play.
+  const finishDeckChoice = (resolved: DeckOperationResult, actorId: string) => {
+    if (!resolved.ok) {
+      showNotification(resolved.reason ?? 'การเลือกการ์ดไม่สำเร็จ');
+      return;
+    }
+    const nextState = appendLogs(resolved.state, [`${gameState.players[actorId]?.name ?? actorId} เลือกการ์ดเสร็จสิ้น`], 'DECK_CHOICE', actorId);
+    setGameState(nextState);
+    setSubmittedChoiceRevision(null);
+    if (resolved.winnerId) setWinnerName(nextState.players[resolved.winnerId]?.name ?? resolved.winnerId);
+  };
+
+  const submitDeckChoice = (selectedInstanceIds: string[]) => {
+    const pending = gameState.pendingDeckChoice;
+    if (!pending || pending.authorizedViewerId !== meId) return;
+    if (submittedChoiceRevision === pending.expectedRevision) return;
+    const commandId = globalThis.crypto.randomUUID();
+    if (link && !isHost) {
+      setSubmittedChoiceRevision(pending.expectedRevision);
+      link.send({
+        type: 'DECK_CHOICE_COMMAND',
+        command: { playerId: meId, commandId, expectedRevision: pending.expectedRevision, selectedInstanceIds }
+      });
+      return;
+    }
+    const resolved = resolveDeckChoice(gameState, meId, selectedInstanceIds, pending.expectedRevision, { commandId });
+    finishDeckChoice(resolved, meId);
+  };
+
+  const submitHellChoice = (selectedInstanceIds: string[]) => {
+    const pending = gameState.pendingHellChoice;
+    if (!pending || pending.authorizedViewerId !== meId) return;
+    if (submittedChoiceRevision === pending.expectedRevision) return;
+    const commandId = globalThis.crypto.randomUUID();
+    if (link && !isHost) {
+      setSubmittedChoiceRevision(pending.expectedRevision);
+      link.send({
+        type: 'HELL_CHOICE_COMMAND',
+        command: { playerId: meId, commandId, expectedRevision: pending.expectedRevision, selectedInstanceIds }
+      });
+      return;
+    }
+    const resolved = resolveHellChoice(gameState, meId, selectedInstanceIds, pending.expectedRevision, commandId);
+    finishDeckChoice(resolved, meId);
+  };
+
+  // Phase 5: Hybrid manual fallback with anti-cheat opponent approval.
+  const submitManualOverride = (action: ManualOverrideAction, context?: ManualOverrideContext) => {
+    if (activeRuleMode === 'AUTO_STRICT') return;
+    const commandId = globalThis.crypto.randomUUID();
+    if (link && !isHost) {
+      link.send({
+        type: 'MANUAL_OVERRIDE_COMMAND',
+        command: { kind: 'SUBMIT_MANUAL_OVERRIDE', playerId: meId, commandId, expectedRevision: gameState.stateRevision ?? 0, action, ...(context ? { context } : {}) }
+      });
+      setManualControlsOpen(false);
+      return;
+    }
+    const begun = beginManualOverride(gameState, meId, action, context, commandId);
+    if (!begun.ok) {
+      showNotification(begun.reason ?? 'ส่ง Manual Override ไม่สำเร็จ');
+      return;
+    }
+    if (!link) {
+      // Offline match: the AI opponent consents automatically so the action applies at once.
+      const applied = autoApproveManualOverride(begun.state);
+      if (applied.ok) {
+        setGameState(applied.state);
+        showNotification('Manual Override ถูกนำไปใช้แล้ว');
+        setManualControlsOpen(false);
+        return;
+      }
+    }
+    setGameState(begun.state);
+    setManualControlsOpen(false);
+  };
+
+  const respondManualOverride = (approve: boolean) => {
+    const pending = gameState.pendingManualOverride;
+    if (!pending || pending.actorId === meId) return;
+    const commandId = globalThis.crypto.randomUUID();
+    if (link && !isHost) {
+      link.send({
+        type: 'MANUAL_OVERRIDE_COMMAND',
+        command: { kind: approve ? 'APPROVE_MANUAL_OVERRIDE' : 'REJECT_MANUAL_OVERRIDE', playerId: meId, commandId, expectedRevision: pending.expectedRevision }
+      });
+      return;
+    }
+    const result = approve
+      ? approveManualOverride(gameState, meId, commandId)
+      : rejectManualOverride(gameState, meId, commandId);
+    if (!result.ok) {
+      showNotification(result.reason ?? 'ตอบรับ Manual Override ไม่สำเร็จ');
+      return;
+    }
+    setGameState(result.state);
+  };
+
   // Advance Phases & AI Opponent Turn
   const handleNextPhase = () => {
     if (gameState.pendingEndPhaseDiscardPlayerId || (gameState.pendingExitPrevention && !gameState.pendingExitPrevention.usedActivatedPrevention) || gameState.reactionWindow || !isMyTurn || winnerName) return;
@@ -891,6 +1053,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       return;
     }
 
+    // Auto-Strict rooms only allow cards the engine resolves 100% automatically.
+    if (activeRuleMode === 'AUTO_STRICT' && classifyCard(handCard.card).status !== 'VERIFIED_WORKING') {
+      showNotification('โหมด Auto-Strict: การ์ดนี้ยังไม่รองรับการเล่นอัตโนมัติ');
+      return;
+    }
+
     const normalTreatedAsReact = canUseNormalMagicAsReactOnOwnBattle(gameState, meId, handCard.card);
     if (gameState.currentPhase !== 'MAIN' && !normalTreatedAsReact) {
       showNotification('สามารถอัญเชิญหรือใช้การ์ดได้ใน Main Phase (React Magic หรือ Normal ที่ระบุว่าเป็น React ใช้ได้ตามเงื่อนไข)');
@@ -973,6 +1141,16 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     const remainingHand = me.hand.filter(
       c => c.instanceId !== handCard.instanceId && !discardIds.includes(c.instanceId)
     );
+
+    // Hybrid mode: unmodeled cards resolve through the manual fallback instead of the engine.
+    const playedClassification = classifyCard(handCard.card);
+    if (activeRuleMode === 'HYBRID' && playedClassification.status !== 'VERIFIED_WORKING') {
+      setManualResolution({
+        instanceId: handCard.instanceId,
+        card: handCard.card,
+        status: playedClassification.status
+      });
+    }
 
     const parsed = parseCardAbility(handCard.card);
     let nextState: GameState = { ...gameState };
@@ -1561,6 +1739,44 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           <button type="button" disabled={isSubmittingEndPhaseDiscard} onClick={() => setPendingEndPhaseDiscards([])} className="rounded border border-slate-500 px-3 py-1.5 disabled:opacity-50">ล้างที่เลือก</button>
           <button type="button" disabled={isSubmittingEndPhaseDiscard || pendingEndPhaseDiscards.length !== Math.max(0, me.hand.length - 7)} onClick={confirmEndPhaseDiscards} className="rounded bg-amber-400 px-3 py-1.5 font-bold text-slate-950 disabled:opacity-50">{isSubmittingEndPhaseDiscard ? 'กำลังส่ง…' : 'ยืนยันการทิ้ง'}</button>
         </section>
+      )}
+
+      {gameState.pendingManualOverride && (
+        <ManualOverrideBanner
+          pending={gameState.pendingManualOverride}
+          state={gameState}
+          meId={meId}
+          onApprove={() => respondManualOverride(true)}
+          onReject={() => respondManualOverride(false)}
+        />
+      )}
+
+      {manualResolution && activeRuleMode === 'HYBRID' && !gameState.pendingManualOverride && (
+        <section aria-label="Manual Effect Resolution" aria-live="polite" className="z-30 flex flex-wrap items-center gap-2 border-b border-purple-400/50 bg-purple-950/95 px-3 py-2 text-xs text-purple-100">
+          <div className="mr-auto min-w-0">
+            <p className="font-bold">
+              Manual Effect Resolution · {manualResolution.card.name}
+              <span className="ml-1.5 rounded bg-purple-500/30 px-1.5 py-0.5 text-[9px] font-bold">{manualResolution.status}</span>
+            </p>
+            <p className="text-[10px] text-purple-200 line-clamp-2">{manualResolution.card.mainEffect}</p>
+          </div>
+          {isMyTurn && !gameState.reactionWindow && !gameState.pendingDeckChoice && !gameState.pendingHellChoice && (
+            <button type="button" onClick={() => setManualControlsOpen(true)} className="rounded bg-purple-400 px-3 py-1.5 font-bold text-slate-950">
+              เปิดช่องทางจัดการด้วยมือ
+            </button>
+          )}
+        </section>
+      )}
+
+      {gameState.pendingDeckChoice && gameState.pendingDeckChoice.authorizedViewerId !== meId && (
+        <div role="status" className="z-30 border-b border-amber-400/40 bg-amber-950/95 px-3 py-2 text-xs text-amber-100">
+          กำลังรอ {gameState.players[gameState.pendingDeckChoice.authorizedViewerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดจาก Deck…
+        </div>
+      )}
+      {gameState.pendingHellChoice && gameState.pendingHellChoice.authorizedViewerId !== meId && (
+        <div role="status" className="z-30 border-b border-red-400/40 bg-red-950/95 px-3 py-2 text-xs text-red-100">
+          กำลังรอ {gameState.players[gameState.pendingHellChoice.authorizedViewerId]?.name ?? 'ผู้เล่น'} เลือกการ์ดจากนรก…
+        </div>
       )}
 
       {gameState.reactionWindow && (
@@ -2220,6 +2436,42 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             </button>
           </div>
         </div>
+      )}
+
+      {/* Phase 5: Deck choice (Scout / Deck search) modal for the authorized viewer */}
+      {gameState.pendingDeckChoice && gameState.pendingDeckChoice.authorizedViewerId === meId && (
+        <DeckChoiceModal
+          pending={gameState.pendingDeckChoice}
+          state={gameState}
+          submitted={submittedChoiceRevision === gameState.pendingDeckChoice.expectedRevision}
+          onConfirm={submitDeckChoice}
+        />
+      )}
+
+      {/* Phase 5: Hell recovery / summon choice modal for the authorized viewer */}
+      {gameState.pendingHellChoice && gameState.pendingHellChoice.authorizedViewerId === meId && (
+        <HellChoiceModal
+          pending={gameState.pendingHellChoice}
+          state={gameState}
+          submitted={submittedChoiceRevision === gameState.pendingHellChoice.expectedRevision}
+          onConfirm={submitHellChoice}
+        />
+      )}
+
+      {/* Phase 5: Hybrid manual fallback controls */}
+      {manualControlsOpen && manualResolution && activeRuleMode === 'HYBRID' && (
+        <ManualOverrideControls
+          state={gameState}
+          actorId={meId}
+          manualCard={manualResolution}
+          onSubmit={action => submitManualOverride(action, {
+            cardInstanceId: manualResolution.instanceId,
+            cardName: manualResolution.card.name,
+            cardText: manualResolution.card.mainEffect,
+            cardStatus: manualResolution.status
+          })}
+          onClose={() => setManualControlsOpen(false)}
+        />
       )}
 
       {/* Card Detail Inspection Modal */}
