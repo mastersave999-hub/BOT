@@ -23,6 +23,10 @@ export const viewport: Viewport = {
   themeColor: '#020617',
 };
 
+// Clerk is optional: without keys the app runs in guest mode (local decks only)
+// instead of crashing. When keys exist, behavior is identical to before.
+const CLERK_ENABLED = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
 export default function RootLayout({
   children,
 }: {
@@ -39,7 +43,7 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased bg-slate-950 text-slate-100 overflow-x-hidden font-kanit">
-        <ClerkProvider localization={thTH}>{children}</ClerkProvider>
+        {CLERK_ENABLED ? <ClerkProvider localization={thTH}>{children}</ClerkProvider> : children}
       </body>
     </html>
   );
