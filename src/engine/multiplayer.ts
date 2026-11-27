@@ -1,6 +1,8 @@
-import type { Card, CardInstance, GameState } from './types';
+import type { Card, CardInstance, GameState, ManualOverrideAction, ManualOverrideContext, RoomRuleMode } from './types';
 import { validateGameState } from './gameRules';
 import { isNormalMagicTreatedAsReact } from './reactionEngine';
+import { deckViolatesAutoStrict } from './hybridMode';
+import { parseCardText } from './cardTextAdapter';
 
 const HIDDEN_PRIVATE_CARD: Card = {
   printId: 'hidden-private-card',
@@ -163,7 +165,7 @@ function collectPlayerCardInstances(player: GameState['players'][string]): CardI
 }
 
 export function isLegalGameStateSync(previous: GameState, incoming: GameState, senderPlayerId: string): boolean {
-  if (!isGameStateValidForSync(incoming) || incoming.id !== previous.id || incoming.mode !== previous.mode ||
+  if (!isGameStateValidForSync(incoming) || incoming.id !== previous.id || incoming.mode !== previous.mode || incoming.ruleMode !== previous.ruleMode ||
     JSON.stringify(incoming.playerOrder) !== JSON.stringify(previous.playerOrder) ||
     Object.keys(incoming.players).sort().join('|') !== Object.keys(previous.players).sort().join('|') ||
     Object.entries(previous.players).some(([id, player]) => incoming.players[id]?.seat !== player.seat)) return false;
@@ -186,12 +188,14 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     card.attachedInstances.some(attached => attached.instanceId === instanceId || hasAttached(attached, instanceId));
   const attachedToField = (instanceId: string) => incomingOutgoingPlayer.avatarZone.some(avatar => hasAttached(avatar, instanceId));
   const activeInstances = collectPlayerCardInstances(incomingOutgoingPlayer);
+  const playedMagicCards: CardInstance[] = [];
   for (const card of outgoingPlayer.hand) {
     if (incomingOutgoingPlayer.hand.some(item => item.instanceId === card.instanceId) || card.card.type !== 'Magic') continue;
     const enteredMagicZone = incomingOutgoingPlayer.magicZone.some(item => item.instanceId === card.instanceId);
     const enteredLandZone = incoming.landMagicZone?.instanceId === card.instanceId;
     const becameAttached = attachedToField(card.instanceId);
     if (!enteredMagicZone && !enteredLandZone && !becameAttached) continue;
+    playedMagicCards.push(card);
     const printedType = card.card.subtype ?? 'Normal';
     const treatedAsReact = printedType === 'Normal' && previous.currentPhase === 'BATTLE' && isNormalMagicTreatedAsReact(card.card);
     const effectiveType = treatedAsReact ? 'React' : printedType;
@@ -202,6 +206,22 @@ export function isLegalGameStateSync(previous: GameState, incoming: GameState, s
     if (printedType !== 'Land' && printedType !== 'Modification' && !enteredMagicZone) return false;
     if (enteredLandZone && card.card.subtype !== 'Land') return false;
     if (!activeInstances.some(item => item.instanceId === card.instanceId)) return false;
+  }
+  // Hidden-information guard: a guest may only introduce a private Deck/Hell choice it authored,
+  // and a choice over another player's zone must be backed by a Magic card played in this same sync.
+  const deckChoicePending = incoming.pendingDeckChoice;
+  const hellChoicePending = incoming.pendingHellChoice;
+  if (deckChoicePending && (deckChoicePending.actorId !== senderPlayerId || deckChoicePending.authorizedViewerId !== senderPlayerId)) return false;
+  if (hellChoicePending && (hellChoicePending.actorId !== senderPlayerId || hellChoicePending.authorizedViewerId !== senderPlayerId)) return false;
+  const needsPlayedSource = (deckChoicePending && deckChoicePending.deckOwnerId !== senderPlayerId) ||
+    (hellChoicePending && hellChoicePending.playerId !== senderPlayerId);
+  if (needsPlayedSource) {
+    const sourceMatches = playedMagicCards.some(card => parseCardText(card.card).clauses.some(clause => clause.effects.some(effect =>
+      deckChoicePending
+        ? effect.kind === 'search_deck_to_hand' || effect.kind === 'scout_cards'
+        : effect.kind === 'recover_from_hell' || effect.kind === 'summon_from_hell'
+    )));
+    if (!sourceMatches) return false;
   }
   if (incoming.pendingEndPhaseDiscardPlayerId) {
     const withoutDiscardMetadata = (state: GameState) => Object.fromEntries(Object.entries(state).filter(([key]) =>
@@ -259,6 +279,30 @@ export interface ExitPreventionCommand {
   sourceCardId?: string;
 }
 
+export interface DeckChoiceCommand {
+  playerId: string;
+  commandId: string;
+  expectedRevision: number;
+  selectedInstanceIds: string[];
+  topOrderIds?: string[];
+}
+
+export interface HellChoiceCommand {
+  playerId: string;
+  commandId: string;
+  expectedRevision: number;
+  selectedInstanceIds: string[];
+}
+
+export interface ManualOverrideCommand {
+  kind: 'SUBMIT_MANUAL_OVERRIDE' | 'APPROVE_MANUAL_OVERRIDE' | 'REJECT_MANUAL_OVERRIDE';
+  playerId: string;
+  commandId: string;
+  expectedRevision: number;
+  action?: ManualOverrideAction;
+  context?: ManualOverrideContext;
+}
+
 export function isExitPreventionCommandCurrent(
   state: GameState,
   command: ExitPreventionCommand,
@@ -304,15 +348,91 @@ export function isReactionCommandCurrent(
     window.priorityPlayerId === authenticatedPlayerId;
 }
 
+function validCommandMetadata(command: { playerId: string; commandId: string; expectedRevision: number }, authenticatedPlayerId: string, state: GameState): boolean {
+  return command.playerId === authenticatedPlayerId &&
+    typeof command.commandId === 'string' && command.commandId.length > 0 && command.commandId.length <= 128 &&
+    Number.isSafeInteger(command.expectedRevision) && command.expectedRevision === state.stateRevision &&
+    !(state.processedCommandIds ?? []).includes(command.commandId);
+}
+
+function validSelection(selectedInstanceIds: unknown, candidates: string[], minSelect: number, maxSelect: number): boolean {
+  return Array.isArray(selectedInstanceIds) &&
+    (selectedInstanceIds as unknown[]).every(id => typeof id === 'string' && candidates.includes(id)) &&
+    selectedInstanceIds.length >= minSelect && selectedInstanceIds.length <= maxSelect &&
+    new Set(selectedInstanceIds).size === selectedInstanceIds.length;
+}
+
+/** Authenticates a Deck choice (Scout / Deck search) command against the pending choice revision. */
+export function isDeckChoiceCommandCurrent(
+  state: GameState,
+  command: DeckChoiceCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const pending = state.pendingDeckChoice;
+  return !!pending &&
+    validCommandMetadata(command, authenticatedPlayerId, state) &&
+    command.expectedRevision === pending.expectedRevision &&
+    command.playerId === pending.authorizedViewerId &&
+    validSelection(command.selectedInstanceIds, pending.candidateInstanceIds, pending.minSelect, pending.maxSelect) &&
+    (command.topOrderIds === undefined || (pending.topOrderAllowed === true &&
+      Array.isArray(command.topOrderIds) && command.topOrderIds.length === command.selectedInstanceIds.length &&
+      new Set(command.topOrderIds).size === command.topOrderIds.length &&
+      command.topOrderIds.every(id => command.selectedInstanceIds.includes(id))));
+}
+
+/** Authenticates a Hell recovery / summon choice command against the pending choice revision. */
+export function isHellChoiceCommandCurrent(
+  state: GameState,
+  command: HellChoiceCommand,
+  authenticatedPlayerId: string
+): boolean {
+  const pending = state.pendingHellChoice;
+  return !!pending &&
+    validCommandMetadata(command, authenticatedPlayerId, state) &&
+    command.expectedRevision === pending.expectedRevision &&
+    command.playerId === pending.authorizedViewerId &&
+    validSelection(command.selectedInstanceIds, pending.candidateInstanceIds, pending.minSelect, pending.maxSelect);
+}
+
+/** Authenticates a Hybrid manual override submit/approve/reject command. */
+export function isManualOverrideCommandCurrent(
+  state: GameState,
+  command: ManualOverrideCommand,
+  authenticatedPlayerId: string
+): boolean {
+  if (command.playerId !== authenticatedPlayerId ||
+    typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
+    !Number.isSafeInteger(command.expectedRevision) ||
+    (state.processedCommandIds ?? []).includes(command.commandId)) return false;
+  if (command.kind === 'SUBMIT_MANUAL_OVERRIDE') {
+    return !state.pendingManualOverride && !state.pendingDeckChoice && !state.pendingHellChoice &&
+      !state.pendingDeckSearchVerification && !state.pendingEndPhaseDiscardPlayerId && !state.pendingExitPrevention &&
+      !state.reactionWindow &&
+      command.expectedRevision === state.stateRevision &&
+      state.playerOrder[state.currentTurnPlayerIndex] === command.playerId &&
+      !!command.action && typeof command.action === 'object';
+  }
+  const pending = state.pendingManualOverride;
+  return (command.kind === 'APPROVE_MANUAL_OVERRIDE' || command.kind === 'REJECT_MANUAL_OVERRIDE') &&
+    !!pending &&
+    command.expectedRevision === state.stateRevision && command.expectedRevision === pending.expectedRevision &&
+    command.playerId !== pending.actorId &&
+    !pending.approvals.includes(command.playerId) && !pending.rejections.includes(command.playerId) &&
+    command.action === undefined;
+}
+
 export type NetMessage =
   | { type: 'HELLO'; setup: PlayerSetup }
-  | { type: 'ROOM'; mode: RoomMode; capacity: number; names: string[] }
+  | { type: 'ROOM'; mode: RoomMode; capacity: number; names: string[]; ruleMode?: RoomRuleMode }
   | { type: 'REJECT'; reason: string }
   | { type: 'START'; state: GameState; myPlayerId: string }
   | { type: 'SYNC'; state: GameState; winner: string | null }
   | { type: 'REACTION_COMMAND'; command: ReactionCommand }
   | { type: 'END_PHASE_DISCARD'; command: EndPhaseDiscardCommand }
   | { type: 'EXIT_PREVENTION_COMMAND'; command: ExitPreventionCommand }
+  | { type: 'DECK_CHOICE_COMMAND'; command: DeckChoiceCommand }
+  | { type: 'HELL_CHOICE_COMMAND'; command: HellChoiceCommand }
+  | { type: 'MANUAL_OVERRIDE_COMMAND'; command: ManualOverrideCommand }
   | { type: 'PING' }
   | { type: 'LEAVE' };
 
@@ -419,6 +539,27 @@ export function decodeNetMessage(raw: unknown): NetMessage | null {
         (command.sourceCardId !== undefined && typeof command.sourceCardId !== 'string') ||
         (command.kind === 'USE_EXIT_PREVENTION' && (typeof command.sourceCardId !== 'string' || command.sourceCardId.length === 0)) ||
         (command.kind === 'DECLINE_EXIT_PREVENTION' && command.sourceCardId !== undefined)) return null;
+      return decoded as NetMessage;
+    }
+    if (message.type === 'DECK_CHOICE_COMMAND' || message.type === 'HELL_CHOICE_COMMAND') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if (typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
+        !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 ||
+        !Array.isArray(command.selectedInstanceIds) || !command.selectedInstanceIds.every(id => typeof id === 'string') ||
+        new Set(command.selectedInstanceIds).size !== command.selectedInstanceIds.length ||
+        (command.topOrderIds !== undefined && (!Array.isArray(command.topOrderIds) || !command.topOrderIds.every(id => typeof id === 'string')))) return null;
+      return decoded as NetMessage;
+    }
+    if (message.type === 'MANUAL_OVERRIDE_COMMAND') {
+      if (!message.command || typeof message.command !== 'object' || Array.isArray(message.command)) return null;
+      const command = message.command as Record<string, unknown>;
+      if ((command.kind !== 'SUBMIT_MANUAL_OVERRIDE' && command.kind !== 'APPROVE_MANUAL_OVERRIDE' && command.kind !== 'REJECT_MANUAL_OVERRIDE') ||
+        typeof command.playerId !== 'string' || typeof command.commandId !== 'string' || command.commandId.length === 0 || command.commandId.length > 128 ||
+        !Number.isSafeInteger(command.expectedRevision) || (command.expectedRevision as number) < 0 ||
+        (command.action !== undefined && (typeof command.action !== 'object' || command.action === null || Array.isArray(command.action))) ||
+        (command.context !== undefined && (typeof command.context !== 'object' || command.context === null || Array.isArray(command.context))) ||
+        (command.kind !== 'SUBMIT_MANUAL_OVERRIDE' && command.action !== undefined)) return null;
       return decoded as NetMessage;
     }
     const knownTypes = ['HELLO', 'ROOM', 'REJECT', 'START', 'SYNC', 'PING', 'LEAVE'];
@@ -619,13 +760,20 @@ function createHostLink(guests: GuestEntry[]): RoomLink {
   };
 }
 
+export interface HostRoomOptions {
+  /** Phase 5 room rule mode; defaults to HYBRID so all 1,833 cards stay playable. */
+  ruleMode?: RoomRuleMode;
+}
+
 export function hostRoom(
   mode: RoomMode,
   local: PlayerSetup,
   buildState: (setups: PlayerSetup[]) => GameState,
-  handlers: RoomHandlers
+  handlers: RoomHandlers,
+  options: HostRoomOptions = {}
 ): HostController {
   const { min, max } = ROOM_LIMITS[mode];
+  const ruleMode: RoomRuleMode = options.ruleMode ?? 'HYBRID';
   let cancelled = false;
   let started = false;
   let peer: any = null;
@@ -638,7 +786,7 @@ export function hostRoom(
   const publishRoster = () => {
     const roster = names();
     handlers.onPlayers?.(roster, max);
-    joinedGuests().forEach(g => g.link.send({ type: 'ROOM', mode, capacity: max, names: roster }));
+    joinedGuests().forEach(g => g.link.send({ type: 'ROOM', mode, capacity: max, names: roster, ruleMode }));
     if (roster.length < min) {
       handlers.onStatus(`รอเพื่อนเข้าห้อง... (${roster.length}/${max})`);
     } else {
@@ -654,7 +802,7 @@ export function hostRoom(
     started = true;
 
     const setups = [local, ...ready.map(g => g.setup!)];
-    const initialState = buildState(setups);
+    const initialState: GameState = { ...buildState(setups), ruleMode };
     ready.forEach((guest, index) => {
       guest.playerId = playerIdForSeat(index + 1);
     });
@@ -708,6 +856,13 @@ export function hostRoom(
         setup: null,
         link: createLink(conn, msg => {
           if (msg.type !== 'HELLO' || started) return 'pass';
+          if (ruleMode === 'AUTO_STRICT') {
+            const offender = deckViolatesAutoStrict(msg.setup.mainDeck);
+            if (offender) {
+              reject(`โหมด Auto-Strict รองรับเฉพาะการ์ดที่ระบบเล่นได้อัตโนมัติ — เด็คของคุณมี "${offender.name}" ที่ยังไม่รองรับ`);
+              return 'consumed';
+            }
+          }
           entry.setup = msg.setup;
           publishRoster();
           if (mode === 'DUEL') startMatch();
