@@ -3,8 +3,7 @@
 import React from 'react';
 import { CardInstance } from '../../engine/types';
 import { calculateNetPower } from '../../engine/layers';
-import { CardBack, ClassificationBadge } from './botTheme';
-import { Info } from 'lucide-react';
+import { CardBack, ClassificationDot } from './botTheme';
 
 interface CardProps {
   cardInstance: CardInstance;
@@ -96,9 +95,9 @@ export const CardView: React.FC<CardProps> = ({
 
       {/* Card Artwork / Image */}
       <div className="flex-1 relative bg-slate-950 flex items-center justify-center overflow-hidden">
-        {/* AUTO/MANUAL resolution badge (classifyCard) — compact corner tag, never covers the art */}
-        <div className="absolute bottom-0.5 left-0.5 z-10">
-          <ClassificationBadge card={card} size="sm" />
+        {/* Tiny A/M resolution tag (classifyCard) — corner only, art stays unobstructed */}
+        <div className="absolute top-0.5 right-0.5 z-10">
+          <ClassificationDot card={card} />
         </div>
         {card.imageUrl ? (
           <img
@@ -115,20 +114,6 @@ export const CardView: React.FC<CardProps> = ({
           />
         ) : null}
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-80" />
-        {onInspect && (
-          <button
-            type="button"
-            aria-label={`ดูความสามารถ ${card.name}`}
-            title="ดูความสามารถการ์ด"
-            onClick={(e) => {
-              e.stopPropagation();
-              onInspect();
-            }}
-            className="absolute top-1 right-1 z-10 w-5 h-5 rounded-full bg-slate-950/90 border border-amber-400/70 text-amber-300 flex items-center justify-center hover:bg-amber-500 hover:text-slate-950 transition"
-          >
-            <Info className="w-3 h-3" />
-          </button>
-        )}
       </div>
 
       {/* Card Footer: Power / Type — the type label shrinks with an ellipsis and the

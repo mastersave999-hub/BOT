@@ -63,6 +63,32 @@ export const ClassificationBadge: React.FC<ClassificationBadgeProps> = ({ card, 
   );
 };
 
+/**
+ * Tiny A/M corner tag (max 14px tall) for card faces. Shows only the resolution
+ * class letter so 90%+ of the artwork, Cost/GEM, title and PWR badge stay
+ * unobstructed; the full AUTO/MANUAL explanation lives in the Card Inspector.
+ */
+export const ClassificationDot: React.FC<{ card: Card; className?: string }> = ({ card, className = '' }) => {
+  const { status, reason } = getCardClassification(card);
+  const isAuto = status === 'VERIFIED_WORKING';
+  const title = isAuto
+    ? 'AUTO — เอนจินแก้ผลการ์ดนี้ได้ครบถ้วนโดยอัตโนมัติ'
+    : `MANUAL — ${reason ?? 'ต้องใช้ช่องทางจัดการด้วยมือ (Manual Fallback)'}`;
+  return (
+    <span
+      title={title}
+      aria-label={isAuto ? 'AUTO' : 'MANUAL'}
+      className={`inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm border text-[8px] font-black leading-none ${
+        isAuto
+          ? 'border-emerald-400/80 bg-emerald-950/90 text-emerald-300'
+          : 'border-amber-400/90 bg-red-950/90 text-amber-300'
+      } ${className}`}
+    >
+      {isAuto ? 'A' : 'M'}
+    </span>
+  );
+};
+
 /** Thin gold divider with a restrained Thai ornamental diamond motif. */
 export const OrnamentDivider: React.FC<{ className?: string; label?: string }> = ({ className = '', label }) => (
   <div className={`flex items-center gap-2 ${className}`} aria-hidden="true">
