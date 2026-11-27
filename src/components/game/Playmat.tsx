@@ -175,7 +175,7 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
             สิทธิ์ตอบโต้: {priorityPlayerName}
           </span>
         )}
-        <ol className="ml-auto grid min-w-0 flex-1 grid-cols-4 gap-1 sm:w-56 sm:flex-none" aria-label="DRAW, MAIN, BATTLE, END">
+        <ol className="ml-auto grid min-w-0 flex-1 grid-cols-4 gap-1 sm:w-64 sm:flex-none" aria-label="DRAW, MAIN, BATTLE, END">
           {PHASE_STEPS.map((step, index) => {
             const isCurrent = index === currentIndex;
             const isCompleted = index < currentIndex;
@@ -192,11 +192,11 @@ const PhaseTracker: React.FC<PhaseTrackerProps> = ({ currentPhase, turnNumber, a
                 }`}
               >
                 {isCompleted ? (
-                  <CheckCircle2 aria-hidden="true" className="h-3 w-3 shrink-0" />
+                  <CheckCircle2 aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
                 ) : (
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isCurrent ? 'bg-slate-950' : 'bg-slate-700'}`} aria-hidden="true" />
                 )}
-                <span className="min-w-0 truncate text-[9px] font-extrabold tracking-wide leading-none">{step.label}</span>
+                <span className="min-w-0 truncate text-[9px] font-extrabold tracking-normal leading-none">{step.label}</span>
               </li>
             );
           })}
@@ -392,6 +392,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
   const [inspectedCard, setInspectedCard] = useState<CardInstance | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
+  const [notificationLeaving, setNotificationLeaving] = useState(false);
+  const notificationTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const [pendingAbility, setPendingAbility] = useState<PendingAbilityAction | null>(null);
   const [pendingCost, setPendingCost] = useState<PendingCostPayment | null>(null);
   const [pendingEndPhaseDiscards, setPendingEndPhaseDiscards] = useState<string[] | null>(null);
@@ -651,8 +653,14 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const showNotification = (msg: string) => {
+    notificationTimers.current.forEach(clearTimeout);
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3200);
+    setNotificationLeaving(false);
+    // Fade out before unmounting so consecutive messages never cut each other short.
+    notificationTimers.current = [
+      setTimeout(() => setNotificationLeaving(true), 2800),
+      setTimeout(() => setNotification(null), 3200)
+    ];
   };
 
   // Helper to append logs
@@ -2793,9 +2801,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
       {/* Notification Banner */}
       {notification && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-slate-950 font-bold px-4 py-1.5 rounded-full shadow-2xl text-xs flex items-center gap-1.5">
-          <Swords className="w-3.5 h-3.5" />
-          <span>{notification}</span>
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50">
+          <div
+            role="status"
+            aria-live="polite"
+            className={`bot-toast flex items-center gap-1.5 rounded-full bg-amber-500 px-4 py-1.5 text-xs font-bold text-slate-950 shadow-2xl ${notificationLeaving ? 'is-leaving' : ''}`}
+          >
+            <Swords className="w-3.5 h-3.5" />
+            <span>{notification}</span>
+          </div>
         </div>
       )}
 

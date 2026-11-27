@@ -168,6 +168,35 @@ body {
   display: none;
 }
 
+/* Notification toast: fade/slide in on mount, fade back out before unmount. */
+@keyframes bot-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.bot-toast {
+  animation: bot-toast-in 200ms ease-out both;
+  transition: opacity 350ms ease, transform 350ms ease;
+}
+
+.bot-toast.is-leaving {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-toast {
+    animation: none;
+    transition: none;
+  }
+}
+
 @keyframes life-card-flip {
   0% {
     transform: rotateY(0deg) scale(1);
