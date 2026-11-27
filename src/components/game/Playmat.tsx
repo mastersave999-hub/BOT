@@ -224,6 +224,8 @@ interface LifeCardTileProps {
   index: number;
   /** 'col' fans downward inside the owner's LIFE column; 'row' fans sideways in tight boards. */
   orientation: 'col' | 'row';
+  /** Total tiles in the fan — compresses the sideways overlap so the fan never spills out of its fixed-width zone. */
+  count?: number;
   onInspect: () => void;
 }
 
@@ -244,10 +246,18 @@ const DeckPile: React.FC<{ count: number; mini?: boolean }> = ({ count, mini = f
   </span>
 );
 
-const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, onInspect }) => {
+const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, count, onInspect }) => {
   // Face-down cards fan like a deck pile (only an edge strip shows); a revealed
   // card pops out of the fan so its art stays fully readable.
   const overlapped = index > 0 && !card.isFaceUp;
+  // Sideways fans previously sized their overlap with dvh clamps, which ignored
+  // the fixed-width LIFE box and let tiles spill past the zone border on tall
+  // phones. Derive the overlap from the tile count instead so n tiles always
+  // fit the ~58px of usable fan width.
+  const ROW_TILE_W_PX = 22; // matches w-[1.375rem]
+  const rowOverlapPx = count && count > 1
+    ? Math.min(13, Math.max(7, (count * ROW_TILE_W_PX - 58) / (count - 1)))
+    : 0;
   return (
     <button
       type="button"
@@ -257,10 +267,11 @@ const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, o
         event.stopPropagation();
         onInspect();
       }}
+      style={orientation === 'row' && overlapped ? { marginLeft: -rowOverlapPx } : undefined}
       className={`bot-life-tile relative shrink-0 cursor-pointer [perspective:700px] transition-all duration-500 rounded border text-[8px] font-bold ${
         orientation === 'col'
           ? `h-[clamp(2.5rem,8dvh,4rem)] w-full ${overlapped ? '-mt-[clamp(1.4rem,4.5dvh,2.25rem)]' : ''}`
-          : `h-[clamp(2.5rem,8dvh,3.5rem)] w-[clamp(1.6rem,5dvh,2.25rem)] ${overlapped ? '-ml-[clamp(1.05rem,3.25dvh,1.5rem)]' : ''}`
+          : 'h-[clamp(2.25rem,7dvh,3rem)] w-[1.375rem]'
       } ${card.isFaceUp ? 'z-10 border-emerald-400 shadow-lg shadow-emerald-900/40' : 'border-slate-700'}`}
     >
       <span className={`absolute inset-0 overflow-hidden rounded ${card.isFaceUp ? 'life-card-flip' : ''}`}>
@@ -2078,12 +2089,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <span className="flex items-center gap-0.5 text-[8px] font-black tracking-wider text-red-300">
                 <Shield className="h-2.5 w-2.5" /> LIFE {boardPlayer.lifeDeck.filter(c => !c.isFaceUp).length}
               </span>
-              <div className="flex items-center">
+              <div className="flex w-full items-center justify-center overflow-hidden">
                 {boardPlayer.lifeDeck.map((lifeCard, idx) => (
                   <LifeCardTile
                     key={lifeCard.instanceId || idx}
                     card={lifeCard}
                     index={idx}
+                    count={boardPlayer.lifeDeck.length}
                     orientation="row"
                     onInspect={() => setInspectedCard(lifeCard)}
                   />
@@ -2194,12 +2206,13 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             <span className="mb-1 flex items-center gap-0.5 text-[10px] font-black tracking-wider text-red-300">
               <Shield className="h-3 w-3" /> LIFE {boardPlayer.lifeDeck.filter(c => !c.isFaceUp).length}
             </span>
-            <div className="flex items-center">
+            <div className="flex w-full items-center justify-center overflow-hidden">
               {boardPlayer.lifeDeck.map((lifeCard, idx) => (
                 <LifeCardTile
                   key={lifeCard.instanceId || idx}
                   card={lifeCard}
                   index={idx}
+                  count={boardPlayer.lifeDeck.length}
                   orientation="row"
                   onInspect={() => setInspectedCard(lifeCard)}
                 />
@@ -2417,7 +2430,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           <span aria-hidden="true" className="bot-corner bot-corner-tr" />
           <span aria-hidden="true" className="bot-corner bot-corner-bl" />
           <span aria-hidden="true" className="bot-corner bot-corner-br" />
-          <div className="relative z-10 flex min-h-0 flex-1 flex-col justify-between gap-1 p-1 sm:p-3 overflow-y-auto no-scrollbar">
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col justify-start gap-1 p-1 sm:p-2 overflow-y-auto no-scrollbar">
           {/* ==================== OPPONENT PLAYMAT BOARDS (2/3/4-player layouts) ==================== */}
           {/* 2 players: one full-width mirrored board. 3 players: two boards side by side.
               4 players: three boards in a responsive row — every participant keeps a clearly
@@ -2514,8 +2527,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
           {/* ==================== MY PLAYMAT HALF (EXACT OFFICIAL PROPORTIONS) ==================== */}
           {!isCompactViewport && <OrnamentDivider className="my-0.5" label="สนามของคุณ" />}
-          <div className="rounded-2xl border border-amber-500/25 bg-slate-950/70 p-1 sm:p-2 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_4px_14px_rgba(0,0,0,0.5)]">
-            <div className="grid grid-cols-12 gap-1 sm:gap-2 items-stretch">
+          {/* flex-1: the arena absorbs spare viewport height so tall phones get a bigger
+              board instead of dead gaps between the zones (justify-between spread them out). */}
+          <div className="flex flex-1 flex-col rounded-2xl border border-amber-500/25 bg-slate-950/70 p-1 sm:p-2 shadow-[inset_0_1px_0_rgba(251,191,36,0.07),0_4px_14px_rgba(0,0,0,0.5)]">
+            <div className="grid flex-1 grid-cols-12 grid-rows-[minmax(0,1fr)] gap-1 sm:gap-2 items-stretch">
               {/* LEFT COLUMN: LIFE ZONE (Full Height spanning Avatar + Magic rows) */}
               <div className={`bot-zone-crimson ${isCompactViewport ? 'col-span-3' : 'col-span-2'} rounded-xl p-1 flex flex-col items-center justify-between`}>
                 <div className="text-center">
@@ -2529,6 +2544,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                       key={lifeCard.instanceId || idx}
                       card={lifeCard}
                       index={idx}
+                      count={me.lifeDeck.length}
                       orientation="col"
                       onInspect={() => setInspectedCard(lifeCard)}
                     />
@@ -2546,7 +2562,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               <div className={`${isCompactViewport ? 'col-span-6' : 'col-span-8'} flex flex-col gap-1 sm:gap-2`}>
                 {/* AVATAR ZONE — two separate limits (Rule Book 3.2 Board Area 1):
                     normal Avatars max 4, Avatar+Token total max 6. */}
-                <div className="bot-zone min-h-[4.25rem] sm:min-h-[124px] rounded-xl p-1.5 sm:p-2 flex flex-col justify-between relative">
+                <div className="bot-zone min-h-[4.25rem] sm:min-h-[124px] flex-[2] rounded-xl p-1.5 sm:p-2 flex flex-col justify-between relative">
                   <div className="flex items-center justify-between gap-1 text-[10px]">
                     <span className="font-black tracking-wider text-amber-300 text-xs">AVATAR</span>
                     <span className="flex items-center gap-1 whitespace-nowrap font-mono text-slate-200">
@@ -2585,7 +2601,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                 </div>
 
                 {/* MAGIC ZONE */}
-                <div className="bot-zone min-h-[3.25rem] sm:min-h-[72px] rounded-xl p-1.5 sm:p-2 flex flex-col justify-between">
+                <div className="bot-zone min-h-[3.25rem] sm:min-h-[72px] flex-1 rounded-xl p-1.5 sm:p-2 flex flex-col justify-between">
                   <div className="flex items-center justify-between text-[10px]">
                     <span className="font-black tracking-wider text-amber-300 text-xs">MAGIC</span>
                     <span className="font-mono text-[10px] text-slate-200">{me.magicZone.length}</span>
@@ -2677,7 +2693,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
               </span>
               <span className="font-mono text-[10px] text-slate-300">{me.hand.length}</span>
             </div>
-            <div className="bot-hand-fan order-2 flex items-end justify-start overflow-x-auto sm:justify-center">
+            {/* w-max + mx-auto centers the fan when it fits and stays scrollable from the
+                left edge when the hand is wider than the screen (justify-center alone would
+                clip both sides of an overflowing flex row). */}
+            <div className="bot-hand-fan order-2 overflow-x-auto">
+              <div className="mx-auto flex w-max min-w-full items-end justify-center">
               {me.hand.map((handCard, handIndex) => {
                 const center = (me.hand.length - 1) / 2;
                 const offset = handIndex - center;
@@ -2711,6 +2731,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   </div>
                 );
               })}
+              </div>
             </div>
 
             {/* Phase 6 two-step action confirmation bar: buttons come strictly from the engine.

@@ -77,8 +77,9 @@ export const CardView: React.FC<CardProps> = ({
       } ${isSelected ? 'ring-2 ring-amber-400 shadow-lg shadow-amber-500/30' : ''} ${className}`}
       title={card.name}
     >
-      {/* Top Header: Cost, GEM, Name */}
-      <div className="bg-slate-950/90 px-1 py-0.5 flex items-center justify-between border-b border-slate-800 text-[10px]">
+      {/* Top Header: Cost, GEM, Name — fully opaque bar so bright artwork can never
+          wash the name out (semi-transparent bars read as "faded text" on pale art). */}
+      <div className="bg-slate-950 px-1 py-0.5 flex items-center justify-between border-b border-slate-800 text-[10px]">
         <div className="flex items-center space-x-1">
           {card.cost !== undefined && (
             <span className="w-3.5 h-3.5 rounded bg-amber-600 text-white font-bold flex items-center justify-center text-[9px]">
@@ -91,7 +92,7 @@ export const CardView: React.FC<CardProps> = ({
             </span>
           )}
         </div>
-        <span className="font-semibold text-slate-200 truncate flex-1 min-w-0 text-center px-1">
+        <span className="font-semibold text-slate-100 truncate flex-1 min-w-0 text-center px-1">
           {card.name}
         </span>
       </div>
@@ -116,13 +117,15 @@ export const CardView: React.FC<CardProps> = ({
             }}
           />
         ) : null}
-        <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-transparent to-transparent opacity-80" />
+        {/* Frame scrim: darkens only the top/bottom edges of the art so pale or bright
+            artwork keeps its edges inside the card instead of reading as a faded ghost. */}
+        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-b from-slate-950/40 via-transparent to-slate-950/55" />
       </div>
 
       {/* Card Footer: Power / Type — the type label shrinks with an ellipsis and the
           PWR badge never wraps, so the two can never collide on 64px-wide cards. */}
-      <div className={`bg-slate-950/95 px-1 py-0.5 flex items-center justify-between gap-1 border-t border-slate-800 ${size === 'sm' ? 'text-[8px]' : 'text-[9px]'}`}>
-        <span className="text-slate-400 font-medium truncate min-w-0 flex-1 flex items-center gap-0.5">
+      <div className={`bg-slate-950 px-1 py-0.5 flex items-center justify-between gap-1 border-t border-slate-800 ${size === 'sm' ? 'text-[8px]' : 'text-[9px]'}`}>
+        <span className="text-slate-300 font-medium truncate min-w-0 flex-1 flex items-center gap-0.5">
           {card.type}
           {cardInstance.attachedInstances && cardInstance.attachedInstances.length > 0 && (
             <span className="text-indigo-400 font-bold shrink-0" title="มีการ์ดสวมใส่">

@@ -134,7 +134,10 @@ body {
    otherwise the lifted card gets its top clipped by the scroll container. */
 .bot-hand-fan {
   padding-top: 34px;
-  padding-bottom: 12px;
+  /* Bottom headroom only needs to cover the rotated edge cards' corner dip (~2px);
+     extra padding pushed the hand's footer text past the viewport bottom on
+     desktop, shaving the type label mid-glyph. */
+  padding-bottom: 4px;
 }
 
 /* Compact phones (360-412px): slightly tighter headroom while still covering
