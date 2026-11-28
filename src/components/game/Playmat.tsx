@@ -658,6 +658,26 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     link.send({ type: 'SYNC', state: gameState, winner: winnerName });
   }, [gameState, winnerName, link]);
 
+  // Local AI opponent: it has no reaction strategy, so it must pass priority on its
+  // own. Without this, any window that opens while the AI holds priority (e.g. the
+  // player summons and the AI reacts first) hangs forever and blocks every action,
+  // including the manual effect resolver.
+  useEffect(() => {
+    if (isOnline) return;
+    const window = gameState.reactionWindow;
+    if (!window || window.pendingReaction || window.priorityPlayerId !== opponentId) return;
+    const timer = setTimeout(() => {
+      const result = passReactionPriority(gameState, opponentId);
+      if ('reason' in result) return;
+      const loggedState = result.logs?.length
+        ? appendLogs(result.state, result.logs, 'REACTION', opponentId)
+        : result.state;
+      if (result.pendingAction) finishDeferredReactionAction(loggedState, result.pendingAction);
+      else setGameState(loggedState);
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [gameState, isOnline, opponentId]);
+
   const leaveMatch = () => {
     link?.close();
     window.location.reload();
