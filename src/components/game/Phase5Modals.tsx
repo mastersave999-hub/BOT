@@ -223,7 +223,7 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
   const [hellDestination, setHellDestination] = useState<'hand' | 'deck_top' | 'deck_bottom' | 'avatarZone' | 'banish'>('hand');
   const [tokenName, setTokenName] = useState('');
   const [tokenPower, setTokenPower] = useState('0');
-  const [controlTargetId, setControlTargetId] = useState<string>(opponentId ?? '');
+  const [controlTargetId, setControlTargetId] = useState<string>(opponentId ?? actorId);
   const [symbolValue, setSymbolValue] = useState('');
   const [symbolDuration, setSymbolDuration] = useState<'END_OF_TURN' | 'PERMANENT'>('END_OF_TURN');
   const [abilityIndex, setAbilityIndex] = useState(0);
@@ -435,8 +435,11 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
         <div className={groupClass}>
           <p className={groupTitleClass}>เปลี่ยนผู้ควบคุม Avatar</p>
           <select aria-label="ผู้ควบคุมใหม่" value={controlTargetId} onChange={event => setControlTargetId(event.target.value)} className={inputClass}>
-            {state.playerOrder.filter(id => id !== actorId).map(id => (
-              <option key={id} value={id}>{state.players[id]?.name ?? id}</option>
+            {/* Every player is a valid new controller — the engine only rejects
+                same-controller and zone-capacity cases, so the actor must be able
+                to take an Avatar back too (e.g. returning a borrowed Avatar). */}
+            {state.playerOrder.map(id => (
+              <option key={id} value={id}>{state.players[id]?.name ?? id}{id === actorId ? ' (คุณ)' : ''}</option>
             ))}
           </select>
           <button
