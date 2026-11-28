@@ -1,5 +1,5 @@
 import type { CardInstance, GameState } from './types';
-import { validateAvatarZone, validateMagicPlay, getEffectiveCost, getColorlessGemInstanceIds } from './gameRules';
+import { validateAvatarZone, validateMagicPlay, getEffectiveCost, getColorlessGemInstanceIds, canUseMagicTypeThisTurn } from './gameRules';
 import { canPayCost } from './gemPayment';
 import { canUseNormalMagicAsReactOnOwnBattle, effectiveMagicSubtype } from './reactionEngine';
 import { classifyCard } from './hybridMode';
@@ -114,6 +114,76 @@ export function deriveLegalHandActions(
   }
 
   return [];
+}
+
+const PHASE_LABELS_TH: Record<GameState['currentPhase'], string> = {
+  DRAW: 'Draw Phase',
+  MAIN: 'Main Phase',
+  BATTLE: 'Battle Phase',
+  END: 'End Phase'
+};
+
+/**
+ * Companion to `deriveLegalHandActions`: when the engine authorizes nothing for a
+ * hand card, this returns a short player-facing reason in Thai that mirrors the
+ * exact checks above (phase, zone limits, Cost/GEM payment), so the disabled
+ * action bar explains itself instead of showing a generic message.
+ */
+export function describeBlockedHandReason(
+  state: GameState,
+  playerId: string,
+  handCard: CardInstance
+): string {
+  const player = state.players[playerId];
+  if (!player || !player.hand.some(card => card.instanceId === handCard.instanceId)) {
+    return 'การ์ดไม่อยู่บนมือแล้ว';
+  }
+  if (isNotActivePlayer(state, playerId)) return 'ไม่ใช่เทิร์นของคุณ';
+  if (blockedByPendingChoice(state)) return 'รอเลือกการ์ดหรือตอบโต้อยู่';
+  if (state.ruleMode === 'AUTO_STRICT' && classifyCard(handCard.card).status !== 'VERIFIED_WORKING') {
+    return 'โหมด Auto-Strict: การ์ดนี้ยังไม่รองรับ';
+  }
+
+  const inMainPhase = state.currentPhase === 'MAIN';
+  const waitingForMain = `รอ Main Phase (ตอนนี้ช่วง ${PHASE_LABELS_TH[state.currentPhase]})`;
+  const costReason = (effectiveCost: number) => `Cost / GEM ไม่พอ (ต้องการ ${effectiveCost})`;
+
+  if (handCard.card.type === 'Avatar') {
+    if (!inMainPhase) return waitingForMain;
+    if (validateAvatarZone({ avatarZone: [...player.avatarZone, handCard] })) {
+      return 'Avatar Zone เต็มหรือชนิดการ์ดไม่ถูกต้อง';
+    }
+    return costReason(getEffectiveCost(state, playerId, handCard));
+  }
+
+  if (handCard.card.type === 'Construct') {
+    if (!inMainPhase) return waitingForMain;
+    if (player.constructZone.length >= 3) return 'Construct Zone เต็มแล้ว (3/3)';
+    if (player.constructZone.some(card => card.card.name === handCard.card.name)) {
+      return 'มี Construct ชื่อนี้อยู่แล้ว (ห้ามซ้ำ)';
+    }
+    return costReason(getEffectiveCost(state, playerId, handCard));
+  }
+
+  if (handCard.card.type === 'Magic') {
+    const normalTreatedAsReact = canUseNormalMagicAsReactOnOwnBattle(state, playerId, handCard.card);
+    if (normalTreatedAsReact) {
+      const reactBlock = validateMagicPlay(state, playerId, 'React', true);
+      if (reactBlock) {
+        return state.currentPhase !== 'BATTLE' ? waitingForMain : 'รอช่วงตอบโต้ที่ใช้ได้';
+      }
+      return 'ร่ายตอบโต้ (React Cast) พร้อมใช้';
+    }
+    if (!inMainPhase) return waitingForMain;
+    const subtype = effectiveMagicSubtype(handCard.card);
+    const block = validateMagicPlay(state, playerId, subtype, false);
+    if (!block) return 'ร่ายเวทย์ (Cast) พร้อมใช้';
+    if (state.reactionWindow) return 'กำลังแก้ผลการ์ดอื่นอยู่';
+    if (!canUseMagicTypeThisTurn(player, subtype)) return `${subtype} Magic ใช้ไปแล้วเทิร์นนี้`;
+    return waitingForMain;
+  }
+
+  return 'เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้';
 }
 
 /**

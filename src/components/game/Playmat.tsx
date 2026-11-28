@@ -24,7 +24,8 @@ import {
   isReactionWindowStructurallyValid,
   isNormalMagicTreatedAsReact,
   openReactionWindow,
-  passReactionPriority
+  passReactionPriority,
+  sendResolvedMagicToHell
 } from '../../engine/reactionEngine';
 import { CardView } from './CardView';
 import { CardDetailModal } from './CardDetailModal';
@@ -60,7 +61,7 @@ import {
   rejectManualOverride,
   shouldOfferManualResolution
 } from '../../engine/hybridMode';
-import { deriveLegalAvatarActions, deriveLegalHandActions, type HandActionKind } from '../../engine/legalActions';
+import { deriveLegalAvatarActions, deriveLegalHandActions, describeBlockedHandReason, type HandActionKind } from '../../engine/legalActions';
 import {
   beginDispatch,
   cancelHandSelection,
@@ -78,7 +79,7 @@ import {
 import { CardBack, CARD_BACK_SRC, ClassificationBadge, ClassificationDot, OrnamentDivider } from './botTheme';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
-  CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List
+  CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List, Wrench
 } from 'lucide-react';
 
 interface PlaymatProps {
@@ -253,10 +254,11 @@ const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, c
   // Sideways fans previously sized their overlap with dvh clamps, which ignored
   // the fixed-width LIFE box and let tiles spill past the zone border on tall
   // phones. Derive the overlap from the tile count instead so n tiles always
-  // fit the ~58px of usable fan width.
-  const ROW_TILE_W_PX = 22; // matches w-[1.375rem]
+  // fit the ~58px of usable fan width. Tiles keep the real card aspect ratio
+  // (59:82) so the card-back art never stretches or squishes in either fan.
+  const ROW_TILE_W_PX = 30; // aspect-[59/82] at the clamped fan height (~42px)
   const rowOverlapPx = count && count > 1
-    ? Math.min(13, Math.max(7, (count * ROW_TILE_W_PX - 58) / (count - 1)))
+    ? Math.min(24, Math.max(7, (count * ROW_TILE_W_PX - 58) / (count - 1)))
     : 0;
   return (
     <button
@@ -270,8 +272,8 @@ const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, c
       style={orientation === 'row' && overlapped ? { marginLeft: -rowOverlapPx } : undefined}
       className={`bot-life-tile relative shrink-0 cursor-pointer [perspective:700px] transition-all duration-500 rounded border text-[8px] font-bold ${
         orientation === 'col'
-          ? `h-[clamp(2.5rem,8dvh,4rem)] w-full ${overlapped ? '-mt-[clamp(1.4rem,4.5dvh,2.25rem)]' : ''}`
-          : 'h-[clamp(2.25rem,7dvh,3rem)] w-[1.375rem]'
+          ? `mx-auto aspect-[59/82] h-[clamp(2.5rem,8dvh,4rem)] w-auto ${overlapped ? '-mt-[clamp(1.4rem,4.5dvh,2.25rem)]' : ''}`
+          : 'aspect-[59/82] h-[clamp(2.25rem,7dvh,3rem)] w-auto'
       } ${card.isFaceUp ? 'z-10 border-emerald-400 shadow-lg shadow-emerald-900/40' : 'border-slate-700'}`}
     >
       <span className={`absolute inset-0 overflow-hidden rounded ${card.isFaceUp ? 'life-card-flip' : ''}`}>
@@ -280,12 +282,10 @@ const LifeCardTile: React.FC<LifeCardTileProps> = ({ card, index, orientation, c
           className={`absolute inset-0 transition-opacity duration-150 ${card.isFaceUp ? 'opacity-0' : 'opacity-100'}`}
         >
           <CardBack className="absolute inset-0" />
-          <span
-            className={`bg-black/75 py-px text-[7px] font-bold tracking-wide text-amber-300/90 ${
-              orientation === 'col' ? 'absolute inset-x-0 top-0 text-center' : 'absolute left-0 top-0 px-0.5'
-            }`}
-          >
-            #{index + 1}
+          {/* Tiny corner pill only: a full-width strip used to stamp "#1" across
+              the BATTLE logo of the card-back artwork. */}
+          <span className="absolute bottom-0 right-0 rounded-tl bg-black/80 px-0.5 text-[6px] font-bold leading-[1.1] text-amber-300/90">
+            {index + 1}
           </span>
         </span>
         <span className={`absolute inset-0 overflow-hidden rounded transition-opacity duration-300 ${card.isFaceUp ? 'opacity-100' : 'opacity-0'}`}>
@@ -727,6 +727,22 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     setManualControlsOpen(true);
   };
 
+  // Top-bar shortcut: open the Phase 8 Universal Manual Effect Resolver at any
+  // time during a match, even with no card pinned yet (the resolver's deck,
+  // field, hand and LIFE tabs all work without a pinned card).
+  const openManualResolverShortcut = () => {
+    if (activeRuleMode !== 'HYBRID') {
+      showNotification('ตัวแก้ผลด้วยมือ (Manual Resolver) ใช้ได้ในโหมด Hybrid เท่านั้น');
+      return;
+    }
+    if (!canUseManualEscapeHatch) {
+      showNotification('ตอนนี้ยังเปิดช่องทางแก้ผลด้วยมือไม่ได้');
+      return;
+    }
+    setInspectedCard(null);
+    setManualControlsOpen(true);
+  };
+
   const resolveCombatAction = (
     state: GameState,
     attackerPlayerId: string,
@@ -797,6 +813,8 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     } else if (action?.type === 'RESOLVE_MAGIC') {
       const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, 'MAGIC_CAST', action.targetAvatarId);
       nextState = appendLogs(ability.state, ability.logs, 'MAGIC', action.actorId);
+      // Same Rulebook cleanup as the direct cast path: resolved Magic goes to Hell.
+      nextState = sendResolvedMagicToHell(nextState, action.actorId, action.sourceCard);
       noteManualResolutionFromLogs(action.sourceCard, ability.logs);
     } else if (action?.type === 'RESOLVE_ABILITY') {
       const ability = executeCardAbility(nextState, action.actorId, action.sourceCard, action.abilityTrigger);
@@ -1630,6 +1648,10 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       } else {
         const res = executeCardAbility(nextState, meId, handCard, 'MAGIC_CAST');
         nextState = appendLogs(res.state, [`✨ ร่าย Magic "${handCard.card.name}"`, ...res.logs], 'MAGIC');
+        // Rulebook "Normal Magic": once the effect resolves, the card leaves the
+        // Magic Zone for Hell (the reaction pipeline already does this; the
+        // direct cast path must too, or resolved Magic lingers on the board).
+        nextState = sendResolvedMagicToHell(nextState, meId, handCard);
         noteManualResolutionFromLogs(handCard, res.logs);
         setGameState(nextState);
         showNotification(res.logs[0] || `ร่าย "${handCard.card.name}" สำเร็จ!`);
@@ -1812,7 +1834,11 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         pendingAbility.triggerType,
         avatar.instanceId
       );
-      const nextState = appendLogs(res.state, res.logs, 'ABILITY');
+      let nextState = appendLogs(res.state, res.logs, 'ABILITY');
+      if (pendingAbility.triggerType === 'MAGIC_CAST') {
+        // Rulebook "Normal Magic": resolved Magic leaves the Magic Zone for Hell.
+        nextState = sendResolvedMagicToHell(nextState, meId, pendingAbility.sourceCard);
+      }
       setGameState(nextState);
       setPendingAbility(null);
       noteManualResolutionFromLogs(pendingAbility.sourceCard, res.logs);
@@ -2250,6 +2276,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
           >
             <List className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">Logs</span>
+          </button>
+          <button
+            type="button"
+            onClick={openManualResolverShortcut}
+            aria-label="เปิดตัวแก้ผลด้วยมือ (Manual Effect Resolver)"
+            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium flex items-center gap-1 border border-slate-700"
+          >
+            <Wrench className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden sm:inline">Manual</span>
           </button>
           <button
             onClick={() => setShowKeywordsModal(true)}
@@ -2750,7 +2785,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
                   if (legalHandActions.length === 0) {
                     return (
                       <span className="shrink-0 truncate rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-slate-400">
-                        เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้
+                        {describeBlockedHandReason(gameState, meId, selectedHandCard)}
                       </span>
                     );
                   }
@@ -3103,18 +3138,19 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         />
       )}
 
-      {/* Phase 5: Hybrid manual fallback controls */}
-      {manualControlsOpen && manualResolution && activeRuleMode === 'HYBRID' && (
+      {/* Phase 5: Hybrid manual fallback controls — also openable unpinned from
+          the top-bar Manual shortcut, so the resolver is reachable at any time. */}
+      {manualControlsOpen && activeRuleMode === 'HYBRID' && (
         <ManualOverrideControls
           state={gameState}
           actorId={meId}
           manualCard={manualResolution}
-          onSubmit={action => submitManualOverride(action, {
+          onSubmit={(action, context) => submitManualOverride(action, context ?? (manualResolution ? {
             cardInstanceId: manualResolution.instanceId,
             cardName: manualResolution.card.name,
             cardText: manualResolution.card.mainEffect,
             cardStatus: manualResolution.status
-          })}
+          } : undefined))}
           onClose={() => setManualControlsOpen(false)}
         />
       )}

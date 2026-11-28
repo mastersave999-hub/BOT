@@ -370,7 +370,9 @@ export type ReactionPassResult =
   | { ok: false; state: GameState; reason: string }
   | { ok: true; state: GameState; pendingAction?: ReactionWindow['pendingAction']; logs?: string[]; resolvedCard?: string };
 
-function sendResolvedMagicToHell(state: GameState, playerId: string, instance: CardInstance): GameState {
+/** Rulebook "Normal Magic": after its effect resolves, the card leaves the Magic Zone for Hell.
+ *  Exported so the direct Main-Phase cast path in the Playmat reuses the exact same rule. */
+export function sendResolvedMagicToHell(state: GameState, playerId: string, instance: CardInstance): GameState {
   const player = state.players[playerId];
   if (!player) return state;
   return {
