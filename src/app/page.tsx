@@ -13,7 +13,8 @@ import {
   playerIdForSeat,
   type MatchSession, type PlayerSetup, type RoomMode
 } from '../engine/multiplayer';
-import { createCardInstance, createLocalMatchState, shuffled } from '../engine/localMatch';
+import { createCardInstance, createLocalMatchState, shuffled, type LocalMatchSide } from '../engine/localMatch';
+import { clearLocalMatch, loadLocalMatch, saveLocalMatchSides, type StoredLocalMatch } from '../engine/localMatchPersistence';
 import {
   getCurrentUser, saveDeckForUser, deleteDeckForUser,
   type SavedDeck, type UserAccount
@@ -22,7 +23,7 @@ import { rollOpeningOrder } from '../engine/opening';
 import sampleCardsData from '../engine/sampleCards.json';
 import starterDeckData from '../engine/starterDeck.json';
 import packageJson from '../../package.json';
-import { Swords, Users, Library, Globe, User, Plus, Flame } from 'lucide-react';
+import { Swords, Users, Library, Globe, User, Plus, Flame, Play } from 'lucide-react';
 import { PwaInstallButton } from '../components/PwaInstallButton';
 import { CARD_BACK_SRC, OrnamentDivider } from '../components/game/botTheme';
 
@@ -114,6 +115,9 @@ function HomeShell({ clerk }: { clerk: ClerkAuth }) {
   const [gameMode, setGameMode] = useState<'DUEL' | 'AD_MUA'>('DUEL');
   const [initialGameState, setInitialGameState] = useState<GameState | null>(null);
   const [onlineSession, setOnlineSession] = useState<MatchSession | null>(null);
+  // Bumped on resume/restart so Playmat remounts with the replacement state.
+  const [matchKey, setMatchKey] = useState(0);
+  const [resumableMatch, setResumableMatch] = useState<StoredLocalMatch | null>(null);
 
   const { isLoaded: isClerkLoaded, isSignedIn } = clerk;
   const { data: user = null, mutate: mutateUser } = useSWR<UserAccount | null>(
@@ -143,6 +147,11 @@ function HomeShell({ clerk }: { clerk: ClerkAuth }) {
       setCustomLifeDeck(firstDeck.lifeDeck);
     }
   }, [user]);
+
+  // Reconnect: an unfinished local match survives a page reload via localStorage.
+  useEffect(() => {
+    setResumableMatch(loadLocalMatch());
+  }, []);
 
   const handleLogout = async () => {
     await clerk.signOut();
@@ -237,26 +246,56 @@ function HomeShell({ clerk }: { clerk: ClerkAuth }) {
 
     // Rule Book 3.2 Game Set up: both sides start with empty field zones —
     // no Avatar is pre-spawned; the AI summons during its own Main Phase.
-    const initialGame = createLocalMatchState(
-      mode,
-      [
-        {
-          name: user ? user.username : 'ผู้เล่นฝั่งเรา (You)',
-          mainDeck: mainCardsPool,
-          lifeDeck: lifeCardsPool
-        },
-        {
-          name: opponentName,
-          mainDeck: aiMainPool,
-          lifeDeck: aiLifePool,
-          hideHand: true
-        }
-      ]
-    );
+    const sides: [LocalMatchSide, LocalMatchSide] = [
+      {
+        name: user ? user.username : 'ผู้เล่นฝั่งเรา (You)',
+        mainDeck: mainCardsPool,
+        lifeDeck: lifeCardsPool
+      },
+      {
+        name: opponentName,
+        mainDeck: aiMainPool,
+        lifeDeck: aiLifePool,
+        hideHand: true
+      }
+    ];
+    const initialGame = createLocalMatchState(mode, sides);
+    // Kept so the pause menu's Restart can rebuild this exact matchup.
+    saveLocalMatchSides(sides);
 
     setGameMode(mode);
     setOnlineSession(null);
     setInitialGameState(initialGame);
+    setCurrentView('GAME');
+  };
+
+  const handleExitToMenu = () => {
+    clearLocalMatch();
+    setResumableMatch(null);
+    setOnlineSession(null);
+    setInitialGameState(null);
+    setCurrentView('HOME');
+  };
+
+  const resumeLocalMatch = () => {
+    if (!resumableMatch) return;
+    setOnlineSession(null);
+    setGameMode(resumableMatch.state.mode);
+    setInitialGameState(resumableMatch.state);
+    setMatchKey(key => key + 1);
+    setCurrentView('GAME');
+  };
+
+  const handleRestartLocalMatch = () => {
+    const stored = loadLocalMatch();
+    if (!stored?.sides) {
+      handleExitToMenu();
+      return;
+    }
+    setOnlineSession(null);
+    setGameMode(stored.state.mode);
+    setInitialGameState(createLocalMatchState(stored.state.mode, stored.sides));
+    setMatchKey(key => key + 1);
     setCurrentView('GAME');
   };
 
@@ -295,10 +334,13 @@ function HomeShell({ clerk }: { clerk: ClerkAuth }) {
   if (currentView === 'GAME' && initialGameState) {
     return (
       <Playmat
+        key={matchKey}
         initialState={initialGameState}
         currentUserId={onlineSession ? onlineSession.myPlayerId : 'player-1'}
         isHost={!onlineSession || onlineSession.role === 'host'}
         link={onlineSession?.link}
+        onExitToMenu={onlineSession ? undefined : handleExitToMenu}
+        onRestartMatch={onlineSession ? undefined : handleRestartLocalMatch}
       />
     );
   }
@@ -412,6 +454,18 @@ function HomeShell({ clerk }: { clerk: ClerkAuth }) {
 
         {/* Primary & secondary triggers */}
         <div className="flex w-full max-w-sm flex-col gap-2.5">
+          {resumableMatch && (
+            <button
+              onClick={resumeLocalMatch}
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-500/50 bg-emerald-950/50 px-6 py-3 text-sm font-black text-emerald-200 shadow-lg transition hover:bg-emerald-900/60"
+            >
+              <Play className="h-4 w-4" aria-hidden="true" />
+              กลับสู่เกมที่ยังไม่จบ
+              <span className="text-[10px] font-semibold text-emerald-400/80">
+                {resumableMatch.state.mode === 'DUEL' ? 'Duel' : 'อัดมั่ว'} • เทิร์น {resumableMatch.state.turnNumber}
+              </span>
+            </button>
+          )}
           <button
             onClick={() => startMatch('DUEL')}
             className="group flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-700 via-red-600 to-amber-600 px-6 py-3.5 text-base font-black text-white shadow-xl shadow-red-950/50 ring-1 ring-amber-400/40 transition hover:from-red-600 hover:to-amber-500 active:scale-[0.98]"
