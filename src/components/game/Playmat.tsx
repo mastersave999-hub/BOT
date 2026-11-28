@@ -37,9 +37,7 @@ import {
   parseCardAbility,
   avatarHasKeyword,
   recomputeContinuousAuras,
-  executeCardAbility,
-  clearEndOfTurnModifiers,
-  expireModifiersAt
+  executeCardAbility
 } from '../../engine/abilityEngine';
 import { calculateNetPower } from '../../engine/layers';
 import { checkModificationEquip } from '../../engine/equipLegality';
@@ -62,6 +60,7 @@ import {
   shouldOfferManualResolution
 } from '../../engine/hybridMode';
 import { deriveLegalAvatarActions, deriveLegalHandActions, describeBlockedHandReason, type HandActionKind } from '../../engine/legalActions';
+import { applyAiDeferredAction, runAiTurnStep, shouldAiAct } from '../../engine/ai/aiDriver';
 import {
   beginDispatch,
   cancelHandSelection,
@@ -449,24 +448,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   // Phase 6: rapid-tap dispatch guard and two-step attack confirmation tracking.
   const dispatchGuardRef = useRef<DispatchGuard>(EMPTY_DISPATCH_GUARD);
   const [attackCommittedId, setAttackCommittedId] = useState<string | null>(null);
-  // Token that invalidates in-flight AI turn steps when a new turn starts or the mat unmounts.
-  const aiTurnTokenRef = useRef(0);
   // Pause menu (local matches): freezes the AI loop and blocks the board behind an overlay.
   const [isPaused, setIsPaused] = useState(false);
-  const pausedRef = useRef(false);
-  useEffect(() => {
-    pausedRef.current = isPaused;
-  }, [isPaused]);
 
   useEffect(() => {
     setAttackCommittedId(current => (current !== null && current !== selectedAttackerId ? null : current));
   }, [selectedAttackerId]);
-
-  useEffect(() => {
-    return () => {
-      aiTurnTokenRef.current += 1;
-    };
-  }, []);
 
   useEffect(() => {
     if (window.matchMedia('(min-width: 1024px)').matches) setShowEventLog(true);
@@ -679,25 +666,31 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     saveLocalMatch(gameState, null);
   }, [gameState, winnerName, isOnline]);
 
-  // Local AI opponent: it has no reaction strategy, so it must pass priority on its
-  // own. Without this, any window that opens while the AI holds priority (e.g. the
-  // player summons and the AI reacts first) hangs forever and blocks every action,
-  // including the manual effect resolver.
+  // Local AI opponent (Phase A refactor): every decision comes from the pure
+  // engine driver in src/engine/ai/aiDriver.ts — turn steps, pending Deck/Hell/
+  // discard choices, manual-override approval and reaction windows included.
+  // Whenever the AI owns the next decision, schedule exactly one driver step
+  // after a human-like pause; the resulting state change re-triggers this effect.
   useEffect(() => {
-    if (isOnline || isPaused) return;
-    const window = gameState.reactionWindow;
-    if (!window || window.pendingReaction || window.priorityPlayerId !== opponentId) return;
+    if (isOnline || isPaused || winnerName) return;
+    if (!shouldAiAct(gameState, opponentId)) return;
+    const delay = AI_STEP_MIN_MS + Math.floor(Math.random() * AI_STEP_JITTER_MS);
     const timer = setTimeout(() => {
-      const result = passReactionPriority(gameState, opponentId);
-      if ('reason' in result) return;
-      const loggedState = result.logs?.length
-        ? appendLogs(result.state, result.logs, 'REACTION', opponentId)
-        : result.state;
-      if (result.pendingAction) finishDeferredReactionAction(loggedState, result.pendingAction);
-      else setGameState(loggedState);
-    }, 900);
+      const outcome = runAiTurnStep(gameState, opponentId);
+      if (outcome.kind === 'WAITING') return;
+      if (outcome.winnerId) setWinnerName(outcome.state.players[outcome.winnerId]?.name ?? outcome.winnerId);
+      if (outcome.pendingAction && outcome.pendingAction.actorId !== opponentId) {
+        // The window closed with a deferred action owned by the human player.
+        finishDeferredReactionAction(outcome.state, outcome.pendingAction);
+        return;
+      }
+      setGameState(outcome.state);
+      if (outcome.kind === 'DONE') {
+        showNotification(outcome.logs[outcome.logs.length - 1] ?? 'จบเทิร์นของคู่แข่ง');
+      }
+    }, delay);
     return () => clearTimeout(timer);
-  }, [gameState, isOnline, opponentId, isPaused]);
+  }, [gameState, isOnline, opponentId, isPaused, winnerName]);
 
   const leaveMatch = () => {
     link?.close();
@@ -835,6 +828,17 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   };
 
   const finishDeferredReactionAction = (state: GameState, action?: DeferredReactionAction) => {
+    // Phase A: deferred actions owned by the local AI opponent are resolved by the
+    // pure AI driver; only human-owned actions reach the UI prompts below.
+    if (!isOnline && action && action.actorId === opponentId) {
+      const outcome = applyAiDeferredAction(state, action, opponentId);
+      if (outcome.winnerId) setWinnerName(outcome.state.players[outcome.winnerId]?.name ?? outcome.winnerId);
+      setGameState(outcome.state);
+      if (outcome.kind === 'DONE') {
+        showNotification(outcome.logs[outcome.logs.length - 1] ?? 'จบเทิร์นของคู่แข่ง');
+      }
+      return;
+    }
     let nextState = state;
     if (action?.type === 'SUMMON_JUTI' && action.paidCost && parseCardAbility(action.sourceCard.card).hasJuti) {
       const parsed = parseCardAbility(action.sourceCard.card);
@@ -890,9 +894,6 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         setGameState(nextState);
       }
       return;
-    } else if (action?.type === 'AI_TURN_CONTINUATION') {
-      runAiOpponentTurn(nextState, true, action.logs);
-      return;
     } else if (action?.type === 'ADVANCE_PHASE') {
       const actorName = nextState.players[action.actorId]?.name ?? 'ผู้เล่น';
       if (action.nextPhase === 'BATTLE' || action.nextPhase === 'END') {
@@ -918,7 +919,6 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         const nextPlayerName = nextState.players[nextPlayerId]?.name ?? nextPlayerId;
         nextState = appendLogs(nextState, [`จบเทิร์นของ ${actorName} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', action.actorId);
         setGameState(nextState);
-        if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
         showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
         return;
       }
@@ -1054,7 +1054,6 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     const nextPlayerName = nextState.players[nextPlayerId]?.name ?? nextPlayerId;
     setGameState(appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE', meId));
     showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
-    if (!isOnline) setTimeout(() => runAiOpponentTurn(nextState), 900);
   };
 
   const resolveExitChoice = (sourceCardId?: string) => {
@@ -1243,128 +1242,15 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
       const loggedState = appendLogs(nextState, [`จบเทิร์นของ ${me.name} — เริ่มเทิร์นของ ${nextPlayerName}`], 'TURN_CHANGE');
       setGameState(loggedState);
       showNotification(`ส่งเทิร์นให้ ${nextPlayerName}`);
-
-      if (!isOnline) setTimeout(() => runAiOpponentTurn(loggedState), 900);
     }
   };
 
-  // Automated AI Opponent Turn for smooth single-player testing.
-  // Plays one action at a time with human-like pauses so the player can follow
-  // each decision instead of the whole turn resolving in a single instant.
+  // Automated AI Opponent Turn (Phase A refactor): every AI decision is made by
+  // the pure engine driver in src/engine/ai/aiDriver.ts. This component only
+  // schedules human-like pauses between driver steps (see the shouldAiAct
+  // effect above) and dispatches the states the driver returns.
   const AI_STEP_MIN_MS = 900;
   const AI_STEP_JITTER_MS = 700;
-
-  const runAiOpponentTurn = (startState: GameState, resumeAfterReaction = false, savedLogs: string[] = []) => {
-    const token = ++aiTurnTokenRef.current;
-    void runAiTurnSteps(startState, resumeAfterReaction, savedLogs, token);
-  };
-
-  const runAiTurnSteps = async (startState: GameState, resumeAfterReaction: boolean, savedLogs: string[], token: number) => {
-    const alive = () => aiTurnTokenRef.current === token;
-    // While the match is paused the AI waits at the next step boundary instead of
-    // advancing, so the pause menu can freeze an in-progress AI turn.
-    const pause = (ms: number) =>
-      new Promise<boolean>(resolve => {
-        const wait = () => {
-          if (!alive()) return resolve(false);
-          if (pausedRef.current) {
-            setTimeout(wait, 250);
-            return;
-          }
-          setTimeout(() => resolve(alive()), ms);
-        };
-        wait();
-      });
-    const think = () => pause(AI_STEP_MIN_MS + Math.floor(Math.random() * AI_STEP_JITTER_MS));
-
-    let state = resumeAfterReaction ? startState : executeDrawPhase(startState);
-    const logs = resumeAfterReaction
-      ? [...savedLogs]
-      : [`🤖 ${state.players[opponentId].name} จั่วการ์ดและเข้าสู่ Main Phase`];
-
-    if (!resumeAfterReaction) {
-      setGameState(state);
-      if (!(await think())) return;
-
-      const aiForMain = { ...state.players[opponentId] };
-      const playerForMain = { ...state.players[meId] };
-      const avatarIdx = aiForMain.hand.findIndex(c => c.card.type === 'Avatar');
-      let summoned: CardInstance | undefined;
-      if (avatarIdx !== -1 && aiForMain.avatarZone.length < 4) {
-        summoned = { ...aiForMain.hand[avatarIdx], isFaceUp: true, isRested: false };
-        aiForMain.hand = aiForMain.hand.filter((_, i) => i !== avatarIdx);
-        aiForMain.avatarZone = [...aiForMain.avatarZone, summoned];
-        logs.push(`🤖 ${aiForMain.name} อัญเชิญ "${summoned.card.name}" (PWR ${summoned.card.power})`);
-      }
-
-      state = recomputeContinuousAuras({
-        ...state,
-        players: { ...state.players, [opponentId]: aiForMain, [meId]: playerForMain }
-      });
-
-      if (summoned) {
-        const reactionState = openReactionWindow(
-          state,
-          {
-            type: 'AVATAR_SUMMONED',
-            actorId: opponentId,
-            targetInstanceId: summoned.instanceId,
-            targetCardName: summoned.card.name,
-            sourceCardName: summoned.card.name
-          },
-          { type: 'AI_TURN_CONTINUATION', actorId: opponentId, sourceCard: summoned, logs }
-        );
-        if (reactionState !== state) {
-          setGameState(reactionState);
-          return;
-        }
-        showNotification(`คู่แข่งอัญเชิญ "${summoned.card.name}"`);
-      }
-      setGameState(state);
-      if (!(await think())) return;
-    }
-
-    const ai = state.players[opponentId];
-
-    // Battle step: declare and resolve one attack, then pause before ending the turn.
-    const readyAiAvatar = state.players[opponentId].avatarZone.find(a => !a.isRested && calculateNetPower(a) > 0);
-    let attacked = false;
-    if (readyAiAvatar) {
-      const targetPlayerAvatars = state.players[meId].avatarZone;
-      const target = targetPlayerAvatars.length === 0
-        ? { type: 'LIFE' as const, playerId: meId }
-        : targetPlayerAvatars[0] && calculateNetPower(readyAiAvatar) >= calculateNetPower(targetPlayerAvatars[0])
-          ? { type: 'AVATAR' as const, playerId: meId, instanceId: targetPlayerAvatars[0].instanceId }
-          : null;
-      if (target) {
-        const declared = declareCombatAttack(state, readyAiAvatar.instanceId, target);
-        const battle = declared ? resolveDeclaredBattle(declared) : null;
-        if (battle?.ok) {
-          state = battle.state;
-          attacked = true;
-          logs.push(...battle.events.map(event => `🤖 ${event}`));
-          showNotification(`${ai.name} โจมตีด้วย "${readyAiAvatar.card.name}"!`);
-          if (battle.events.some(event => event.includes('lost the game'))) setWinnerName(ai.name);
-        }
-      }
-    }
-    if (attacked) {
-      setGameState(state);
-      if (!(await think())) return;
-    }
-
-    // End AI Turn -> Return to Player 1 Draw Phase
-    state = expireModifiersAt(state, 'END_OF_BATTLE', opponentId);
-    state = clearEndOfTurnModifiers(state);
-    state = {
-      ...state,
-      currentTurnPlayerIndex: 0,
-      currentPhase: 'DRAW',
-      turnNumber: state.turnNumber + 1
-    };
-    state = appendLogs(state, [...logs, `จบเทิร์นของ ${ai.name} — ตาของคุณ (กดเริ่มจั่วการ์ด)`], 'AI_TURN', opponentId);
-    setGameState(state);
-  };
 
   // Start playing a card from Hand (checks Cost first)
   const handleInitiatePlayCard = (handCard: CardInstance) => {
