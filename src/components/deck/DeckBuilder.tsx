@@ -9,8 +9,10 @@ import starterDeckData from '../../engine/starterDeck.json';
 import {
   Search, Plus, Minus, Trash2, CheckCircle, AlertTriangle, ArrowLeft,
   Shield, Sparkles, Filter, Save, Layers, Smartphone, Eye, LayoutGrid, List,
-  RotateCcw, X, Info
+  RotateCcw, X, Info, ClipboardPaste, ClipboardCopy
 } from 'lucide-react';
+import { DeckImportModal } from './DeckImportModal';
+import { applyParsedDeck, formatDeckToText, type DeckTextParseResult } from '../../engine/deckTextCodec';
 
 interface DeckBuilderProps {
   onBack: () => void;
@@ -106,12 +108,42 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
   // Preview card modal
   const [previewCard, setPreviewCard] = useState<Card | null>(null);
 
+  // One-paste deck list import/export
+  const [importOpen, setImportOpen] = useState<boolean>(false);
+
   // Added notification toast for mobile UX
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 1800);
+  };
+
+  const handleApplyImport = (result: DeckTextParseResult) => {
+    const applied = applyParsedDeck(result, deckName);
+    setMainDeck(applied.mainDeck);
+    setLifeDeck(applied.lifeDeck);
+    setDeckName(applied.deckName.slice(0, 40));
+    setImportOpen(false);
+    showToast(`นำเข้าเด็ค "${applied.deckName}" แล้ว (Main ${result.counts.main}/50 · Life ${result.counts.life}/5)`);
+  };
+
+  const handleExportDeck = async () => {
+    const text = formatDeckToText(mainDeck, lifeDeck, deckName);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API can be unavailable (permission denied / insecure context).
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    showToast('คัดลอกลิสต์เด็คไปคลิปบอร์ดแล้ว');
   };
 
   const allCards = allCardsData as Card[];
@@ -329,6 +361,22 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
             </button>
           </div>
 
+          <button
+            onClick={() => setImportOpen(true)}
+            className="px-2 md:px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition flex items-center gap-1"
+            title="วางรหัสเด็คจากชุมชนเพื่อนำเข้าทันที"
+          >
+            <ClipboardPaste className="w-3.5 h-3.5 text-sky-400" />
+            <span className="hidden sm:inline">วางรหัสเด็ค</span>
+          </button>
+          <button
+            onClick={handleExportDeck}
+            className="px-2 md:px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition flex items-center gap-1"
+            title="คัดลอกลิสต์เด็ครูปแบบชุมชนไปคลิปบอร์ด"
+          >
+            <ClipboardCopy className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="hidden sm:inline">คัดลอกลิสต์</span>
+          </button>
           <button
             onClick={handleAutoFill}
             className="px-2 md:px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium transition flex items-center gap-1"
@@ -933,6 +981,15 @@ export const DeckBuilder: React.FC<DeckBuilderProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {importOpen && (
+        <DeckImportModal
+          catalog={allCards}
+          currentDeckName={deckName}
+          onApply={handleApplyImport}
+          onClose={() => setImportOpen(false)}
+        />
       )}
     </div>
   );
