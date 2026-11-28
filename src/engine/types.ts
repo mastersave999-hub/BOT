@@ -285,7 +285,13 @@ export type ManualOverrideAction =
   /** Phase 8: spawns a Token; the Avatar Zone keeps its 4 normal Avatar / 6 total cap. */
   | { kind: 'MANUAL_SPAWN_TOKEN'; playerId: string; name?: string; power?: number; color?: string }
   /** Phase 8: control change on a field Avatar; honours controlChangeImmune and Duo pairs. */
-  | { kind: 'MANUAL_CHANGE_CONTROL'; instanceId: string; newControllerId: string };
+  | { kind: 'MANUAL_CHANGE_CONTROL'; instanceId: string; newControllerId: string }
+  /** Phase 8.1: temporary control change; the previous controller is restored at the End Phase of the current turn. */
+  | { kind: 'MANUAL_CHANGE_CONTROL_TEMPORARY'; instanceId: string; newControllerId: string }
+  /** Phase 8.1: Symbol override on a field Avatar via a layer modifier; the printed Symbol is never mutated. */
+  | { kind: 'MANUAL_SET_SYMBOL'; instanceId: string; symbol: string; duration: 'END_OF_TURN' | 'PERMANENT' }
+  /** Phase 8.1: executes a fully parsed activated ability through the engine pipeline (costs, targets, once-per-turn). */
+  | { kind: 'MANUAL_ACTIVATE_ABILITY'; sourceInstanceId: string; abilityIndex: number; costInstanceIds: string[]; targetInstanceIds: string[] };
 
 export interface ManualOverrideContext {
   cardInstanceId?: string;
@@ -398,4 +404,19 @@ export interface GameState {
   processedTriggerEventIds?: string[];
   /** Activated protection attempts already used for a particular leaving-card event. */
   preventionAttempts?: string[];
+  /**
+   * Temporary control changes (e.g. "แอสการ์ดคือสถานที่ไม่ใช่ผู้คน") that must be
+   * restored to the previous controller when the recorded turn ends.
+   */
+  temporaryControlChanges?: TemporaryControlChange[];
+}
+
+export interface TemporaryControlChange {
+  instanceId: string;
+  /** Controller of the Avatar immediately before the temporary change. */
+  previousControllerId: string;
+  /** Controller holding the Avatar until the end of the recorded turn. */
+  temporaryControllerId: string;
+  /** Turn whose End Phase restores the previous controller. */
+  turnNumber: number;
 }

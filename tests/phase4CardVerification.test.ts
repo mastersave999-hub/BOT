@@ -958,7 +958,9 @@ function assertEffectState(before: GameState, after: GameState, plan: NonNullabl
 describe('Phase 4B per-card Game State verification', () => {
   it(`enumerates every parser-ready effect-bearing row (${parsedRows.length})`, () => {
     expect(effectRows).toHaveLength(1833);
-    expect(parsedRows).toHaveLength(259);
+    // 259 + the four "แอสการ์ดคือสถานที่ไม่ใช่ผู้คน" rows (BT02-060 x2, PRMO-155, KD01-020)
+    // that Phase 8.1 mapped to the continuous Symbol aura and the activated control change.
+    expect(parsedRows).toHaveLength(263);
     expect(new Set(parsedRows.map(card => card.printId)).size).toBeGreaterThan(0);
   });
 

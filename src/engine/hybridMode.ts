@@ -6,7 +6,7 @@ import type {
   ManualOverrideContext,
   PendingManualOverride,
 } from './types';
-import { parseCardText } from './cardTextAdapter';
+import { parseCardText, activateRegisteredCardTextAbility } from './cardTextAdapter';
 import {
   moveCardBetweenZones,
   changeAvatarControl,
@@ -131,7 +131,7 @@ const FIELD_ZONES: readonly PlayerZone[] = ['avatarZone', 'constructZone', 'magi
 const MAX_MANUAL_DECK_COUNT = 10;
 
 /** Queue steps that hand control to an authorized pending-choice UI before completing. */
-const CHOICE_OPENING_KINDS: readonly string[] = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE'];
+const CHOICE_OPENING_KINDS: readonly string[] = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE', 'MANUAL_ACTIVATE_ABILITY'];
 
 function findInstance(
   state: GameState,
@@ -206,6 +206,15 @@ export function describeManualOverrideAction(state: GameState, action: ManualOve
       return `สร้าง Token${action.name ? ` "${action.name}"` : ''}${action.power !== undefined ? ` POWER ${action.power}` : ''} ใน Avatar Zone ของ ${nameOf(action.playerId)}`;
     case 'MANUAL_CHANGE_CONTROL':
       return `เปลี่ยนผู้ควบคุม "${cardName(action.instanceId)}" ให้ ${nameOf(action.newControllerId)}`;
+    case 'MANUAL_CHANGE_CONTROL_TEMPORARY':
+      return `เปลี่ยนผู้ควบคุม "${cardName(action.instanceId)}" ให้ ${nameOf(action.newControllerId)} ชั่วคราวจนจบเทิร์น`;
+    case 'MANUAL_SET_SYMBOL':
+      return `เปลี่ยน Symbol ของ "${cardName(action.instanceId)}" เป็น {${action.symbol}}${action.duration === 'END_OF_TURN' ? ' จนจบเทิร์น' : ''}`;
+    case 'MANUAL_ACTIVATE_ABILITY': {
+      const costLabel = action.costInstanceIds.length ? ` จ่าย Cost: ทิ้ง ${action.costInstanceIds.map(cardName).join(', ')}` : '';
+      const targetLabel = action.targetInstanceIds.length ? ` เป้าหมาย: ${action.targetInstanceIds.map(cardName).join(', ')}` : '';
+      return `สั่งใช้ความสามารถของ "${cardName(action.sourceInstanceId)}"${costLabel}${targetLabel}`;
+    }
   }
 }
 
@@ -324,6 +333,35 @@ function validateManualOverrideAction(state: GameState, actorId: string, action:
       const destinationZone = [...state.players[action.newControllerId].avatarZone, found.card];
       const capacityError = validateAvatarZone({ avatarZone: destinationZone });
       if (capacityError) return capacityError;
+      return null;
+    }
+    case 'MANUAL_CHANGE_CONTROL_TEMPORARY':
+      return validateManualOverrideAction(state, actorId, { kind: 'MANUAL_CHANGE_CONTROL', instanceId: action.instanceId, newControllerId: action.newControllerId });
+    case 'MANUAL_SET_SYMBOL': {
+      if (typeof action.symbol !== 'string' || !action.symbol.trim() || action.symbol.trim().length > 32) return 'Invalid Symbol value';
+      if (!['END_OF_TURN', 'PERMANENT'].includes(action.duration)) return 'Invalid Symbol override duration';
+      const found = findInstance(state, action.instanceId);
+      if (!found || found.zone !== 'avatarZone') return 'Symbol target must be an Avatar on an Avatar Zone';
+      return null;
+    }
+    case 'MANUAL_ACTIVATE_ABILITY': {
+      if (!Number.isSafeInteger(action.abilityIndex) || action.abilityIndex < 0) return 'Invalid ability index';
+      if (!Array.isArray(action.costInstanceIds) || !Array.isArray(action.targetInstanceIds)) return 'Invalid ability bindings';
+      if (new Set(action.costInstanceIds).size !== action.costInstanceIds.length ||
+        new Set(action.targetInstanceIds).size !== action.targetInstanceIds.length) return 'Duplicate ability binding';
+      const land = state.landMagicZone?.instanceId === action.sourceInstanceId ? state.landMagicZone : undefined;
+      const found = findInstance(state, action.sourceInstanceId);
+      if (!found && !land) return 'Ability source is not on a field zone';
+      const sourceCard = land ?? found!.card;
+      if (sourceCard.controllerId !== actorId) return 'Only the ability controller may activate it';
+      const parsed = parseCardText(sourceCard.card);
+      const ability = parsed.clauses.filter(clause => clause.timing.mode === 'ACTIVATED')[action.abilityIndex];
+      if (!ability) return 'Activated ability does not exist on this card';
+      const actorHand = state.players[actorId]?.hand ?? [];
+      if (action.costInstanceIds.some(id => !actorHand.some(card => card.instanceId === id))) return 'Cost card is not in your hand';
+      const fieldInstanceIds = new Set(state.playerOrder.flatMap(playerId =>
+        ['avatarZone', 'constructZone', 'magicZone'].flatMap(zone => (state.players[playerId]?.[zone] ?? []).map(item => item.instanceId))));
+      if (action.targetInstanceIds.some(id => !fieldInstanceIds.has(id))) return 'Ability target is not on a field zone';
       return null;
     }
     default:
@@ -615,6 +653,52 @@ function applyOverrideStep(
     const changed = changeAvatarControl(next, pending.actorId, action.instanceId, action.newControllerId);
     if (!changed.ok) return { ok: false, state, reason: changed.reason ?? 'Manual control change failed' };
     next = changed.state;
+  } else if (action.kind === 'MANUAL_CHANGE_CONTROL_TEMPORARY') {
+    const holderId = next.playerOrder.find(pid => next.players[pid]?.avatarZone.some(item => item.instanceId === action.instanceId));
+    const avatar = holderId ? next.players[holderId].avatarZone.find(item => item.instanceId === action.instanceId) : undefined;
+    if (!avatar) return { ok: false, state, reason: 'Temporary control target disappeared' };
+    const previousControllerId = avatar.controllerId;
+    const changed = changeAvatarControl(next, pending.actorId, action.instanceId, action.newControllerId);
+    if (!changed.ok) return { ok: false, state, reason: changed.reason ?? 'Manual temporary control change failed' };
+    next = {
+      ...changed.state,
+      temporaryControlChanges: [
+        ...(changed.state.temporaryControlChanges ?? []).filter(entry => !(entry.instanceId === action.instanceId && entry.turnNumber === next.turnNumber)),
+        { instanceId: action.instanceId, previousControllerId, temporaryControllerId: action.newControllerId, turnNumber: next.turnNumber }
+      ]
+    };
+  } else if (action.kind === 'MANUAL_SET_SYMBOL') {
+    const found = findInstance(next, action.instanceId);
+    if (!found || found.zone !== 'avatarZone') return { ok: false, state, reason: 'Symbol target disappeared' };
+    const player = next.players[found.playerId];
+    next = {
+      ...next,
+      players: {
+        ...next.players,
+        [found.playerId]: {
+          ...player,
+          avatarZone: player.avatarZone.map(card => card.instanceId === action.instanceId
+            ? {
+                ...card,
+                layerModifiers: [...card.layerModifiers, {
+                  layer: 1 as const,
+                  powerMod: 0,
+                  symbolMod: action.symbol,
+                  sourceCardId: `manual-symbol:${pending.commandId}`,
+                  ...(action.duration === 'END_OF_TURN' ? { expiresAt: 'END_OF_TURN' as const } : {})
+                }]
+              }
+            : card)
+        }
+      }
+    };
+  } else if (action.kind === 'MANUAL_ACTIVATE_ABILITY') {
+    const activated = activateRegisteredCardTextAbility(next, action.sourceInstanceId, action.abilityIndex, {
+      costInstanceIds: action.costInstanceIds,
+      targetInstanceIds: action.targetInstanceIds
+    });
+    if (!activated.ok) return { ok: false, state, reason: activated.reason ?? 'Activated ability failed' };
+    next = activated.state;
   }
   return { ok: true, state: next };
 }

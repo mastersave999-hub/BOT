@@ -200,11 +200,20 @@ export function validateGameState(state: GameState): string | null {
         (candidate.power === undefined || Number.isSafeInteger(candidate.power)) &&
         (candidate.color === undefined || typeof candidate.color === 'string')) ||
       (candidate.kind === 'MANUAL_CHANGE_CONTROL' && typeof candidate.instanceId === 'string' &&
-        typeof candidate.newControllerId === 'string' && !!state.players[candidate.newControllerId])
+        typeof candidate.newControllerId === 'string' && !!state.players[candidate.newControllerId]) ||
+      (candidate.kind === 'MANUAL_CHANGE_CONTROL_TEMPORARY' && typeof candidate.instanceId === 'string' &&
+        typeof candidate.newControllerId === 'string' && !!state.players[candidate.newControllerId]) ||
+      (candidate.kind === 'MANUAL_SET_SYMBOL' && typeof candidate.instanceId === 'string' &&
+        typeof candidate.symbol === 'string' && candidate.symbol.trim().length > 0 && candidate.symbol.length <= 32 &&
+        ['END_OF_TURN', 'PERMANENT'].includes(candidate.duration)) ||
+      (candidate.kind === 'MANUAL_ACTIVATE_ABILITY' && typeof candidate.sourceInstanceId === 'string' &&
+        Number.isSafeInteger(candidate.abilityIndex) && candidate.abilityIndex >= 0 &&
+        Array.isArray(candidate.costInstanceIds) && candidate.costInstanceIds.every(id => typeof id === 'string') &&
+        Array.isArray(candidate.targetInstanceIds) && candidate.targetInstanceIds.every(id => typeof id === 'string'))
     );
     };
     // Phase 8: an optional multi-step queue; a Deck/Hell choice step must be the final step.
-    const CHOICE_OPENING_KINDS = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE'];
+    const CHOICE_OPENING_KINDS = ['MANUAL_SEARCH_DECK', 'MANUAL_SCOUT_DECK', 'MANUAL_HELL_CHOICE', 'MANUAL_ACTIVATE_ABILITY'];
     const queueValid = pending.actions === undefined || (Array.isArray(pending.actions) && pending.actions.length >= 1 &&
       pending.actions.length <= 8 && pending.actions.every(step => actionShapeValid(step)) &&
       !pending.actions.slice(0, -1).some(step => CHOICE_OPENING_KINDS.includes(step.kind)));

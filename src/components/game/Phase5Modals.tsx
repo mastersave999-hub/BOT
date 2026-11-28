@@ -11,6 +11,7 @@ import type {
   PendingManualOverride,
 } from '../../engine/types';
 import { describeManualOverrideAction } from '../../engine/hybridMode';
+import { parseCardText } from '../../engine/cardTextAdapter';
 import { ClassificationBadge, OrnamentDivider } from './botTheme';
 
 function findInstances(state: GameState, ownerPlayerId: string, zone: 'deck' | 'hell', ids: string[]): Card[] {
@@ -168,11 +169,12 @@ const MOVE_DESTINATIONS: Array<{ destination: 'deck' | 'hand' | 'avatarZone' | '
   { destination: 'deck', deckPosition: 'bottom', label: 'Deck (ล่างสุด)' }
 ];
 
-const MANUAL_TABS: Array<{ id: 'deck' | 'field' | 'hand' | 'life'; label: string }> = [
+const MANUAL_TABS: Array<{ id: 'deck' | 'field' | 'hand' | 'life' | 'ability'; label: string }> = [
   { id: 'deck', label: 'ค้นหา / กองการ์ด' },
   { id: 'field', label: 'สนาม / พลัง' },
   { id: 'hand', label: 'มือ / นรก' },
-  { id: 'life', label: 'LIFE' }
+  { id: 'life', label: 'LIFE' },
+  { id: 'ability', label: 'สั่งใช้ความสามารถ' }
 ];
 
 const MAX_MANUAL_STEPS = 8;
@@ -190,10 +192,13 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
   const opponentId = state.playerOrder.find(id => id !== actorId);
   const fieldCards = state.playerOrder.flatMap(playerId =>
     (['avatarZone', 'constructZone', 'magicZone'] as const).flatMap(zone =>
-      (state.players[playerId]?.[zone] ?? []).map(instance => ({ playerId, zone, instanceId: instance.instanceId, card: instance.card }))
+      (state.players[playerId]?.[zone] ?? []).map(instance => ({
+        playerId, zone, instanceId: instance.instanceId, card: instance.card,
+        isRested: instance.isRested, controllerId: instance.controllerId
+      }))
     )
   );
-  const [activeTab, setActiveTab] = useState<'deck' | 'field' | 'hand' | 'life'>('deck');
+  const [activeTab, setActiveTab] = useState<'deck' | 'field' | 'hand' | 'life' | 'ability'>('deck');
   const [steps, setSteps] = useState<ManualOverrideAction[]>([]);
   const [targetId, setTargetId] = useState<string>(manualCard?.instanceId ?? fieldCards[0]?.instanceId ?? '');
   const [lifeTarget, setLifeTarget] = useState<string>(actorId);
@@ -219,9 +224,43 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
   const [tokenName, setTokenName] = useState('');
   const [tokenPower, setTokenPower] = useState('0');
   const [controlTargetId, setControlTargetId] = useState<string>(opponentId ?? '');
+  const [symbolValue, setSymbolValue] = useState('');
+  const [symbolDuration, setSymbolDuration] = useState<'END_OF_TURN' | 'PERMANENT'>('END_OF_TURN');
+  const [abilityIndex, setAbilityIndex] = useState(0);
+  const [abilityCostId, setAbilityCostId] = useState('');
+  const [abilityTargetId, setAbilityTargetId] = useState('');
+
+  // Phase 8.1: the pinned card's parsed activated abilities, executed through the
+  // engine pipeline (activateRegisteredCardTextAbility) so costs, targets and the
+  // once-per-turn limit are validated by the engine, not by the UI.
+  const manualParsed = manualCard ? parseCardText(manualCard.card) : null;
+  const activatedAbilities = (manualParsed?.clauses ?? [])
+    .map((clause, index) => ({ clause, index }))
+    .filter(entry => entry.clause.timing.mode === 'ACTIVATED');
+  const activeAbility = activatedAbilities[abilityIndex] ?? activatedAbilities[0];
 
   const target = fieldCards.find(entry => entry.instanceId === targetId);
   const queueFull = steps.length >= MAX_MANUAL_STEPS;
+
+  const matchesAbilitySelector = (entry: (typeof fieldCards)[number], selector: ReturnType<typeof parseCardText>['clauses'][number]['selector']): boolean => {
+    if (!selector) return true;
+    if (selector.controller === 'opponent' && entry.controllerId === actorId) return false;
+    if (selector.controller === 'self' && entry.controllerId !== actorId) return false;
+    if (selector.cardTypes.length > 0 && !selector.cardTypes.includes(entry.card.type)) return false;
+    if (selector.cost) {
+      if (selector.cost.comparison === 'at_most' && entry.card.cost > selector.cost.value) return false;
+      if (selector.cost.comparison === 'at_least' && entry.card.cost < selector.cost.value) return false;
+    }
+    if (selector.rested !== undefined && entry.isRested !== selector.rested) return false;
+    return true;
+  };
+  const abilityTargets = activeAbility ? fieldCards.filter(entry => matchesAbilitySelector(entry, activeAbility.clause.selector)) : [];
+  const abilityUsageKey = manualCard && activeAbility
+    ? `${state.turnNumber}:${state.landMagicZone?.instanceId === manualCard.instanceId ? state.landMagicZone.controllerId : actorId}:${manualCard.instanceId}:card-text:${activeAbility.index}`
+    : '';
+  const abilityUsedThisTurn = !!abilityUsageKey && (state.triggerUsage ?? []).includes(abilityUsageKey);
+  const abilityNeedsTarget = !!activeAbility && activeAbility.clause.effects.some(effect =>
+    ['change_control', 'modify_power', 'set_power', 'change_symbol', 'destroy_avatar', 'bounce_avatar', 'banish_avatar', 'sacrifice_avatar', 'summon_from_hell'].includes(effect.kind));
 
   const addStep = (action: ManualOverrideAction) => {
     if (queueFull) return;
@@ -406,7 +445,29 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
             onClick={() => addStep({ kind: 'MANUAL_CHANGE_CONTROL', instanceId: targetId, newControllerId: controlTargetId })}
             className={addStepClass}
           ><Plus className="w-3.5 h-3.5" /> เพิ่มขั้นตอนเปลี่ยนผู้ควบคุม</button>
+          <button
+            type="button"
+            disabled={!target || !controlTargetId || queueFull}
+            onClick={() => addStep({ kind: 'MANUAL_CHANGE_CONTROL_TEMPORARY', instanceId: targetId, newControllerId: controlTargetId })}
+            className={addStepClass}
+          ><Plus className="w-3.5 h-3.5" /> เปลี่ยนผู้ควบคุมชั่วคราว (คืนสิทธิ์อัตโนมัติจนจบเทิร์น)</button>
         </div>
+      </div>
+      <div className={groupClass}>
+        <p className={groupTitleClass}>เปลี่ยน Symbol ของ Avatar (layer modifier — Symbol ตัวพิมพ์เดิมไม่ถูกแก้)</p>
+        <div className="grid grid-cols-2 gap-1.5">
+          <input aria-label="Symbol ใหม่" placeholder="Symbol เช่น เทพ" value={symbolValue} onChange={event => setSymbolValue(event.target.value)} className={inputClass} />
+          <select aria-label="ระยะเวลาของ Symbol ใหม่" value={symbolDuration} onChange={event => setSymbolDuration(event.target.value as 'END_OF_TURN' | 'PERMANENT')} className={inputClass}>
+            <option value="END_OF_TURN">จนจบเทิร์น</option>
+            <option value="PERMANENT">ต่อเนื่อง (จนการ์ดออกจากสนาม)</option>
+          </select>
+        </div>
+        <button
+          type="button"
+          disabled={!target || !symbolValue.trim() || queueFull}
+          onClick={() => { addStep({ kind: 'MANUAL_SET_SYMBOL', instanceId: targetId, symbol: symbolValue.trim(), duration: symbolDuration }); setSymbolValue(''); }}
+          className={addStepClass}
+        ><Plus className="w-3.5 h-3.5" /> เพิ่มขั้นตอนเปลี่ยน Symbol</button>
       </div>
     </div>
   ) : activeTab === 'hand' ? (
@@ -471,6 +532,81 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
         ><Plus className="w-3.5 h-3.5" /> เพิ่มขั้นตอนเลือกจากนรก</button>
       </div>
     </div>
+  ) : activeTab === 'ability' ? (
+    <div className="space-y-2">
+      {activatedAbilities.length === 0 || !manualCard ? (
+        <div className={groupClass}>
+          <p className={groupTitleClass}>ไม่มีความสามารถสั่งใช้ที่เอนจินแยกวิเคราะห์ได้</p>
+          <p className="text-[10px] text-slate-500">การ์ดที่กำลังแก้ผลไม่มีข้อความ &quot;สั่งใช้&quot; ที่แปลงเป็นขั้นตอนเอนจินได้ — ใช้แท็บอื่นเพื่อแก้ผลด้วยมือแทน</p>
+        </div>
+      ) : (
+        <div className={groupClass}>
+          <p className={groupTitleClass}>ความสามารถสั่งใช้ — เอนจินตรวจ Cost เป้าหมาย และเทิร์นละครั้ง</p>
+          {activatedAbilities.length > 1 && (
+            <select
+              aria-label="เลือกความสามารถสั่งใช้"
+              value={abilityIndex}
+              onChange={event => { setAbilityIndex(Number(event.target.value)); setAbilityCostId(''); setAbilityTargetId(''); }}
+              className={inputClass}
+            >
+              {activatedAbilities.map((entry, index) => (
+                <option key={entry.index} value={index}>#{entry.index + 1}: {entry.clause.effectText.slice(0, 48)}</option>
+              ))}
+            </select>
+          )}
+          <p className="text-[10px] text-slate-200 whitespace-pre-line">{activeAbility?.clause.source}</p>
+          <p className="flex flex-wrap items-center gap-1 text-[9px] text-slate-400">
+            <span className="rounded border border-emerald-400/60 bg-emerald-950/60 px-1 py-0.5 font-bold text-emerald-200">เอนจินรองรับ</span>
+            {activeAbility?.clause.timing.frequency === 'ONCE_PER_TURN' && (
+              <span className="rounded border border-amber-400/60 bg-amber-950/60 px-1 py-0.5 font-bold text-amber-200">เทิร์นละครั้ง{abilityUsedThisTurn ? ' — ใช้ไปแล้วเทิร์นนี้' : ''}</span>
+            )}
+          </p>
+          {activeAbility?.clause.cost && (
+            <div className="space-y-1">
+              <p className="text-[10px] font-bold text-amber-200">Cost: ทิ้งการ์ด {activeAbility.clause.cost.count} ใบจากมือ</p>
+              <select aria-label="เลือกการ์ดจ่าย Cost" value={abilityCostId} onChange={event => setAbilityCostId(event.target.value)} className={inputClass}>
+                <option value="">เลือกการ์ดบนมือ…</option>
+                {(me?.hand ?? []).map(card => (
+                  <option key={card.instanceId} value={card.instanceId}>{card.card.name} ({card.card.type})</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className="space-y-1">
+            <p className="text-[10px] font-bold text-amber-200">เป้าหมายตามเงื่อนไขบนการ์ด (เอนจินตรวจซ้ำอีกชั้น)</p>
+            <select aria-label="เลือกเป้าหมายความสามารถ" value={abilityTargetId} onChange={event => setAbilityTargetId(event.target.value)} className={inputClass}>
+              <option value="">เลือกเป้าหมาย…</option>
+              {abilityTargets.map(entry => (
+                <option key={entry.instanceId} value={entry.instanceId}>
+                  {entry.card.name} (Cost {entry.card.cost}{entry.isRested ? ' · นอน' : ' · ตื่น'} · {state.players[entry.playerId]?.name ?? entry.playerId})
+                </option>
+              ))}
+            </select>
+            {activeAbility && abilityTargets.length === 0 && (
+              <p className="text-[10px] text-red-300">ไม่มีเป้าหมายที่ถูกต้องบนสนาม — จึงสั่งใช้ไม่ได้</p>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={queueFull || !activeAbility || abilityUsedThisTurn ||
+              (!!activeAbility.clause.cost && !abilityCostId) || (abilityNeedsTarget && !abilityTargetId)}
+            onClick={() => {
+              if (!manualCard || !activeAbility) return;
+              addStep({
+                kind: 'MANUAL_ACTIVATE_ABILITY',
+                sourceInstanceId: manualCard.instanceId,
+                abilityIndex: activeAbility.index,
+                costInstanceIds: abilityCostId ? [abilityCostId] : [],
+                targetInstanceIds: abilityTargetId ? [abilityTargetId] : []
+              });
+              setAbilityCostId('');
+              setAbilityTargetId('');
+            }}
+            className={addStepClass}
+          ><Plus className="w-3.5 h-3.5" /> เพิ่มขั้นตอนสั่งใช้ความสามารถ</button>
+        </div>
+      )}
+    </div>
   ) : (
     <div className={groupClass}>
       <p className={groupTitleClass}>LIFE — เซ็น (หงาย) / ฮีล (คว่ำ)</p>
@@ -512,7 +648,7 @@ export const ManualOverrideControls: React.FC<ManualOverrideControlsProps> = ({ 
         )}
 
         {/* Category tabs */}
-        <div role="tablist" aria-label="หมวดการกระทำ Manual Resolver" className="grid grid-cols-4 gap-1">
+        <div role="tablist" aria-label="หมวดการกระทำ Manual Resolver" className="grid grid-cols-5 gap-1">
           {MANUAL_TABS.map(tab => (
             <button
               key={tab.id}

@@ -41,6 +41,7 @@ export type EffectDefinition =
   | { kind: 'recover_from_hell'; playerId: string; count: number; instanceIds: string[]; destination: 'deck_top' | 'deck_bottom' | 'hand' | 'banish'; cardType?: 'Avatar' | 'Construct' | 'Magic'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }> }
   | { kind: 'summon_from_hell'; playerId: string; instanceId: string; rested?: boolean; cardType?: 'Avatar'; names?: Array<{ value: string; matching: 'DELIMITED_WORD_SEQUENCE' | 'EXACT_CARD_NAME' }>; symbol?: string; powerAtMost?: number }
   | { kind: 'change_avatar_control'; targetId: string; controllerId: string }
+  | { kind: 'change_avatar_control_temporary'; targetId: string; controllerId: string }
   | { kind: 'cancel_chain_entry'; targetId: string }
   | { kind: 'cancel_pending_magic' };
 
@@ -461,6 +462,29 @@ const defaultHandlers: Record<EffectDefinition['kind'], EffectHandler> = {
     if (effect.kind !== 'change_avatar_control') return null;
     const moved = changeAvatarControl(state, plan.actorId, effect.targetId, effect.controllerId);
     return moved.ok ? moved.state : null;
+  },
+  change_avatar_control_temporary: ({ state, plan, effect }) => {
+    if (effect.kind !== 'change_avatar_control_temporary') return null;
+    const found = findAvatar(state, effect.targetId);
+    if (!found || found.avatar.controllerId === effect.controllerId) return null;
+    const targeting = preventTargeting(state, plan.actorId, effect.targetId);
+    if (targeting.prevented) return targeting.state;
+    const previousControllerId = found.avatar.controllerId;
+    const moved = changeAvatarControl(state, plan.actorId, effect.targetId, effect.controllerId);
+    if (!moved.ok) return null;
+    // The change lasts until the End Phase of the current turn (Rule Book 3.2
+    // "จนจบเทิร์น"); turnEngine restores the previous controller from this record.
+    const remaining = (moved.state.temporaryControlChanges ?? [])
+      .filter(entry => !(entry.instanceId === effect.targetId && entry.turnNumber === state.turnNumber));
+    return {
+      ...moved.state,
+      temporaryControlChanges: [...remaining, {
+        instanceId: effect.targetId,
+        previousControllerId,
+        temporaryControllerId: effect.controllerId,
+        turnNumber: state.turnNumber
+      }]
+    };
   },
   cancel_chain_entry: ({ state, effect }) => {
     if (effect.kind !== 'cancel_chain_entry' || !state.reactionWindow) return null;

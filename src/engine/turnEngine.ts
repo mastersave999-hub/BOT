@@ -1,6 +1,6 @@
 import { GameState, PlayerState, CardInstance, MagicSubtype } from './types';
 import { executeCardAbility, expireModifiersAt, clearEndOfTurnModifiers } from './abilityEngine';
-import { moveCardBetweenZones } from './gameRules';
+import { changeAvatarControl, moveCardBetweenZones } from './gameRules';
 import { runGameTransaction } from './gameTransaction';
 import { appendGameEvents } from './gameEvents';
 
@@ -135,6 +135,35 @@ export function finishEndPhaseTurn(state: GameState): GameState {
   const nextIndex = (state.currentTurnPlayerIndex + 1) % state.playerOrder.length;
   const nextPlayerId = state.playerOrder[nextIndex];
   let prepared = state;
+  // Temporary control changes (e.g. "แอสการ์ดคือสถานที่ไม่ใช่ผู้คน") expire at the
+  // End Phase of the turn they were made in: the Avatar returns to its previous
+  // controller while it is still on a field zone under the temporary controller.
+  for (const entry of state.temporaryControlChanges ?? []) {
+    if (entry.turnNumber !== state.turnNumber) continue;
+    const holderId = state.playerOrder.find(pid => state.players[pid]?.avatarZone.some(item => item.instanceId === entry.instanceId));
+    const avatar = holderId ? state.players[holderId].avatarZone.find(item => item.instanceId === entry.instanceId) : undefined;
+    if (!avatar || avatar.controllerId !== entry.temporaryControllerId) continue;
+    const restored = changeAvatarControl(prepared, activePlayerId, entry.instanceId, entry.previousControllerId);
+    if (restored.ok) {
+      prepared = restored.state;
+    } else {
+      // Rule gap: the previous controller's Avatar Zone may have filled up during
+      // the turn. The Avatar stays where it is and the failure is logged publicly.
+      prepared = {
+        ...prepared,
+        eventLog: [...prepared.eventLog, {
+          timestamp: Date.now(),
+          type: 'CONTROL_RESTORE_FAILED',
+          description: `ไม่สามารถคืนการควบคุม "${avatar.card.name}" ให้ ${state.players[entry.previousControllerId]?.name ?? entry.previousControllerId} ได้ (${restored.reason ?? 'unknown'})`,
+          actorId: activePlayerId
+        }]
+      };
+    }
+  }
+  prepared = {
+    ...prepared,
+    temporaryControlChanges: (prepared.temporaryControlChanges ?? []).filter(entry => entry.turnNumber !== state.turnNumber)
+  };
   const dueDestructions = state.playerOrder.flatMap(id => state.players[id]?.avatarZone ?? [])
     .filter(avatar => avatar.destroyAtEndPhase?.playerId === activePlayerId &&
       avatar.destroyAtEndPhase.turnNumber === state.turnNumber);
