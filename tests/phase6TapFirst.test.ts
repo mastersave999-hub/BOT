@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { Card, CardInstance, GameState, PlayerState } from '../src/engine/types';
-import { deriveLegalAvatarActions, deriveLegalHandActions } from '../src/engine/legalActions';
+import { deriveLegalAvatarActions, deriveLegalHandActions, describeBlockedHandReason } from '../src/engine/legalActions';
 import {
   beginDispatch,
   cancelHandSelection,
@@ -379,5 +379,33 @@ describe('phase 6 multiplayer 2-4 player state integrity', () => {
     // After the final approval the override applied and the revision advanced exactly once more.
     expect(current.stateRevision).toBe((state.stateRevision ?? 0) + 2);
     expect(current.pendingManualOverride).toBeUndefined();
+  });
+});
+
+describe('blocked hand-card reasons are truthful about the phase', () => {
+  const reactMagic = instance('react-0', 'p1', magicCard({ subtype: 'React', name: 'อย่าให้มีครั้งที่ 2' }));
+
+  it('a React Magic in Main Phase explains the missing response window, not "wait for Main Phase"', () => {
+    const state = makeState(2, { currentPhase: 'MAIN' });
+    state.players.p1.hand.push(reactMagic);
+    const reason = describeBlockedHandReason(state, 'p1', reactMagic);
+    expect(reason).toContain('React Magic');
+    expect(reason).toContain('ตอบโต้');
+    expect(reason).not.toBe(`รอ Main Phase (ตอนนี้ช่วง Main Phase)`);
+  });
+
+  it('a Normal Magic outside Main Phase still says which phase is expected', () => {
+    const state = makeState(2, { currentPhase: 'BATTLE' });
+    const normal = instance('normal-0', 'p1', magicCard({ subtype: 'Normal' }));
+    state.players.p1.hand.push(normal);
+    expect(describeBlockedHandReason(state, 'p1', normal)).toBe('รอ Main Phase (ตอนนี้ช่วง Battle Phase)');
+  });
+
+  it('a Normal Magic in Main Phase that already spent its Normal cast says so', () => {
+    const state = makeState(2, { currentPhase: 'MAIN' });
+    state.players.p1.usedMagicTypesThisTurn.add('Normal');
+    const normal = instance('normal-1', 'p1', magicCard({ subtype: 'Normal' }));
+    state.players.p1.hand.push(normal);
+    expect(describeBlockedHandReason(state, 'p1', normal)).toBe('Normal Magic ใช้ไปแล้วเทิร์นนี้');
   });
 });

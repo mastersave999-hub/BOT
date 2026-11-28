@@ -79,8 +79,9 @@ import {
 import { CardBack, CARD_BACK_SRC, ClassificationBadge, ClassificationDot, OrnamentDivider } from './botTheme';
 import {
   Swords, Shield, Flame, Play, RefreshCw,
-  CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List, Wrench
+  CheckCircle2, BookOpen, X, Sparkles, Skull, Info, List, Wrench, Pause
 } from 'lucide-react';
+import { clearLocalMatch, saveLocalMatch } from '../../engine/localMatchPersistence';
 
 interface PlaymatProps {
   initialState: GameState;
@@ -88,6 +89,10 @@ interface PlaymatProps {
   isHost?: boolean;
   /** When provided the match is played against a remote player instead of the built-in AI. */
   link?: RoomLink;
+  /** Local matches only: return to the main menu, discarding the saved match. */
+  onExitToMenu?: () => void;
+  /** Local matches only: rebuild the same match with fresh shuffles. */
+  onRestartMatch?: () => void;
 }
 
 function preserveOwnLifeCardIdentities(
@@ -397,7 +402,7 @@ const AvatarStatusChips: React.FC<{ avatar: CardInstance }> = ({ avatar }) => {
   );
 };
 
-export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, isHost = true, link }) => {
+export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, isHost = true, link, onExitToMenu, onRestartMatch }) => {
   const [gameState, setGameState] = useState<GameState>(() => recomputeContinuousAuras(initialState));
   const isCompactViewport = useCompactViewport();
   const [selectedAttackerId, setSelectedAttackerId] = useState<string | null>(null);
@@ -446,6 +451,12 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
   const [attackCommittedId, setAttackCommittedId] = useState<string | null>(null);
   // Token that invalidates in-flight AI turn steps when a new turn starts or the mat unmounts.
   const aiTurnTokenRef = useRef(0);
+  // Pause menu (local matches): freezes the AI loop and blocks the board behind an overlay.
+  const [isPaused, setIsPaused] = useState(false);
+  const pausedRef = useRef(false);
+  useEffect(() => {
+    pausedRef.current = isPaused;
+  }, [isPaused]);
 
   useEffect(() => {
     setAttackCommittedId(current => (current !== null && current !== selectedAttackerId ? null : current));
@@ -657,6 +668,36 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
     if (gameState === initialGameStateRef.current || gameState === baselineStateRef.current) return;
     link.send({ type: 'SYNC', state: gameState, winner: winnerName });
   }, [gameState, winnerName, link]);
+
+  // Local matches autosave so a page reload can resume the unfinished match (see HomeShell).
+  useEffect(() => {
+    if (isOnline) return;
+    if (winnerName) {
+      clearLocalMatch();
+      return;
+    }
+    saveLocalMatch(gameState, null);
+  }, [gameState, winnerName, isOnline]);
+
+  // Local AI opponent: it has no reaction strategy, so it must pass priority on its
+  // own. Without this, any window that opens while the AI holds priority (e.g. the
+  // player summons and the AI reacts first) hangs forever and blocks every action,
+  // including the manual effect resolver.
+  useEffect(() => {
+    if (isOnline || isPaused) return;
+    const window = gameState.reactionWindow;
+    if (!window || window.pendingReaction || window.priorityPlayerId !== opponentId) return;
+    const timer = setTimeout(() => {
+      const result = passReactionPriority(gameState, opponentId);
+      if ('reason' in result) return;
+      const loggedState = result.logs?.length
+        ? appendLogs(result.state, result.logs, 'REACTION', opponentId)
+        : result.state;
+      if (result.pendingAction) finishDeferredReactionAction(loggedState, result.pendingAction);
+      else setGameState(loggedState);
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [gameState, isOnline, opponentId, isPaused]);
 
   const leaveMatch = () => {
     link?.close();
@@ -1220,9 +1261,19 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
 
   const runAiTurnSteps = async (startState: GameState, resumeAfterReaction: boolean, savedLogs: string[], token: number) => {
     const alive = () => aiTurnTokenRef.current === token;
+    // While the match is paused the AI waits at the next step boundary instead of
+    // advancing, so the pause menu can freeze an in-progress AI turn.
     const pause = (ms: number) =>
       new Promise<boolean>(resolve => {
-        setTimeout(() => resolve(alive()), ms);
+        const wait = () => {
+          if (!alive()) return resolve(false);
+          if (pausedRef.current) {
+            setTimeout(wait, 250);
+            return;
+          }
+          setTimeout(() => resolve(alive()), ms);
+        };
+        wait();
       });
     const think = () => pause(AI_STEP_MIN_MS + Math.floor(Math.random() * AI_STEP_JITTER_MS));
 
@@ -2294,6 +2345,18 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             <span className="hidden sm:inline">Keyword</span>
           </button>
 
+          {!isOnline && (
+            <button
+              type="button"
+              onClick={() => setIsPaused(true)}
+              aria-label="หยุดเกมชั่วคราว (Pause)"
+              className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-medium flex items-center gap-1 border border-slate-700"
+            >
+              <Pause className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">Pause</span>
+            </button>
+          )}
+
           {isMyTurn ? (
             gameState.currentPhase === 'DRAW' ? (
               <button
@@ -3085,6 +3148,48 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
         </div>
       )}
 
+      {/* Pause menu (local matches): the full-screen overlay also blocks every board action. */}
+      {isPaused && !winnerName && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="เมนูหยุดเกมชั่วคราว"
+          className="fixed inset-0 z-[70] bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4"
+        >
+          <div className="bg-slate-900 border-2 border-amber-500/60 rounded-2xl max-w-sm w-full p-6 text-center space-y-3 shadow-2xl">
+            <Pause className="w-10 h-10 text-amber-400 mx-auto" />
+            <h2 className="text-xl font-black text-amber-400">พักเกม</h2>
+            <p className="text-xs text-slate-400">
+              {gameState.mode === 'DUEL' ? 'Duel' : 'อัดมั่ว'} • เทิร์น {gameState.turnNumber} • รอบ {gameState.roundNumber}
+            </p>
+            <button
+              onClick={() => setIsPaused(false)}
+              className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm"
+            >
+              เล่นต่อ
+            </button>
+            {onRestartMatch && (
+              <button
+                onClick={onRestartMatch}
+                className="w-full py-2.5 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-sm flex items-center justify-center gap-2"
+              >
+                <RefreshCw className="w-4 h-4" />
+                เริ่มเกมใหม่ (Restart)
+              </button>
+            )}
+            {onExitToMenu && (
+              <button
+                onClick={onExitToMenu}
+                className="w-full py-2.5 rounded-xl border border-red-500/50 bg-red-950/40 hover:bg-red-900/50 text-red-200 font-bold text-sm"
+              >
+                ออกจากเกม (กลับหน้าหลัก)
+              </button>
+            )}
+            <p className="text-[10px] text-slate-500">เกมถูกบันทึกอัตโนมัติ — ปิดหน้าเว็บแล้วกลับมาเล่นต่อได้</p>
+          </div>
+        </div>
+      )}
+
       {/* Game Over Victory Modal */}
       {winnerName && (
         <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
@@ -3093,7 +3198,7 @@ export const Playmat: React.FC<PlaymatProps> = ({ initialState, currentUserId, i
             <h2 className="text-2xl font-black text-amber-400">จบการประลอง!</h2>
             <p className="text-sm text-slate-200">ผู้ชนะคือ: <b className="text-emerald-400">{winnerName}</b></p>
             <button
-              onClick={leaveMatch}
+              onClick={onExitToMenu ?? leaveMatch}
               className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm"
             >
               กลับสู่หน้าหลัก

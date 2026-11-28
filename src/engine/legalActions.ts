@@ -170,9 +170,12 @@ export function describeBlockedHandReason(
     if (normalTreatedAsReact) {
       const reactBlock = validateMagicPlay(state, playerId, 'React', true);
       if (reactBlock) {
-        return state.currentPhase !== 'BATTLE' ? waitingForMain : 'รอช่วงตอบโต้ที่ใช้ได้';
+        // Outside Main Phase the React timing is the only path; inside Main Phase
+        // the Normal cast below is what matters, so diagnose that instead.
+        if (!inMainPhase) return waitingForMain;
+      } else {
+        return 'ร่ายตอบโต้ (React Cast) พร้อมใช้';
       }
-      return 'ร่ายตอบโต้ (React Cast) พร้อมใช้';
     }
     if (!inMainPhase) return waitingForMain;
     const subtype = effectiveMagicSubtype(handCard.card);
@@ -180,7 +183,12 @@ export function describeBlockedHandReason(
     if (!block) return 'ร่ายเวทย์ (Cast) พร้อมใช้';
     if (state.reactionWindow) return 'กำลังแก้ผลการ์ดอื่นอยู่';
     if (!canUseMagicTypeThisTurn(player, subtype)) return `${subtype} Magic ใช้ไปแล้วเทิร์นนี้`;
-    return waitingForMain;
+    // Already in Main Phase here, so "waiting for Main Phase" would be nonsense —
+    // a React Magic blocked in Main Phase simply has no response window to live in.
+    if (subtype === 'React' && !state.reactionWindow) {
+      return 'React Magic ใช้ได้เฉพาะตอนตอบโต้การ์ดฝ่ายตรงข้ามเท่านั้น (ไม่สามารถร่ายใน Main Phase ได้)';
+    }
+    return 'เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้';
   }
 
   return 'เอนจินยังไม่อนุญาตการกระทำสำหรับการ์ดนี้';
